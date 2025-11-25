@@ -23,17 +23,28 @@ import numpy as np
 import torch
 import os
 import time
+import warnings
 
 from utils.model import PolicyNet
 from utils.test_worker import TestWorker
 from test_parameter import *
 import csv
 
-def run_test():
-    device = torch.device('cuda') if USE_GPU else torch.device('cpu')
-    global_network = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN).to(device)
+EVAL_USE_GPU = USE_GPU and NUM_GPU > 0 and torch.cuda.is_available()
 
-    if device == 'cuda':
+if USE_GPU and NUM_GPU > 0 and not torch.cuda.is_available():
+    warnings.warn("USE_GPU is True but CUDA is unavailable; falling back to CPU.")
+
+def run_test():
+    device = torch.device('cuda') if EVAL_USE_GPU else torch.device('cpu')
+    global_network = PolicyNet(
+        NODE_INPUT_DIM,
+        EMBEDDING_DIM,
+        NUM_ANGLES_BIN,
+        use_trajectory=USE_TRAJECTORY
+    ).to(device)
+
+    if device.type == 'cuda':
         checkpoint = torch.load(f'{load_path}/checkpoint.pth')
     else:
         checkpoint = torch.load(f'{load_path}/checkpoint.pth', map_location=torch.device('cpu'))
@@ -109,11 +120,11 @@ def run_test():
                         ray.kill(a)
 
 
-@ray.remote(num_cpus=1, num_gpus=NUM_GPU/NUM_META_AGENT)
+@ray.remote(num_cpus=1, num_gpus=(NUM_GPU/NUM_META_AGENT) if EVAL_USE_GPU else 0)
 class Runner(object):
     def __init__(self, meta_agent_id):
         self.meta_agent_id = meta_agent_id
-        self.device = torch.device('cuda') if USE_GPU else torch.device('cpu')
+        self.device = torch.device('cuda') if EVAL_USE_GPU else torch.device('cpu')
         self.local_network = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN)
         self.local_network.to(self.device)
 

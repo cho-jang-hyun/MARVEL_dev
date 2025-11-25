@@ -56,11 +56,12 @@ INITIAL_EXPLORED_RATE = 0.90
 # Network parameters
 NODE_INPUT_DIM = 6
 EMBEDDING_DIM = 128
+USE_TRAJECTORY = True # False
 
 # Graph parameters
 NUM_NODE_NEIGHBORS = 5
 K_SIZE = NUM_NODE_NEIGHBORS**2   # the number of neighboring nodes
 
 # GPU usage
-USE_GPU = False  
+USE_GPU = True # False  
 NUM_GPU = 0
