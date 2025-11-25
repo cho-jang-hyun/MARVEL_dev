@@ -179,7 +179,7 @@ class Agent:
         self.node_coords, self.utility, self.guidepost, self.occupancy, self.adjacent_matrix, self.current_index, self.neighbor_indices, self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.path_coords = \
             self.node_manager.get_all_node_graph(self.location, robot_locations)
 
-    def get_observation(self, pad=True):
+    def get_observation(self, pad=True, robot_locations=None, trajectory_buffer=None):
         node_coords = self.node_coords
         node_utility = self.utility.reshape(-1, 1)
         node_guidepost = self.guidepost.reshape(-1, 1)
@@ -242,12 +242,22 @@ class Agent:
             padding = torch.nn.ConstantPad1d((0, K_SIZE - k_size), 1)
             edge_padding_mask = padding(edge_padding_mask)
 
-        return [node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, all_node_frontier_distribution, node_heading_visited, node_neighbor_best_headings]
+        # Process trajectory information if available
+        detected_trajectories = None
+        trajectory_mask = None
+        if robot_locations is not None and trajectory_buffer is not None:
+            detected_trajectories, trajectory_mask = self._get_detected_trajectories(
+                robot_locations, trajectory_buffer
+            )
+
+        return [node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask,
+                all_node_frontier_distribution, node_heading_visited, node_neighbor_best_headings,
+                detected_trajectories, trajectory_mask]
 
     def select_next_waypoint(self, observation, greedy = False):
-        _, _, _, _, current_edge, _, _, _, _ = observation
+        _, _, _, _, current_edge, _, _, _, _, _, _ = observation
         with torch.no_grad():
-            logp = self.policy_net(*observation)
+            logp = self.policy_net(*observation[:9], detected_trajectories=observation[9], trajectory_mask=observation[10])
 
         if greedy:
             action_index = torch.argmax(logp, 1).long()
@@ -352,7 +362,7 @@ class Agent:
             x = location_cell[0] + self.sensor_range/CELL_SIZE * np.cos(np.radians(angle))
             y = location_cell[1] + self.sensor_range/CELL_SIZE * np.sin(np.radians(angle))
             sector_points.append(Point(x, y))
-        sector_points.append(robot_point) 
+        sector_points.append(robot_point)
         # Create the sector polygon
         sector = Polygon(sector_points)
 
@@ -364,12 +374,116 @@ class Agent:
                 [int(round(x)) for x in x_coords],
                 shape=mask.shape
             )
-        
+
         free_connected_map = get_free_and_connected_map(location, self.map_info)
 
         mask[rr, cc] = (free_connected_map[rr, cc] == free_connected_map[location_cell[1], location_cell[0]])
-       
+
         return mask
+
+    def get_robots_in_fov(self, robot_locations):
+        """
+        Detect other robots within the agent's field of view (FOV).
+
+        Args:
+            robot_locations (np.ndarray): Array of all robot locations, shape (n_agents, 2)
+
+        Returns:
+            List[int]: List of agent IDs that are within FOV and sensor range
+        """
+        detected_robots = []
+
+        for robot_id, robot_location in enumerate(robot_locations):
+            # Skip self
+            if robot_id == self.id:
+                continue
+
+            # Calculate distance
+            distance = np.linalg.norm(robot_location - self.location)
+
+            # Check if within sensor range
+            if distance > self.sensor_range:
+                continue
+
+            # Calculate angle to the other robot
+            delta = robot_location - self.location
+            angle_to_robot = np.degrees(np.arctan2(delta[1], delta[0])) % 360
+
+            # Calculate angle difference considering FOV
+            angle_diff = (angle_to_robot - self.heading + 180) % 360 - 180
+
+            # Check if within FOV
+            if np.abs(angle_diff) <= self.fov / 2:
+                detected_robots.append(robot_id)
+
+        return detected_robots
+
+    def _get_detected_trajectories(self, robot_locations, trajectory_buffer):
+        """
+        Extract trajectories of detected robots within FOV and convert to observation format.
+
+        Args:
+            robot_locations (np.ndarray): Array of all robot locations, shape (n_agents, 2)
+            trajectory_buffer (dict): Dictionary mapping agent_id to deque of (x, y, heading, velocity)
+
+        Returns:
+            detected_trajectories: torch.Tensor of shape [1, MAX_DETECTED_AGENTS, seq_len, feature_dim]
+            trajectory_mask: torch.Tensor of shape [1, MAX_DETECTED_AGENTS], True for padded agents
+        """
+        # Detect robots in FOV
+        detected_robot_ids = self.get_robots_in_fov(robot_locations)
+
+        # Initialize output tensors
+        max_agents = MAX_DETECTED_AGENTS
+        seq_len = TRAJECTORY_HISTORY_LENGTH
+        feature_dim = TRAJECTORY_FEATURE_DIM
+
+        trajectories = np.zeros((max_agents, seq_len, feature_dim), dtype=np.float32)
+        mask = np.ones(max_agents, dtype=bool)  # True means padded
+
+        # Process each detected robot
+        for i, robot_id in enumerate(detected_robot_ids[:max_agents]):
+            if robot_id in trajectory_buffer:
+                trajectory = list(trajectory_buffer[robot_id])
+
+                # Pad if trajectory is shorter than seq_len
+                if len(trajectory) < seq_len:
+                    # Pad with zeros at the beginning
+                    padding_length = seq_len - len(trajectory)
+                    trajectory = [(0, 0, 0, 0)] * padding_length + trajectory
+
+                # Convert to numpy array
+                trajectory_array = np.array(trajectory[-seq_len:])  # Take last seq_len steps
+
+                # Extract features: (x, y, heading, velocity)
+                x = trajectory_array[:, 0]
+                y = trajectory_array[:, 1]
+                heading = trajectory_array[:, 2]
+                velocity = trajectory_array[:, 3]
+
+                # Convert to relative coordinates (relative to current agent)
+                dx = x - self.location[0]
+                dy = y - self.location[1]
+
+                # Normalize coordinates
+                dx_norm = dx / (UPDATING_MAP_SIZE / 2)
+                dy_norm = dy / (UPDATING_MAP_SIZE / 2)
+
+                # Normalize heading to [0, 1]
+                heading_norm = heading / 360.0
+
+                # Normalize velocity (assuming max velocity is 1.0 * NUM_SIM_STEPS)
+                velocity_norm = velocity / (VELOCITY * NUM_SIM_STEPS)
+
+                # Stack features
+                trajectories[i] = np.stack([dx_norm, dy_norm, heading_norm, velocity_norm], axis=1)
+                mask[i] = False  # This agent is not padded
+
+        # Convert to torch tensors
+        detected_trajectories = torch.FloatTensor(trajectories).unsqueeze(0).to(self.device)
+        trajectory_mask = torch.BoolTensor(mask).unsqueeze(0).to(self.device)
+
+        return detected_trajectories, trajectory_mask
     
     def calculate_overlap_reward(self, current_robot_location, all_robots_locations, robot_headings_list):
         ## Robot heading list in degrees
@@ -394,7 +508,7 @@ class Agent:
         return overlap_reward
         
     def save_observation(self, observation):
-        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings = observation
+        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, detected_trajectories, trajectory_mask = observation
         self.episode_buffer[0] += node_inputs
         self.episode_buffer[1] += node_padding_mask.bool()
         self.episode_buffer[2] += edge_mask.bool()
@@ -404,6 +518,7 @@ class Agent:
         self.episode_buffer[6] += frontier_distribution
         self.episode_buffer[7] += heading_visited
         self.episode_buffer[38] += neighbor_best_headings
+        # Note: detected_trajectories and trajectory_mask are not saved to episode_buffer for now
 
     def save_action(self, action_index):
         self.episode_buffer[8] += action_index.reshape(1, 1, 1)
@@ -426,7 +541,7 @@ class Agent:
         self.episode_buffer[36] = copy.deepcopy(self.episode_buffer[35])[1:]
         self.episode_buffer[39] = copy.deepcopy(self.episode_buffer[38])[1:]
 
-        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings = observation
+        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, detected_trajectories, trajectory_mask = observation
         self.episode_buffer[11] += node_inputs
         self.episode_buffer[12] += node_padding_mask.bool()
         self.episode_buffer[13] += edge_mask.bool()

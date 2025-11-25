@@ -27,7 +27,7 @@ gifs_path = f'gifs/{FOLDER_NAME}'
 
 # save training data
 SUMMARY_WINDOW = 32
-LOAD_MODEL = True  # do you want to load the model trained before
+LOAD_MODEL = False  # do you want to load the model trained before
 SAVE_IMG_GAP = 1000
 NUM_EPISODE_BUFFER = 40
 
@@ -76,6 +76,12 @@ NUM_META_AGENT = 18
 # network parameters
 NODE_INPUT_DIM = 6
 EMBEDDING_DIM = 128
+
+# Trajectory tracking parameters
+TRAJECTORY_HISTORY_LENGTH = 10  # Number of recent steps to track
+TRAJECTORY_FEATURE_DIM = 4      # (dx, dy, heading, velocity)
+TRAJECTORY_EMBEDDING_DIM = 64   # Trajectory encoder output dimension
+MAX_DETECTED_AGENTS = N_AGENTS - 1  # Maximum number of detectable agents in FOV
 
 # Graph parameters
 NUM_NODE_NEIGHBORS = 5

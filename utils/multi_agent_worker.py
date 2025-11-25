@@ -1,8 +1,8 @@
 """
 A multi-agent worker class for coordinating multi-robots exploration in an indoor environment.
 
-This class manages a group of agents performing collaborative exploration, handling 
-their movement, observation, reward calculation, and simulation steps. It supports 
+This class manages a group of agents performing collaborative exploration, handling
+their movement, observation, reward calculation, and simulation steps. It supports
 features like collision avoidance, trajectory planning, and performance tracking.
 
 Key functionalities:
@@ -19,10 +19,12 @@ Attributes:
     robot_list (List[Agent]): List of agents in the exploration team
     episode_buffer (List): Buffer for storing episode data
     perf_metrics (dict): Performance metrics for the episode
+    trajectory_buffer (dict): Stores recent trajectory history for each agent
 """
 import matplotlib.pyplot as plt
 from copy import deepcopy
 from matplotlib.patches import Wedge, FancyArrowPatch
+from collections import deque
 
 from utils.env import Env
 from utils.agent import Agent
@@ -59,6 +61,19 @@ class MultiAgentWorker:
         for i in range(NUM_EPISODE_BUFFER):
             self.episode_buffer.append([])
 
+        # Initialize trajectory buffer for each agent
+        self.trajectory_buffer = {}
+        for i in range(self.n_agents):
+            self.trajectory_buffer[i] = deque(maxlen=TRAJECTORY_HISTORY_LENGTH)
+            # Initialize with starting positions (x, y, heading, velocity=0)
+            start_location = self.env.robot_locations[i]
+            self.trajectory_buffer[i].append((
+                start_location[0],
+                start_location[1],
+                self.env.angles[i],
+                0.0
+            ))
+
     def run_episode(self):
         done = False
         for robot in self.robot_list:
@@ -73,7 +88,10 @@ class MultiAgentWorker:
             next_node_index_list = []
             next_heading_index_list = []
             for robot in self.robot_list:
-                observation = robot.get_observation()
+                observation = robot.get_observation(
+                    robot_locations=self.env.robot_locations,
+                    trajectory_buffer=self.trajectory_buffer
+                )
                 ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, self.env.robot_locations)
 
                 robot.save_observation(observation)
@@ -150,6 +168,21 @@ class MultiAgentWorker:
             for robot, next_location, next_node_index in zip(self.robot_list, selected_locations, next_node_index_list):
                 self.env.final_sim_step(next_location, robot.id)
 
+                # Update trajectory buffer
+                prev_trajectory = self.trajectory_buffer[robot.id][-1] if len(self.trajectory_buffer[robot.id]) > 0 else None
+                if prev_trajectory is not None:
+                    prev_x, prev_y = prev_trajectory[0], prev_trajectory[1]
+                    velocity = np.linalg.norm(next_location - np.array([prev_x, prev_y])) / NUM_SIM_STEPS
+                else:
+                    velocity = 0.0
+
+                self.trajectory_buffer[robot.id].append((
+                    next_location[0],
+                    next_location[1],
+                    robot.heading,
+                    velocity
+                ))
+
                 node = self.node_manager.nodes_dict.find((next_location[0], next_location[1])).data
                 observable_frontiers = node.observable_frontiers
                 observable_frontiers = np.array(list(observable_frontiers))
@@ -205,7 +238,10 @@ class MultiAgentWorker:
 
         # save episode buffer
         for robot in self.robot_list:
-            observation = robot.get_observation()
+            observation = robot.get_observation(
+                robot_locations=self.env.robot_locations,
+                trajectory_buffer=self.trajectory_buffer
+            )
             ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, self.env.robot_locations)
             robot.save_next_observations(observation, next_node_index_list)
             robot.save_next_ground_truth_observations(ground_truth_observation)

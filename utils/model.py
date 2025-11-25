@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+import numpy as np
 
 class SingleHeadAttention(nn.Module):
     def __init__(self, embedding_dim):
@@ -195,9 +196,123 @@ class Decoder(nn.Module):
         return tgt, w
 
 
+class PositionalEncoding(nn.Module):
+    """Positional encoding for temporal sequences."""
+    def __init__(self, d_model, max_len=100):
+        super(PositionalEncoding, self).__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        # x shape: [batch, seq_len, d_model]
+        return x + self.pe[:, :x.size(1), :]
+
+
+class TrajectoryEncoder(nn.Module):
+    """
+    Encodes detected robot trajectories using temporal transformer.
+
+    Input:
+        detected_trajectories: [batch, max_detected_agents, seq_len, feature_dim]
+        trajectory_mask: [batch, max_detected_agents] - True for padded agents
+
+    Output:
+        trajectory_embedding: [batch, trajectory_embedding_dim]
+    """
+    def __init__(self, feature_dim, trajectory_embedding_dim, seq_len, n_head=4, n_layer=2):
+        super(TrajectoryEncoder, self).__init__()
+        self.feature_dim = feature_dim
+        self.trajectory_embedding_dim = trajectory_embedding_dim
+        self.seq_len = seq_len
+
+        # Project trajectory features to embedding dimension
+        self.feature_projection = nn.Linear(feature_dim, trajectory_embedding_dim)
+
+        # Positional encoding for temporal information
+        self.positional_encoding = PositionalEncoding(trajectory_embedding_dim, max_len=seq_len)
+
+        # Temporal transformer encoder for each agent's trajectory
+        self.temporal_encoder = Encoder(embedding_dim=trajectory_embedding_dim, n_head=n_head, n_layer=n_layer)
+
+        # Agent aggregation layer
+        self.agent_attention = MultiHeadAttention(trajectory_embedding_dim, n_heads=n_head)
+        self.agent_aggregation = nn.Linear(trajectory_embedding_dim, trajectory_embedding_dim)
+
+        # Output projection
+        self.output_layer = nn.Sequential(
+            nn.Linear(trajectory_embedding_dim, trajectory_embedding_dim),
+            nn.ReLU(),
+            nn.Linear(trajectory_embedding_dim, trajectory_embedding_dim)
+        )
+
+    def forward(self, detected_trajectories, trajectory_mask):
+        """
+        Args:
+            detected_trajectories: [batch, max_detected_agents, seq_len, feature_dim]
+            trajectory_mask: [batch, max_detected_agents] - True for padded agents
+
+        Returns:
+            trajectory_embedding: [batch, trajectory_embedding_dim]
+        """
+        batch_size, max_agents, seq_len, feature_dim = detected_trajectories.shape
+
+        # Reshape to process all agents together
+        # [batch * max_agents, seq_len, feature_dim]
+        trajectories_flat = detected_trajectories.reshape(batch_size * max_agents, seq_len, feature_dim)
+
+        # Project features to embedding dimension
+        # [batch * max_agents, seq_len, trajectory_embedding_dim]
+        embedded = self.feature_projection(trajectories_flat)
+
+        # Add positional encoding
+        embedded = self.positional_encoding(embedded)
+
+        # Apply temporal transformer encoder
+        # [batch * max_agents, seq_len, trajectory_embedding_dim]
+        temporal_features = self.temporal_encoder(embedded)
+
+        # Take the last timestep as the trajectory representation
+        # [batch * max_agents, trajectory_embedding_dim]
+        agent_representations = temporal_features[:, -1, :]
+
+        # Reshape back to separate agents
+        # [batch, max_agents, trajectory_embedding_dim]
+        agent_representations = agent_representations.reshape(batch_size, max_agents, self.trajectory_embedding_dim)
+
+        # Prepare mask for attention (expand dimensions)
+        # [batch, 1, max_agents]
+        attention_mask = trajectory_mask.unsqueeze(1)
+
+        # Apply multi-head attention across agents
+        # Query: mean of all agent representations (or learnable query)
+        query = agent_representations.mean(dim=1, keepdim=True)  # [batch, 1, trajectory_embedding_dim]
+
+        # [batch, 1, trajectory_embedding_dim]
+        aggregated, _ = self.agent_attention(
+            q=query,
+            k=agent_representations,
+            v=agent_representations,
+            key_padding_mask=attention_mask
+        )
+
+        # Squeeze and apply output layer
+        # [batch, trajectory_embedding_dim]
+        aggregated = aggregated.squeeze(1)
+        trajectory_embedding = self.output_layer(aggregated)
+
+        return trajectory_embedding
+
+
 class PolicyNet(nn.Module):
-    def __init__(self, node_dim, embedding_dim, num_angles_bin):
+    def __init__(self, node_dim, embedding_dim, num_angles_bin, use_trajectory=True):
         super(PolicyNet, self).__init__()
+
+        self.use_trajectory = use_trajectory
 
         # Graph Encoder
         self.initial_embedding = nn.Linear(node_dim, embedding_dim)
@@ -206,6 +321,19 @@ class PolicyNet(nn.Module):
         # Local frontiers distribution encoder
         self.frontiers_embedding =  nn.Conv1d(num_angles_bin, embedding_dim, kernel_size=3, padding=1)
         self.node_frontiers_embedding = nn.Linear(embedding_dim * 2, embedding_dim)
+
+        # Trajectory encoder
+        if use_trajectory:
+            from parameter import TRAJECTORY_FEATURE_DIM, TRAJECTORY_EMBEDDING_DIM, TRAJECTORY_HISTORY_LENGTH
+            self.trajectory_encoder = TrajectoryEncoder(
+                feature_dim=TRAJECTORY_FEATURE_DIM,
+                trajectory_embedding_dim=TRAJECTORY_EMBEDDING_DIM,
+                seq_len=TRAJECTORY_HISTORY_LENGTH,
+                n_head=4,
+                n_layer=2
+            )
+            # Fusion layer to combine current state with trajectory information
+            self.trajectory_fusion = nn.Linear(embedding_dim + TRAJECTORY_EMBEDDING_DIM, embedding_dim)
 
         # Decoder
         self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1)
@@ -233,13 +361,22 @@ class PolicyNet(nn.Module):
 
         return enhanced_node_feature
 
-    def decode_state(self, enhanced_node_feature, current_index, node_padding_mask):
+    def decode_state(self, enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding=None):
         embedding_dim = enhanced_node_feature.size()[2]
         current_node_feature = torch.gather(enhanced_node_feature, 1,
                                                   current_index.repeat(1, 1, embedding_dim))
         enhanced_current_node_feature, _ = self.decoder(current_node_feature,
                                                                     enhanced_node_feature,
                                                                     node_padding_mask)
+
+        # Fuse with trajectory information if available
+        if self.use_trajectory and trajectory_embedding is not None:
+            # trajectory_embedding: [batch, trajectory_embedding_dim]
+            # Expand to match enhanced_current_node_feature shape: [batch, 1, trajectory_embedding_dim]
+            trajectory_embedding_expanded = trajectory_embedding.unsqueeze(1)
+            # Concatenate and fuse
+            fused = torch.cat([enhanced_current_node_feature, trajectory_embedding_expanded], dim=-1)
+            enhanced_current_node_feature = self.trajectory_fusion(fused)
 
         return current_node_feature, enhanced_current_node_feature
 
@@ -273,10 +410,17 @@ class PolicyNet(nn.Module):
         return logp
 
     def forward(self, node_inputs, node_padding_mask, edge_mask, current_index,
-                current_edge, edge_padding_mask, frontier_distribution, headings_visited, neighbor_best_headings):
+                current_edge, edge_padding_mask, frontier_distribution, headings_visited, neighbor_best_headings,
+                detected_trajectories=None, trajectory_mask=None):
         enhanced_node_feature = self.encode_graph(node_inputs, node_padding_mask, edge_mask, frontier_distribution)
+
+        # Encode trajectory information if available
+        trajectory_embedding = None
+        if self.use_trajectory and detected_trajectories is not None and trajectory_mask is not None:
+            trajectory_embedding = self.trajectory_encoder(detected_trajectories, trajectory_mask)
+
         current_node_feature, enhanced_current_node_feature = self.decode_state(
-            enhanced_node_feature, current_index, node_padding_mask)
+            enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding)
         logp = self.output_policy(current_node_feature, enhanced_current_node_feature,
                                   enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings)
 
@@ -284,8 +428,10 @@ class PolicyNet(nn.Module):
 
 
 class QNet(nn.Module):
-    def __init__(self, node_dim, embedding_dim, num_angles_bin, train_algo):
+    def __init__(self, node_dim, embedding_dim, num_angles_bin, train_algo, use_trajectory=True):
         super(QNet, self).__init__()
+
+        self.use_trajectory = use_trajectory
 
         # Graph encoder
         self.encoder = Encoder(embedding_dim=embedding_dim, n_head=4, n_layer=6)
@@ -293,6 +439,19 @@ class QNet(nn.Module):
         # Local frontiers distribution encoder
         self.frontiers_embedding = nn.Conv1d(num_angles_bin, embedding_dim, kernel_size=3, padding=1)
         self.node_frontiers_embedding = nn.Linear(embedding_dim * 2, embedding_dim)
+
+        # Trajectory encoder
+        if use_trajectory:
+            from parameter import TRAJECTORY_FEATURE_DIM, TRAJECTORY_EMBEDDING_DIM, TRAJECTORY_HISTORY_LENGTH
+            self.trajectory_encoder = TrajectoryEncoder(
+                feature_dim=TRAJECTORY_FEATURE_DIM,
+                trajectory_embedding_dim=TRAJECTORY_EMBEDDING_DIM,
+                seq_len=TRAJECTORY_HISTORY_LENGTH,
+                n_head=4,
+                n_layer=2
+            )
+            # Fusion layer to combine current state with trajectory information
+            self.trajectory_fusion = nn.Linear(embedding_dim + TRAJECTORY_EMBEDDING_DIM, embedding_dim)
 
         # Decoder
         self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1)
@@ -333,13 +492,22 @@ class QNet(nn.Module):
 
         return enhanced_node_feature
 
-    def decode_state(self, enhanced_node_feature, current_index, node_padding_mask):
+    def decode_state(self, enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding=None):
         embedding_dim = enhanced_node_feature.size()[2]
         current_node_feature = torch.gather(enhanced_node_feature, 1,
                                                   current_index.repeat(1, 1, embedding_dim))
         enhanced_current_node_feature, _ = self.decoder(current_node_feature,
                                                                     enhanced_node_feature,
                                                                     node_padding_mask)
+
+        # Fuse with trajectory information if available
+        if self.use_trajectory and trajectory_embedding is not None:
+            # trajectory_embedding: [batch, trajectory_embedding_dim]
+            # Expand to match enhanced_current_node_feature shape: [batch, 1, trajectory_embedding_dim]
+            trajectory_embedding_expanded = trajectory_embedding.unsqueeze(1)
+            # Concatenate and fuse
+            fused = torch.cat([enhanced_current_node_feature, trajectory_embedding_expanded], dim=-1)
+            enhanced_current_node_feature = self.trajectory_fusion(fused)
 
         return current_node_feature, enhanced_current_node_feature
 
@@ -384,9 +552,17 @@ class QNet(nn.Module):
         return q_values
 
     def forward(self, node_inputs, node_padding_mask, edge_mask, current_index,
-                current_edge, edge_padding_mask, frontier_distribution, headings_visited, neighbor_best_headings, all_agent_indices=None, all_agent_next_indices=None):
+                current_edge, edge_padding_mask, frontier_distribution, headings_visited, neighbor_best_headings,
+                all_agent_indices=None, all_agent_next_indices=None, detected_trajectories=None, trajectory_mask=None):
         enhanced_node_feature = self.encode_graph(node_inputs, node_padding_mask, edge_mask, frontier_distribution)
-        current_node_feature, enhanced_current_node_feature = self.decode_state(enhanced_node_feature, current_index, node_padding_mask)
+
+        # Encode trajectory information if available
+        trajectory_embedding = None
+        if self.use_trajectory and detected_trajectories is not None and trajectory_mask is not None:
+            trajectory_embedding = self.trajectory_encoder(detected_trajectories, trajectory_mask)
+
+        current_node_feature, enhanced_current_node_feature = self.decode_state(
+            enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding)
         q_values = self.output_q(current_node_feature, enhanced_current_node_feature,
                                  enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings, current_index, all_agent_indices, all_agent_next_indices)
         return q_values
