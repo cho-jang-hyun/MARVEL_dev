@@ -56,7 +56,14 @@ INITIAL_EXPLORED_RATE = 0.90
 # Network parameters
 NODE_INPUT_DIM = 6
 EMBEDDING_DIM = 128
-USE_TRAJECTORY = True # False
+USE_TRAJECTORY = True  # Enable trajectory encoder
+
+# Trajectory tracking parameters (same as parameter.py)
+TRAJECTORY_HISTORY_LENGTH = 10  # Number of recent steps to track
+TRAJECTORY_FEATURE_DIM = 4      # (dx, dy, heading, velocity)
+TRAJECTORY_EMBEDDING_DIM = 64   # Trajectory encoder output dimension
+# N_AGENTS will be determined dynamically in test, so we use max value
+MAX_DETECTED_AGENTS = 10  # Maximum number of detectable agents in FOV (conservative estimate)
 
 # Graph parameters
 NUM_NODE_NEIGHBORS = 5

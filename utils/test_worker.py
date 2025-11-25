@@ -3,6 +3,7 @@ from copy import deepcopy
 from matplotlib.patches import Wedge, FancyArrowPatch
 from shapely.geometry import Point, Polygon
 from skimage.draw import polygon as sk_polygon
+from collections import deque
 
 from utils.env_test import Env
 from utils.agent import Agent
@@ -10,7 +11,7 @@ from utils.utils import *
 from utils.node_manager import NodeManager
 from utils.ground_truth_node_manager import GroundTruthNodeManager
 from utils.model import PolicyNet
-from utils.motion_model import compute_allowable_heading  
+from utils.motion_model import compute_allowable_heading
 from test_parameter import *
 
 if not os.path.exists(gifs_path):
@@ -37,6 +38,19 @@ class TestWorker:
                            range(self.n_agents)]
 
         self.perf_metrics = dict()
+
+        # Initialize trajectory buffer for each agent
+        self.trajectory_buffer = {}
+        for i in range(self.n_agents):
+            self.trajectory_buffer[i] = deque(maxlen=TRAJECTORY_HISTORY_LENGTH)
+            # Initialize with starting positions (x, y, heading, velocity=0)
+            start_location = self.env.robot_locations[i]
+            self.trajectory_buffer[i].append((
+                start_location[0],
+                start_location[1],
+                self.env.angles[i],
+                0.0
+            ))
 
     def run_episode(self):
         done = False
@@ -66,8 +80,12 @@ class TestWorker:
             next_node_index_list = []
             next_heading_index_list = []
             for robot in self.robot_list:
-                observation = robot.get_observation(pad=False)
-              
+                observation = robot.get_observation(
+                    pad=False,
+                    robot_locations=self.env.robot_locations,
+                    trajectory_buffer=self.trajectory_buffer
+                )
+
                 next_location, next_node_index, _, next_heading_index = robot.select_next_waypoint(observation, greedy=self.greedy)
 
                 selected_locations.append(next_location)
@@ -137,6 +155,21 @@ class TestWorker:
 
             for robot, next_location, next_node_index in zip(self.robot_list, selected_locations, next_node_index_list):
                 self.env.final_sim_step(next_location, robot.id)
+
+                # Update trajectory buffer
+                prev_trajectory = self.trajectory_buffer[robot.id][-1] if len(self.trajectory_buffer[robot.id]) > 0 else None
+                if prev_trajectory is not None:
+                    prev_x, prev_y = prev_trajectory[0], prev_trajectory[1]
+                    velocity = np.linalg.norm(next_location - np.array([prev_x, prev_y])) / NUM_SIM_STEPS
+                else:
+                    velocity = 0.0
+
+                self.trajectory_buffer[robot.id].append((
+                    next_location[0],
+                    next_location[1],
+                    robot.heading,
+                    velocity
+                ))
 
                 robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
 
@@ -341,7 +374,7 @@ class TestWorker:
 
 if __name__ == '__main__':
     import torch
-    policy_net = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN)
+    policy_net = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, use_trajectory=USE_TRAJECTORY)
     if LOAD_MODEL:
         checkpoint = torch.load(load_path + '/checkpoint.pth', map_location='cpu')
         policy_net.load_state_dict(checkpoint['policy_model'])
