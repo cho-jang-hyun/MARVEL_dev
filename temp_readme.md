@@ -818,7 +818,52 @@ for robot, reward in zip(self.robot_list, reward_list):
 
 **핵심**: `USE_COMMUNICATION=False`일 때는 `save_all_indices()`를 호출하지 않아, episode buffer에 다른 에이전트의 위치 정보가 저장되지 않습니다.
 
-#### 3. **driver.py** - 학습 루프에서 State 구성
+#### 2-1. **agent.py** - save_next_observations 수정
+
+**위치**: Line 532-563
+
+```python
+def save_next_observations(self, observation, next_node_index_list):
+    # ... (기존 코드)
+
+    # Only process agent indices if they were saved (USE_COMMUNICATION=True)
+    if len(self.episode_buffer[35]) > 0:
+        self.episode_buffer[36] = copy.deepcopy(self.episode_buffer[35])[1:]
+
+    # ... (observation 저장)
+
+    # Only update agent indices buffers if they were initialized
+    if len(self.episode_buffer[35]) > 0:
+        self.episode_buffer[36] += torch.tensor(next_node_index_list).reshape(1, -1, 1).to(self.device)
+        self.episode_buffer[37] = copy.deepcopy(self.episode_buffer[36])[1:]
+        self.episode_buffer[37] += copy.deepcopy(self.episode_buffer[36])[-1:]
+```
+
+**핵심**: episode_buffer[35]가 비어있을 때 (USE_COMMUNICATION=False) episode_buffer[36], [37]을 처리하지 않아 IndexError를 방지합니다.
+
+#### 3. **driver.py** - 빈 버퍼 처리
+
+**위치**: Line 200-212
+
+```python
+indices = range(len(experience_buffer[0]))
+
+# training for n times each step
+for j in range(4):
+    # randomly sample a batch data
+    sample_indices = random.sample(indices, BATCH_SIZE)
+    rollouts = []
+    for i in range(len(experience_buffer)):
+        # Skip empty buffers (e.g., agent indices when USE_COMMUNICATION=False)
+        if len(experience_buffer[i]) == 0:
+            rollouts.append([])
+        else:
+            rollouts.append([experience_buffer[i][index] for index in sample_indices])
+```
+
+**핵심**: experience_buffer의 일부(35, 36, 37)가 비어있을 때 IndexError를 방지합니다.
+
+#### 4. **driver.py** - 학습 루프에서 State 구성
 
 **위치**: Line 233-285
 

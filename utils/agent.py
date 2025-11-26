@@ -538,7 +538,11 @@ class Agent:
         self.episode_buffer[16] = copy.deepcopy(self.episode_buffer[5])[1:]
         self.episode_buffer[17] = copy.deepcopy(self.episode_buffer[6])[1:]
         self.episode_buffer[18] = copy.deepcopy(self.episode_buffer[7])[1:]
-        self.episode_buffer[36] = copy.deepcopy(self.episode_buffer[35])[1:]
+
+        # Only process agent indices if they were saved (USE_COMMUNICATION=True)
+        if len(self.episode_buffer[35]) > 0:
+            self.episode_buffer[36] = copy.deepcopy(self.episode_buffer[35])[1:]
+
         self.episode_buffer[39] = copy.deepcopy(self.episode_buffer[38])[1:]
 
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, detected_trajectories, trajectory_mask = observation
@@ -552,9 +556,11 @@ class Agent:
         self.episode_buffer[18] += heading_visited
         self.episode_buffer[39] += neighbor_best_headings
 
-        self.episode_buffer[36] += torch.tensor(next_node_index_list).reshape(1, -1, 1).to(self.device)
-        self.episode_buffer[37] = copy.deepcopy(self.episode_buffer[36])[1:]
-        self.episode_buffer[37] += copy.deepcopy(self.episode_buffer[36])[-1:]
+        # Only update agent indices buffers if they were initialized
+        if len(self.episode_buffer[35]) > 0:
+            self.episode_buffer[36] += torch.tensor(next_node_index_list).reshape(1, -1, 1).to(self.device)
+            self.episode_buffer[37] = copy.deepcopy(self.episode_buffer[36])[1:]
+            self.episode_buffer[37] += copy.deepcopy(self.episode_buffer[36])[-1:]
 
     def save_ground_truth_observation(self, ground_truth_observation):
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited = ground_truth_observation

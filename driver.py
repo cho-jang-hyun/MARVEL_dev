@@ -205,7 +205,11 @@ def main():
                     sample_indices = random.sample(indices, BATCH_SIZE)
                     rollouts = []
                     for i in range(len(experience_buffer)):
-                        rollouts.append([experience_buffer[i][index] for index in sample_indices])
+                        # Skip empty buffers (e.g., agent indices when USE_COMMUNICATION=False)
+                        if len(experience_buffer[i]) == 0:
+                            rollouts.append([])
+                        else:
+                            rollouts.append([experience_buffer[i][index] for index in sample_indices])
 
                     # stack batch data to tensors
                     node_inputs = torch.stack(rollouts[0]).to(device)
