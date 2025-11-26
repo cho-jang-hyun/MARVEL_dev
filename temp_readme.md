@@ -515,6 +515,86 @@ python test_driver.py
 
 ---
 
+## 🎨 향상된 시각화 기능
+
+test_driver.py를 통해 생성되는 GIF에 FOV 내 감지된 로봇의 trajectory를 시각적으로 표시합니다.
+
+### 시각화 특징:
+
+#### **왼쪽 패널 (Belief Map + Trajectories)**:
+1. **기본 Trajectory**: 모든 로봇의 trajectory를 반투명하게 표시 (alpha=0.4)
+2. **감지된 Trajectory 강조**:
+   - 다른 로봇의 FOV에 감지된 로봇의 trajectory를 두껍고 점선으로 표시
+   - 현재 위치에 흰색 테두리의 원형 마커 추가
+   - linewidth=3.0, linestyle='--'
+
+#### **오른쪽 패널 (FOV Cones + Detection Links)**:
+1. **FOV Cone**: 각 로봇의 시야 범위를 부채꼴로 표시
+2. **감지된 Trajectory 강조**: 왼쪽 패널과 동일
+3. **Detection Links**: 감지하는 로봇과 감지된 로봇 사이를 흰색 점선으로 연결
+4. **Detection Summary**: 제목에 각 로봇이 감지한 다른 로봇들을 텍스트로 표시
+
+### 구현 코드:
+
+```python
+def get_detected_robots_in_fov(self, robot, robot_locations, robot_headings):
+    """Helper function to detect which robots are in the FOV of a given robot"""
+    detected_robots = []
+    robot_loc = get_coords_from_cell_position(robot_locations[robot.id], self.env.belief_info)
+
+    for other_robot in self.robot_list:
+        if other_robot.id == robot.id:
+            continue
+
+        other_loc = get_coords_from_cell_position(robot_locations[other_robot.id], self.env.belief_info)
+
+        # Calculate distance
+        distance = np.linalg.norm(other_loc - robot_loc)
+
+        # Check if within sensor range
+        if distance > self.sensor_range:
+            continue
+
+        # Calculate angle to the other robot
+        delta = other_loc - robot_loc
+        angle_to_robot = np.degrees(np.arctan2(delta[1], delta[0])) % 360
+
+        # Calculate angle difference considering FOV
+        angle_diff = (angle_to_robot - robot_headings[robot.id] + 180) % 360 - 180
+
+        # Check if within FOV
+        if np.abs(angle_diff) <= self.fov / 2:
+            detected_robots.append(other_robot.id)
+
+    return detected_robots
+```
+
+### 시각화 예시:
+
+```
+Title: Explored: 0.85  Distance: 45.2
+       Headings: Red-90°, Blue-45°, Green-180°, Yellow-270°
+       FOV Detections: Red detects: Blue, Green | Blue detects: Red
+
+[Left Panel]                    [Right Panel]
+- All trajectories (faded)      - All trajectories (faded)
+- Detected: Blue (thick dash)   - Detected: Blue (thick dash)
+- Detected: Green (thick dash)  - Detection links (white dash)
+- Detected: Red (thick dash)    - FOV cones (semi-transparent)
+```
+
+### 시각적 요소:
+
+| 요소 | 스타일 | 의미 |
+|------|--------|------|
+| 일반 Trajectory | 가는 실선, alpha=0.4 | 모든 로봇의 이동 경로 |
+| 감지된 Trajectory | 두꺼운 점선, alpha=1.0 | 다른 로봇의 FOV에 포착된 경로 |
+| 현재 위치 마커 | 흰색 테두리 원 | 감지된 로봇의 현재 위치 |
+| Detection Link | 흰색 점선 | 감지 관계 연결선 |
+| FOV Cone | 부채꼴, alpha=0.3 | 로봇의 시야 범위 |
+
+---
+
 ## 📚 참고 자료
 
 ### Training 관련 파일:
@@ -528,6 +608,8 @@ python test_driver.py
 - `test_parameter.py`: Line 59-66 (Trajectory parameters)
 - `test_driver.py`: Line 40-45 (global_network), Line 128 (Runner.local_network)
 - `utils/test_worker.py`: Line 6, 42-53, 83-87, 159-172, 377
+  - Line 284-313: `get_detected_robots_in_fov()` - FOV 내 로봇 감지 함수
+  - Line 315-474: `plot_local_env_sim()` - 향상된 시각화 (감지된 trajectory 강조)
 
 ### 핵심 함수:
 - `MultiAgentWorker.__init__()`: Trajectory buffer 초기화

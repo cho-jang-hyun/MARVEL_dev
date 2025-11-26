@@ -89,9 +89,9 @@ K_SIZE = NUM_NODE_NEIGHBORS**2   # the number of neighboring nodes
 NODE_PADDING_SIZE = 360  # the number of nodes will be padded to this value
 
 # GPU usage
-USE_GPU = False  # do you want to collect training data using GPUs
-USE_GPU_GLOBAL = True  # do you want to train the network using GPUs
-NUM_GPU = 1
+USE_GPU = False  # Workers use CPU to avoid GPU memory conflict with Ray
+USE_GPU_GLOBAL = True  # Main training process uses GPU
+NUM_GPU = 1  # Number of GPUs for DataParallel in main process
 
 USE_WANDB = False
 TRAIN_ALGO = 3

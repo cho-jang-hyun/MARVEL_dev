@@ -114,11 +114,20 @@ def main():
     weights_set.append(policy_weights)
 
     # distributed training if multiple GPUs available
-    dp_policy = nn.DataParallel(global_policy_net)
-    dp_q_net1 = nn.DataParallel(global_q_net1)
-    dp_q_net2 = nn.DataParallel(global_q_net2)
-    dp_target_q_net1 = nn.DataParallel(global_target_q_net1)
-    dp_target_q_net2 = nn.DataParallel(global_target_q_net2)
+    if NUM_GPU > 1 and USE_GPU_GLOBAL:
+        device_ids = list(range(NUM_GPU))
+        dp_policy = nn.DataParallel(global_policy_net, device_ids=device_ids)
+        dp_q_net1 = nn.DataParallel(global_q_net1, device_ids=device_ids)
+        dp_q_net2 = nn.DataParallel(global_q_net2, device_ids=device_ids)
+        dp_target_q_net1 = nn.DataParallel(global_target_q_net1, device_ids=device_ids)
+        dp_target_q_net2 = nn.DataParallel(global_target_q_net2, device_ids=device_ids)
+    else:
+        # Single GPU or CPU - no DataParallel needed
+        dp_policy = global_policy_net
+        dp_q_net1 = global_q_net1
+        dp_q_net2 = global_q_net2
+        dp_target_q_net1 = global_target_q_net1
+        dp_target_q_net2 = global_target_q_net2
 
     # launch the first job on each runner
     job_list = []
