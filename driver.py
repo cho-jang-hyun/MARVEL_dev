@@ -50,15 +50,36 @@ def main():
     device = torch.device('cuda') if USE_GPU_GLOBAL else torch.device('cpu')
     local_device = torch.device('cuda') if USE_GPU else torch.device('cpu')
 
+    # Determine effective training algorithm based on communication setting
+    # When USE_COMMUNICATION=False, disable agent communication in QNet
+    if USE_COMMUNICATION:
+        effective_train_algo = TRAIN_ALGO
+    else:
+        # Remove agent communication component from TRAIN_ALGO
+        # TRAIN_ALGO 3 (MAAC + GT) -> 2 (GT only)
+        # TRAIN_ALGO 1 (MAAC) -> 0 (SAC)
+        if TRAIN_ALGO == 3:
+            effective_train_algo = 2  # Ground Truth only, no communication
+        elif TRAIN_ALGO == 1:
+            effective_train_algo = 0  # SAC, no communication
+        else:
+            effective_train_algo = TRAIN_ALGO  # 0 or 2 already have no communication
+
+    print(f"Training Configuration:")
+    print(f"  TRAIN_ALGO: {TRAIN_ALGO}")
+    print(f"  USE_COMMUNICATION: {USE_COMMUNICATION}")
+    print(f"  Effective TRAIN_ALGO for QNet: {effective_train_algo}")
+    print(f"  Using Trajectory Encoder: True")
+
     # initialize neural networks
-    global_policy_net = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN).to(device)
-    global_q_net1 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, TRAIN_ALGO).to(device)
-    global_q_net2 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, TRAIN_ALGO).to(device)
+    global_policy_net = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, use_trajectory=True).to(device)
+    global_q_net1 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, effective_train_algo, use_trajectory=True).to(device)
+    global_q_net2 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, effective_train_algo, use_trajectory=True).to(device)
     log_alpha = torch.FloatTensor([-2]).to(device)
     log_alpha.requires_grad = True
 
-    global_target_q_net1 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, TRAIN_ALGO).to(device)
-    global_target_q_net2 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, TRAIN_ALGO).to(device)
+    global_target_q_net1 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, effective_train_algo, use_trajectory=True).to(device)
+    global_target_q_net2 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, effective_train_algo, use_trajectory=True).to(device)
 
     # initialize optimizers
     global_policy_optimizer = optim.Adam(global_policy_net.parameters(), lr=LR)
@@ -209,7 +230,8 @@ def main():
                     neighbor_best_headings = torch.stack(rollouts[38]).to(device)
                     next_neighbor_best_headings = torch.stack(rollouts[39]).to(device)
 
-                    if TRAIN_ALGO in (2,3):
+                    # Load ground truth data if needed
+                    if effective_train_algo in (2,3):
                         gt_node_inputs = torch.stack(rollouts[19]).to(device)
                         gt_node_padding_mask = torch.stack(rollouts[20]).to(device)
                         gt_edge_mask = torch.stack(rollouts[21]).to(device)
@@ -224,10 +246,12 @@ def main():
                         gt_next_current_index = torch.stack(rollouts[30]).to(device)
                         gt_next_current_edge = torch.stack(rollouts[31]).to(device)
                         gt_next_edge_padding_mask = torch.stack(rollouts[32]).to(device)
-                        gt_next_frontier_distribution = torch.stack(rollouts[33]).to(device) 
-                        gt_next_heading_visited = torch.stack(rollouts[34]).to(device)        
+                        gt_next_frontier_distribution = torch.stack(rollouts[33]).to(device)
+                        gt_next_heading_visited = torch.stack(rollouts[34]).to(device)
 
-                    if TRAIN_ALGO in (1,3):
+                    # Load agent indices only when communication is enabled
+                    # When USE_COMMUNICATION=False, effective_train_algo won't include agent communication
+                    if effective_train_algo in (1,3):
                         all_agent_indices = torch.stack(rollouts[35]).to(device)
                         all_agent_next_indices = torch.stack(rollouts[36]).to(device)
                         next_all_agent_next_indices = torch.stack(rollouts[37]).to(device)
@@ -236,19 +260,24 @@ def main():
                                    current_local_edge, local_edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings]
                     next_observation = [next_node_inputs, next_node_padding_mask, next_local_edge_mask,
                                         next_current_local_index, next_current_local_edge, next_local_edge_padding_mask, next_frontier_distribution, next_heading_visited, next_neighbor_best_headings]
-                    
-                    if TRAIN_ALGO == 0:
+
+                    # Construct state based on effective_train_algo (respects USE_COMMUNICATION setting)
+                    if effective_train_algo == 0:
+                        # SAC: observation only, no communication
                         state = observation
                         next_state = next_observation
-                    elif TRAIN_ALGO == 1:
+                    elif effective_train_algo == 1:
+                        # MAAC with communication: observation + agent indices
                         state = [*observation, all_agent_indices, all_agent_next_indices]
                         next_state = [*next_observation, all_agent_next_indices, next_all_agent_next_indices]
-                    elif TRAIN_ALGO == 2:
+                    elif effective_train_algo == 2:
+                        # Ground truth only, no communication
                         state = [gt_node_inputs, gt_node_padding_mask, gt_edge_mask, gt_current_index,
                                  gt_current_edge, gt_edge_padding_mask, gt_frontier_distribution, gt_heading_visited, neighbor_best_headings]
                         next_state = [gt_next_node_inputs, gt_next_node_padding_mask, gt_next_edge_mask,
                                       gt_next_current_index, gt_next_current_edge, gt_next_edge_padding_mask, gt_next_frontier_distribution, gt_next_heading_visited, next_neighbor_best_headings]
-                    elif TRAIN_ALGO == 3:
+                    elif effective_train_algo == 3:
+                        # MAAC with ground truth and communication
                         state = [gt_node_inputs, gt_node_padding_mask, gt_edge_mask, gt_current_index,
                                  gt_current_edge, gt_edge_padding_mask, gt_frontier_distribution, gt_heading_visited, neighbor_best_headings, all_agent_indices, all_agent_next_indices]
                         next_state = [gt_next_node_inputs, gt_next_node_padding_mask, gt_next_edge_mask,

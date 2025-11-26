@@ -517,57 +517,88 @@ python test_driver.py
 
 ## 🎨 향상된 시각화 기능
 
-test_driver.py를 통해 생성되는 GIF에 FOV 내 감지된 로봇의 trajectory를 시각적으로 표시합니다.
+test_driver.py를 통해 생성되는 GIF에 FOV 내 감지된 로봇의 trajectory와 각 agent의 local view를 시각적으로 표시합니다.
 
-### 시각화 특징:
+### 전체 레이아웃 (2행 구조):
 
-#### **왼쪽 패널 (Belief Map + Trajectories)**:
-1. **기본 Trajectory**: 모든 로봇의 trajectory를 반투명하게 표시 (alpha=0.4)
-2. **감지된 Trajectory 강조**:
-   - 다른 로봇의 FOV에 감지된 로봇의 trajectory를 두껍고 점선으로 표시
+#### **상단 행 (Global View)**:
+1. **왼쪽 패널 - Global Belief Map**:
+   - 모든 로봇의 trajectory를 반투명하게 표시 (alpha=0.4)
+   - 감지된 로봇의 trajectory를 두껍고 점선으로 강조 (linewidth=3.0, linestyle='--')
    - 현재 위치에 흰색 테두리의 원형 마커 추가
-   - linewidth=3.0, linestyle='--'
+   - Global frontiers 표시
 
-#### **오른쪽 패널 (FOV Cones + Detection Links)**:
-1. **FOV Cone**: 각 로봇의 시야 범위를 부채꼴로 표시
-2. **감지된 Trajectory 강조**: 왼쪽 패널과 동일
-3. **Detection Links**: 감지하는 로봇과 감지된 로봇 사이를 흰색 점선으로 연결
-4. **Detection Summary**: 제목에 각 로봇이 감지한 다른 로봇들을 텍스트로 표시
+2. **오른쪽 패널 - FOV & Detections**:
+   - FOV Cone: 각 로봇의 시야 범위를 부채꼴로 표시
+   - Detection Links: 감지하는 로봇과 감지된 로봇 사이를 흰색 점선으로 연결
+   - 감지된 Trajectory 강조
+   - Detection Summary: 제목에 각 로봇이 감지한 다른 로봇들을 텍스트로 표시
 
-### 구현 코드:
+#### **하단 행 (Individual Agent Local Views)** - 🆕 새로 추가:
+각 agent마다 개별 패널로 자신의 local observation을 표시:
 
-```python
-def get_detected_robots_in_fov(self, robot, robot_locations, robot_headings):
-    """Helper function to detect which robots are in the FOV of a given robot"""
-    detected_robots = []
-    robot_loc = get_coords_from_cell_position(robot_locations[robot.id], self.env.belief_info)
+1. **Local Map**:
+   - 각 agent의 현재 위치 중심으로 UPDATING_MAP_SIZE 범위 내 지도 표시
+   - Agent가 실제로 decision-making에 사용하는 local view 시각화
 
-    for other_robot in self.robot_list:
-        if other_robot.id == robot.id:
-            continue
+2. **FOV Cone**:
+   - Agent의 시야 범위를 반투명 부채꼴로 표시
+   - Agent가 현재 어느 방향을 보고 있는지 명확히 표시
 
-        other_loc = get_coords_from_cell_position(robot_locations[other_robot.id], self.env.belief_info)
+3. **Detected Robots (FOV 내 감지된 다른 로봇)**:
+   - **감지된 로봇**: 큰 원형 마커 + 노란색 테두리 (markeredgecolor='yellow')
+   - **Detection Line**: Agent와 감지된 로봇 사이 노란색 점선으로 연결
+   - **비감지 로봇**: 작고 반투명한 마커 (alpha=0.5)
 
-        # Calculate distance
-        distance = np.linalg.norm(other_loc - robot_loc)
+4. **Local Frontiers**:
+   - Agent가 관측하는 frontiers를 빨간 점으로 표시
+   - Agent의 exploration 목표 지점 시각화
 
-        # Check if within sensor range
-        if distance > self.sensor_range:
-            continue
+5. **Title**:
+   - Agent 이름 (색상과 함께)
+   - 현재 감지 중인 다른 robot 목록 표시
 
-        # Calculate angle to the other robot
-        delta = other_loc - robot_loc
-        angle_to_robot = np.degrees(np.arctan2(delta[1], delta[0])) % 360
+### 시각화 코드 구현:
 
-        # Calculate angle difference considering FOV
-        angle_diff = (angle_to_robot - robot_headings[robot.id] + 180) % 360 - 180
+**위치**: utils/test_worker.py, Line 315-589
 
-        # Check if within FOV
-        if np.abs(angle_diff) <= self.fov / 2:
-            detected_robots.append(other_robot.id)
+#### 주요 기능:
 
-    return detected_robots
-```
+1. **레이아웃 자동 조정** (Line 318-320):
+   ```python
+   n_cols = max(2, self.n_agents)
+   fig = plt.figure(figsize=(3 * n_cols, 6))
+   ```
+   - Agent 수에 따라 열 개수 자동 조정
+   - 상단 2개 패널, 하단 agent 수만큼 패널 생성
+
+2. **Local Map 추출** (Line 477-486):
+   ```python
+   center_cell = robot_locations[robot.id]
+   half_size = local_map_size // 2
+
+   row_start = max(0, int(center_cell[1] - half_size))
+   row_end = min(self.env.robot_belief.shape[0], int(center_cell[1] + half_size))
+   col_start = max(0, int(center_cell[0] - half_size))
+   col_end = min(self.env.robot_belief.shape[1], int(center_cell[0] + half_size))
+
+   local_map = self.env.robot_belief[row_start:row_end, col_start:col_end]
+   ```
+
+3. **FOV 내 다른 Robot 시각화** (Line 519-547):
+   ```python
+   # Check if this other robot is detected by current robot
+   is_detected = other_robot.id in fov_detections.get(robot.id, [])
+
+   if is_detected:
+       # Highlight detected robots with yellow border
+       plt.plot(other_local_x, other_local_y, 'o',
+               color=other_c, markersize=10,
+               markeredgewidth=3, markeredgecolor='yellow', zorder=15)
+       # Draw detection line
+       plt.plot([robot_local_x, other_local_x], [robot_local_y, other_local_y],
+               'y--', linewidth=2, alpha=0.8, zorder=12)
+   ```
 
 ### 시각화 예시:
 
@@ -576,22 +607,56 @@ Title: Explored: 0.85  Distance: 45.2
        Headings: Red-90°, Blue-45°, Green-180°, Yellow-270°
        FOV Detections: Red detects: Blue, Green | Blue detects: Red
 
-[Left Panel]                    [Right Panel]
-- All trajectories (faded)      - All trajectories (faded)
-- Detected: Blue (thick dash)   - Detected: Blue (thick dash)
-- Detected: Green (thick dash)  - Detection links (white dash)
-- Detected: Red (thick dash)    - FOV cones (semi-transparent)
+┌─────────────────────────────────────────────────────────────┐
+│  [Global Belief Map]       [FOV & Detections]              │
+│  - All trajectories        - FOV cones                      │
+│  - Detected highlighted    - Detection links                │
+│  - Global frontiers        - Highlighted detections         │
+├─────────────────────────────────────────────────────────────┤
+│  [Red Agent Local]  [Blue Agent Local]  [Green] [Yellow]   │
+│  - Local map        - Local map         - ...   - ...      │
+│  - FOV cone         - FOV cone                              │
+│  - Detected: Blue   - Detected: Red                         │
+│  - Local frontiers  - Local frontiers                       │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### 시각적 요소:
 
 | 요소 | 스타일 | 의미 |
 |------|--------|------|
+| **Global View** | | |
 | 일반 Trajectory | 가는 실선, alpha=0.4 | 모든 로봇의 이동 경로 |
 | 감지된 Trajectory | 두꺼운 점선, alpha=1.0 | 다른 로봇의 FOV에 포착된 경로 |
 | 현재 위치 마커 | 흰색 테두리 원 | 감지된 로봇의 현재 위치 |
 | Detection Link | 흰색 점선 | 감지 관계 연결선 |
 | FOV Cone | 부채꼴, alpha=0.3 | 로봇의 시야 범위 |
+| **Local View (각 Agent)** | | |
+| Local Map | UPDATING_MAP_SIZE 범위 | Agent의 decision-making 영역 |
+| 감지된 로봇 | 큰 원 + 노란색 테두리 | FOV 내에서 감지된 다른 로봇 |
+| Detection Line | 노란색 점선 | Agent와 감지된 로봇 간 연결 |
+| 비감지 로봇 | 작은 원, alpha=0.5 | Local 영역 내 비감지 로봇 |
+| Local Frontiers | 빨간 점, s=2 | Agent가 관측하는 frontier |
+
+### 실제 활용:
+
+이 시각화를 통해 다음을 확인할 수 있습니다:
+
+1. **통신 없는 학습 검증**:
+   - 각 agent가 독립적인 local observation만 사용하는지 확인
+   - FOV 밖의 로봇은 감지되지 않음을 시각적으로 확인
+
+2. **Trajectory Encoder 효과**:
+   - 각 agent가 어떤 다른 로봇을 감지하고 있는지 명확히 표시
+   - Detection line으로 information flow 시각화
+
+3. **Decision-making 분석**:
+   - 각 agent의 local frontiers와 선택한 경로 관찰
+   - Agent가 감지된 로봇을 피하거나 협력하는 행동 분석
+
+4. **성능 디버깅**:
+   - Agent가 frontier를 제대로 감지하는지 확인
+   - FOV 범위가 올바르게 적용되는지 검증
 
 ---
 
@@ -605,11 +670,19 @@ Title: Explored: 0.85  Distance: 45.2
 - `utils/model.py`: Line 1-4, 199-308, 312-427, 430-568
 
 ### Testing 관련 파일:
-- `test_parameter.py`: Line 59-66 (Trajectory parameters)
+- `test_parameter.py`:
+  - Line 59-66: Trajectory parameters
+  - Line 77-79: Communication settings
 - `test_driver.py`: Line 40-45 (global_network), Line 128 (Runner.local_network)
-- `utils/test_worker.py`: Line 6, 42-53, 83-87, 159-172, 377
+- `utils/test_worker.py`:
+  - Line 6, 42-53: Trajectory buffer 초기화
+  - Line 83-87, 159-172: Trajectory buffer 업데이트 및 사용
   - Line 284-313: `get_detected_robots_in_fov()` - FOV 내 로봇 감지 함수
-  - Line 315-474: `plot_local_env_sim()` - 향상된 시각화 (감지된 trajectory 강조)
+  - Line 315-589: `plot_local_env_sim()` - 향상된 시각화
+    - Line 318-320: 2행 레이아웃 구조 (상단: global view, 하단: per-agent local views)
+    - Line 331-392: Global belief map 패널
+    - Line 394-465: FOV & detections 패널
+    - Line 467-567: **각 Agent별 local view 패널 (새로 추가)**
 
 ### 핵심 함수:
 - `MultiAgentWorker.__init__()`: Trajectory buffer 초기화
@@ -623,6 +696,8 @@ Title: Explored: 0.85  Distance: 45.2
 ## ✅ 체크리스트
 
 구현 완료 항목:
+
+### Trajectory Encoder 구현:
 - [x] Trajectory 파라미터 추가 (parameter.py)
 - [x] Trajectory buffer 구현 (multi_agent_worker.py)
 - [x] FOV 감지 함수 (agent.py)
@@ -630,21 +705,299 @@ Title: Explored: 0.85  Distance: 45.2
 - [x] PolicyNet 통합 (model.py)
 - [x] QNet 통합 (model.py)
 - [x] Observation 생성 업데이트 (agent.py)
+
+### 통신 설정 구현:
+- [x] USE_COMMUNICATION 파라미터 추가 (parameter.py, test_parameter.py)
+- [x] effective_train_algo 로직 구현 (driver.py)
+- [x] 조건부 agent indices 저장 (multi_agent_worker.py)
+- [x] 학습 루프 state 구성 수정 (driver.py)
+- [x] 문서화 (temp_readme.md)
+
+### 향상된 시각화 구현:
+- [x] FOV 내 감지된 trajectory 강조 (test_worker.py)
+- [x] Detection links 표시 (test_worker.py)
+- [x] **각 Agent별 local view 추가 (test_worker.py)** 🆕
+- [x] Local map 추출 및 표시
+- [x] FOV cone 시각화
+- [x] Detected robots 강조 표시
+- [x] Local frontiers 표시
+
+### 테스트 및 평가:
 - [ ] 실제 학습 테스트
-- [ ] 성능 평가 및 비교
+- [ ] 통신 있음/없음 성능 비교
+- [ ] Local view 시각화 검증
+
+---
+
+## 🔌 통신 설정 (Communication Settings)
+
+MARVEL은 이제 에이전트 간 통신 여부를 제어할 수 있습니다. 이를 통해 완전한 정보 공유(centralized) vs 시각적 감지만 사용(decentralized) 두 가지 학습 모드를 지원합니다.
+
+### USE_COMMUNICATION 파라미터
+
+**parameter.py** (Line 100-104):
+```python
+USE_COMMUNICATION = False  # True: MAAC with all agent communication (centralized critic)
+                           # False: Decentralized learning with only FOV-based trajectory observation
+                           # When False, agents only use their own observation + detected trajectories in FOV
+                           # This simulates no-communication scenario where agents rely on visual detection only
+```
+
+### 통신 모드별 차이점
+
+#### 1. **USE_COMMUNICATION = True** (통신 있음)
+- **학습 알고리즘**: TRAIN_ALGO에 따라 MAAC 또는 MAAC+GT 사용
+- **정보 공유**: 모든 에이전트의 위치와 상태 정보를 QNet에 전달
+- **Centralized Critic**: 글로벌 정보를 활용한 가치 평가
+- **장점**: 더 많은 정보로 학습, 수렴 속도 빠름
+- **단점**: 실제 환경에서 통신 인프라 필요
+
+#### 2. **USE_COMMUNICATION = False** (통신 없음)
+- **학습 알고리즘**: TRAIN_ALGO에서 통신 요소 제거
+  - TRAIN_ALGO 3 (MAAC+GT) → effective_train_algo 2 (GT only)
+  - TRAIN_ALGO 1 (MAAC) → effective_train_algo 0 (SAC)
+- **정보 공유**: 없음 (각 에이전트가 독립적으로 학습)
+- **시각적 감지**: FOV 내 감지된 로봇의 trajectory만 사용
+- **장점**: 통신 인프라 불필요, 더 현실적인 시나리오
+- **단점**: 제한된 정보로 학습, 수렴 속도 느릴 수 있음
+
+### 구현 상세
+
+#### 1. **driver.py** - Effective Training Algorithm 계산
+
+**위치**: Line 53-72
+
+```python
+# Determine effective training algorithm based on communication setting
+# When USE_COMMUNICATION=False, disable agent communication in QNet
+if USE_COMMUNICATION:
+    effective_train_algo = TRAIN_ALGO
+else:
+    # Remove agent communication component from TRAIN_ALGO
+    # TRAIN_ALGO 3 (MAAC + GT) -> 2 (GT only)
+    # TRAIN_ALGO 1 (MAAC) -> 0 (SAC)
+    if TRAIN_ALGO == 3:
+        effective_train_algo = 2  # Ground Truth only, no communication
+    elif TRAIN_ALGO == 1:
+        effective_train_algo = 0  # SAC, no communication
+    else:
+        effective_train_algo = TRAIN_ALGO  # 0 or 2 already have no communication
+
+print(f"Training Configuration:")
+print(f"  TRAIN_ALGO: {TRAIN_ALGO}")
+print(f"  USE_COMMUNICATION: {USE_COMMUNICATION}")
+print(f"  Effective TRAIN_ALGO for QNet: {effective_train_algo}")
+print(f"  Using Trajectory Encoder: True")
+```
+
+**Network 초기화** (Line 75-82):
+```python
+global_policy_net = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, use_trajectory=True).to(device)
+global_q_net1 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, effective_train_algo, use_trajectory=True).to(device)
+global_q_net2 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, effective_train_algo, use_trajectory=True).to(device)
+# ...
+global_target_q_net1 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, effective_train_algo, use_trajectory=True).to(device)
+global_target_q_net2 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_AGES_BIN, effective_train_algo, use_trajectory=True).to(device)
+```
+
+#### 2. **multi_agent_worker.py** - 조건부 Agent Indices 저장
+
+**위치**: Line 224-232
+
+```python
+curr_node_indices = np.array([robot.current_index for robot in self.robot_list])
+for robot, reward in zip(self.robot_list, reward_list):
+    robot.save_reward(reward + team_reward)
+    # Only save all agent indices when communication is enabled
+    # When USE_COMMUNICATION=False, agents rely solely on FOV-detected trajectories
+    if USE_COMMUNICATION:
+        robot.save_all_indices(curr_node_indices)
+    robot.update_planning_state(self.env.robot_locations)
+    robot.save_done(done)
+```
+
+**핵심**: `USE_COMMUNICATION=False`일 때는 `save_all_indices()`를 호출하지 않아, episode buffer에 다른 에이전트의 위치 정보가 저장되지 않습니다.
+
+#### 3. **driver.py** - 학습 루프에서 State 구성
+
+**위치**: Line 233-285
+
+**Ground Truth 데이터 로딩** (Line 233-250):
+```python
+# Load ground truth data if needed
+if effective_train_algo in (2,3):
+    gt_node_inputs = torch.stack(rollouts[19]).to(device)
+    # ... (ground truth data loading)
+```
+
+**Agent Indices 로딩** (Line 252-257):
+```python
+# Load agent indices only when communication is enabled
+# When USE_COMMUNICATION=False, effective_train_algo won't include agent communication
+if effective_train_algo in (1,3):
+    all_agent_indices = torch.stack(rollouts[35]).to(device)
+    all_agent_next_indices = torch.stack(rollouts[36]).to(device)
+    next_all_agent_next_indices = torch.stack(rollouts[37]).to(device)
+```
+
+**State 구성** (Line 264-285):
+```python
+# Construct state based on effective_train_algo (respects USE_COMMUNICATION setting)
+if effective_train_algo == 0:
+    # SAC: observation only, no communication
+    state = observation
+    next_state = next_observation
+elif effective_train_algo == 1:
+    # MAAC with communication: observation + agent indices
+    state = [*observation, all_agent_indices, all_agent_next_indices]
+    next_state = [*next_observation, all_agent_next_indices, next_all_agent_next_indices]
+elif effective_train_algo == 2:
+    # Ground truth only, no communication
+    state = [gt_node_inputs, gt_node_padding_mask, ...]
+    next_state = [gt_next_node_inputs, ...]
+elif effective_train_algo == 3:
+    # MAAC with ground truth and communication
+    state = [gt_node_inputs, ..., all_agent_indices, all_agent_next_indices]
+    next_state = [gt_next_node_inputs, ..., all_agent_next_indices, next_all_agent_next_indices]
+```
+
+### TRAIN_ALGO와 USE_COMMUNICATION 조합
+
+| TRAIN_ALGO | USE_COMMUNICATION | effective_train_algo | 설명 |
+|------------|-------------------|---------------------|------|
+| 0 (SAC) | True | 0 | SAC, no communication |
+| 0 (SAC) | False | 0 | SAC, no communication |
+| 1 (MAAC) | True | 1 | MAAC with communication |
+| 1 (MAAC) | False | 0 | SAC, FOV trajectory only |
+| 2 (GT) | True | 2 | Ground Truth, no communication |
+| 2 (GT) | False | 2 | Ground Truth, no communication |
+| 3 (MAAC+GT) | True | 3 | MAAC+GT with communication |
+| 3 (MAAC+GT) | False | 2 | GT only, FOV trajectory only |
+
+### 사용 예시
+
+#### 통신 없는 현실적 시나리오 학습:
+```python
+# parameter.py
+N_AGENTS = 4
+USE_COMMUNICATION = False
+TRAIN_ALGO = 3  # Will use GT only (effective_train_algo=2)
+USE_CONTINUOUS_SIM = True
+
+# Trajectory settings
+TRAJECTORY_HISTORY_LENGTH = 10
+TRAJECTORY_EMBEDDING_DIM = 64
+MAX_DETECTED_AGENTS = 3  # N_AGENTS - 1
+```
+
+```bash
+conda activate marvel
+python driver.py
+```
+
+출력 예시:
+```
+Training Configuration:
+  TRAIN_ALGO: 3
+  USE_COMMUNICATION: False
+  Effective TRAIN_ALGO for QNet: 2
+  Using Trajectory Encoder: True
+```
+
+#### 통신 있는 Centralized 학습:
+```python
+# parameter.py
+N_AGENTS = 4
+USE_COMMUNICATION = True
+TRAIN_ALGO = 3  # Will use MAAC+GT (effective_train_algo=3)
+```
+
+```bash
+python driver.py
+```
+
+출력 예시:
+```
+Training Configuration:
+  TRAIN_ALGO: 3
+  USE_COMMUNICATION: True
+  Effective TRAIN_ALGO for QNet: 3
+  Using Trajectory Encoder: True
+```
+
+### 성능 비교 실험
+
+두 모드의 성능을 비교하려면:
+
+1. **통신 있는 모델 학습**:
+   ```python
+   # parameter.py
+   FOLDER_NAME = 'with_communication'
+   USE_COMMUNICATION = True
+   TRAIN_ALGO = 3
+   ```
+
+2. **통신 없는 모델 학습**:
+   ```python
+   # parameter.py
+   FOLDER_NAME = 'no_communication'
+   USE_COMMUNICATION = False
+   TRAIN_ALGO = 3
+   ```
+
+3. **TensorBoard로 비교**:
+   ```bash
+   tensorboard --logdir train/
+   ```
+
+### 주의사항
+
+1. **체크포인트 호환성**:
+   - `USE_COMMUNICATION`이 다른 설정으로 학습된 모델은 다른 QNet 구조를 가집니다
+   - 체크포인트 로드 시 동일한 `USE_COMMUNICATION` 설정 필요
+
+2. **Episode Buffer**:
+   - `USE_COMMUNICATION=False`일 때는 agent indices가 episode buffer에 저장되지 않음
+   - 메모리 사용량 감소 효과
+
+3. **Trajectory Encoder의 역할**:
+   - `USE_COMMUNICATION=False`일 때 trajectory encoder가 더욱 중요
+   - FOV 감지된 로봇의 정보가 유일한 다른 에이전트 정보원
+
+### Test Mode에서의 통신 설정
+
+**test_parameter.py** (Line 77-79):
+```python
+# Communication settings (same as parameter.py)
+USE_COMMUNICATION = False  # True: Use all agent communication
+                           # False: Decentralized testing with only FOV-based trajectory observation
+```
+
+**중요**: Test mode에서는 PolicyNet만 사용하므로 agent 간 통신 정보가 자동으로 제외됩니다:
+- **Training**: PolicyNet (actor) + QNet (critic)
+  - QNet이 agent indices를 사용 (USE_COMMUNICATION=True일 때만)
+- **Testing**: PolicyNet만 사용
+  - PolicyNet은 observation만 사용 (agent indices 불필요)
+  - 따라서 test에서는 항상 통신 없이 동작
+
+**실제 효과**:
+- Test에서는 각 agent가 자신의 observation + FOV 내 감지된 trajectory만으로 행동 결정
+- 다른 agent의 전역 위치 정보는 사용하지 않음
+- Training에서 `USE_COMMUNICATION=False`로 학습된 모델이 test에서 올바르게 평가됨
 
 ---
 
 ## 💡 향후 개선 방향
 
 1. **Trajectory 예측**: 미래 trajectory 예측 기능 추가
-2. **Communication**: 명시적 agent 간 communication channel
+2. **Partial Communication**: 제한적 통신 시나리오 (거리 기반, 대역폭 제한)
 3. **Hierarchical Attention**: 시간/공간 계층적 attention
 4. **Memory Module**: Long-term trajectory memory
 5. **Adaptive History Length**: 동적 history 길이 조정
 
 ---
 
-**작성일**: 2025-11-25
-**버전**: 1.0
+**작성일**: 2025-11-26
+**버전**: 1.2
 **작성자**: Claude (Anthropic)
+**최근 업데이트**: 각 Agent별 local view 시각화 추가 (test_worker.py)

@@ -13,7 +13,8 @@ This file defines various parameters for:
 """
 TEST_SET = 'maps_test'
 LOAD_FOLDER_NAME = 'MARVEL'
-load_path = f'load_model/{LOAD_FOLDER_NAME}'
+# load_path = f'load_model/{LOAD_FOLDER_NAME}'
+load_path = f'model/test_2'
 gifs_path = f'results/gifs/{LOAD_FOLDER_NAME}'
 LOAD_MODEL = True  
 SAVE_IMG_GAP = 50
@@ -70,5 +71,9 @@ NUM_NODE_NEIGHBORS = 5
 K_SIZE = NUM_NODE_NEIGHBORS**2   # the number of neighboring nodes
 
 # GPU usage
-USE_GPU = True # False  
+USE_GPU = True # False
 NUM_GPU = 0
+
+# Communication settings (same as parameter.py)
+USE_COMMUNICATION = False  # True: Use all agent communication
+                           # False: Decentralized testing with only FOV-based trajectory observation

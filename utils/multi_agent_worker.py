@@ -224,7 +224,10 @@ class MultiAgentWorker:
             curr_node_indices = np.array([robot.current_index for robot in self.robot_list])
             for robot, reward in zip(self.robot_list, reward_list):
                 robot.save_reward(reward + team_reward)
-                robot.save_all_indices(curr_node_indices)
+                # Only save all agent indices when communication is enabled
+                # When USE_COMMUNICATION=False, agents rely solely on FOV-detected trajectories
+                if USE_COMMUNICATION:
+                    robot.save_all_indices(curr_node_indices)
                 robot.update_planning_state(self.env.robot_locations)
                 robot.save_done(done)
 

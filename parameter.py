@@ -20,10 +20,10 @@ Key configurations include:
 
 FOLDER_NAME = 'test_2'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
-model_path = f'model/{FOLDER_NAME}'
-load_path = f'load_model/{LOAD_FOLDER_NAME}'
-train_path = f'train/{FOLDER_NAME}'
-gifs_path = f'gifs/{FOLDER_NAME}'
+model_path = f'model/{FOLDER_NAME}' # save checkpoint
+load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
+train_path = f'train/{FOLDER_NAME}' # save tensorboard
+gifs_path = f'gifs/{FOLDER_NAME}' # save gif
 
 # save training data
 SUMMARY_WINDOW = 32
@@ -96,3 +96,9 @@ NUM_GPU = 1  # Number of GPUs for DataParallel in main process
 USE_WANDB = False
 TRAIN_ALGO = 3
 # 0: SAC, 1:MAAC , 2: Ground Truth 3: MAAC and Ground Truth
+
+# Communication settings
+USE_COMMUNICATION = False  # True: MAAC with all agent communication (centralized critic)
+                           # False: Decentralized learning with only FOV-based trajectory observation
+                           # When False, agents only use their own observation + detected trajectories in FOV
+                           # This simulates no-communication scenario where agents rely on visual detection only
