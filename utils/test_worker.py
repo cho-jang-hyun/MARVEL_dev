@@ -56,8 +56,8 @@ class TestWorker:
         done = False
         for robot in self.robot_list:
             robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
-        for robot in self.robot_list:    
-            robot.update_planning_state(self.env.robot_locations)
+        for robot in self.robot_list:
+            robot.update_planning_state()
         
         reach_checkpoint = False
 
@@ -176,7 +176,7 @@ class TestWorker:
             overlap_rate = self.compute_overlap_rate(selected_locations, all_robots_heading_list)
 
             for robot in self.robot_list:
-                robot.update_planning_state(self.env.robot_locations)
+                robot.update_planning_state()
 
             max_travel_dist += np.max(dist_list)
             length_history.append(max_travel_dist)

@@ -52,7 +52,7 @@ class GroundTruthNodeManager:
         exist = self.nodes_dict.find(key)
         return exist
 
-    def get_ground_truth_observation(self, robot_location, robot_locations):
+    def get_ground_truth_observation(self, robot_location):
         self.update_graph()
 
         all_node_coords = []
@@ -128,14 +128,9 @@ class GroundTruthNodeManager:
         current_index = np.argwhere(node_coords_to_check == robot_in_graph[0] + robot_in_graph[1] * 1j)[0][0]
         neighbor_indices = np.argwhere(adjacent_matrix[current_index] == 0).reshape(-1)
 
+        # Modified: Only mark current robot's position in occupancy (no global position sharing)
         occupancy = np.zeros((n_nodes, 1))
-        for location in robot_locations:
-            location_in_graph = self.nodes_dict.find((location[0], location[1])).data.coords
-            index = np.argwhere(node_coords_to_check == location_in_graph[0] + location_in_graph[1] * 1j)[0][0]
-            if index == current_index:
-                occupancy[index] = -1
-            else:
-                occupancy[index] = 1
+        occupancy[current_index] = -1  # Mark only current robot's position
 
         node_coords = all_node_coords
         node_utility = utility.reshape(-1, 1)

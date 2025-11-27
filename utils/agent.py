@@ -175,9 +175,9 @@ class Agent:
                                        self.updating_map_info,
                                        self.map_info)
 
-    def update_planning_state(self, robot_locations):
+    def update_planning_state(self):
         self.node_coords, self.utility, self.guidepost, self.occupancy, self.adjacent_matrix, self.current_index, self.neighbor_indices, self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.path_coords = \
-            self.node_manager.get_all_node_graph(self.location, robot_locations)
+            self.node_manager.get_all_node_graph(self.location)
 
     def get_observation(self, pad=True, robot_locations=None, trajectory_buffer=None):
         node_coords = self.node_coords

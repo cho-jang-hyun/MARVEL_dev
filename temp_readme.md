@@ -1047,6 +1047,142 @@ USE_COMMUNICATION = False  # True: Use all agent communication
 
   - 거리 제한: distance <= sensor_range (10m)
   - 각도 제한: |angle_diff| <= fov/2 (120°/2 = 60°)
+
+---
+
+## 🚫 Occupancy 정보 공유 제거 (2024-11-27 수정)
+
+### 문제점 발견
+기존 코드에서 `USE_COMMUNICATION=False`로 설정되어 있어도, `update_planning_state()` 메서드를 통해 모든 다른 에이전트들의 정확한 위치 정보가 노드 그래프의 occupancy로 누설되고 있었습니다.
+
+#### 정보 누설 지점:
+1. **Node Manager의 Occupancy** (`utils/node_manager.py:125-131`)
+   ```python
+   for location in robot_locations:  # 모든 에이전트 위치
+       if index == current_index:
+           occupancy[index] = -1  # 자신
+       else:
+           occupancy[index] = 1   # 다른 모든 에이전트
+   ```
+
+2. **Ground Truth Occupancy** (`utils/ground_truth_node_manager.py:132-134`)
+   - Ground truth 그래프에도 모든 에이전트 위치 표시
+
+3. **학습 데이터 사용** (`utils/agent.py:186`)
+   ```python
+   node_occupancy = self.occupancy.reshape(-1, 1)  # 신경망 입력으로 사용
+   ```
+
+### 수정 내용
+
+#### 1. **Node Manager** (`utils/node_manager.py`)
+**변경 전**:
+```python
+def get_all_node_graph(self, robot_location, robot_locations):
+    # ... 기존 코드 ...
+    occupancy = np.zeros((n_nodes, 1))
+    for location in robot_locations:
+        location_in_graph = self.nodes_dict.find((location[0], location[1])).data.coords
+        index = np.argwhere(node_coords_to_check == location_in_graph[0] + location_in_graph[1] * 1j)[0][0]
+        if index == current_index:
+            occupancy[index] = -1
+        else:
+            occupancy[index] = 1
+```
+
+**변경 후**:
+```python
+def get_all_node_graph(self, robot_location):  # robot_locations 파라미터 제거
+    # ... 기존 코드 ...
+    # Modified: Only mark current robot's position in occupancy (no global position sharing)
+    occupancy = np.zeros((n_nodes, 1))
+    occupancy[current_index] = -1  # Mark only current robot's position
+```
+
+#### 2. **Ground Truth Node Manager** (`utils/ground_truth_node_manager.py`)
+**변경 전**:
+```python
+def get_ground_truth_observation(self, robot_location, robot_locations):
+    # ... 기존 코드 ...
+    occupancy = np.zeros((n_nodes, 1))
+    for location in robot_locations:
+        # 모든 에이전트 위치 표시
+```
+
+**변경 후**:
+```python
+def get_ground_truth_observation(self, robot_location):  # robot_locations 파라미터 제거
+    # ... 기존 코드 ...
+    # Modified: Only mark current robot's position in occupancy (no global position sharing)
+    occupancy = np.zeros((n_nodes, 1))
+    occupancy[current_index] = -1  # Mark only current robot's position
+```
+
+#### 3. **Agent** (`utils/agent.py`)
+**변경 전**:
+```python
+def update_planning_state(self, robot_locations):
+    self.node_coords, self.utility, ... = \
+        self.node_manager.get_all_node_graph(self.location, robot_locations)
+```
+
+**변경 후**:
+```python
+def update_planning_state(self):  # robot_locations 파라미터 제거
+    self.node_coords, self.utility, ... = \
+        self.node_manager.get_all_node_graph(self.location)
+```
+
+#### 4. **Multi Agent Worker & Test Worker**
+**모든 호출 지점 수정**:
+- `utils/multi_agent_worker.py`: Lines 82, 95, 231, 248
+- `utils/test_worker.py`: Line 60
+
+**변경 전**:
+```python
+robot.update_planning_state(self.env.robot_locations)
+ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, self.env.robot_locations)
+```
+
+**변경 후**:
+```python
+robot.update_planning_state()
+ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
+```
+
+### 수정 효과
+
+#### ✅ **수정 전 (하이브리드 방식)**:
+- **FOV 기반 궤적**: FOV 내 감지된 에이전트의 궤적 (120°, 10m)
+- **글로벌 위치 정보**: 모든 에이전트의 정확한 위치를 occupancy로 공유 ❌
+
+#### ✅ **수정 후 (진정한 분산 학습)**:
+- **개별 Occupancy**: 각 에이전트는 자신의 위치만 노드 그래프에 표시
+- **FOV 기반 궤적**: FOV 내 감지된 에이전트의 궤적만 사용 (120°, 10m)
+- **글로벌 위치 정보 공유**: 완전히 제거됨 ✅
+
+#### 5. **Test Worker 추가 수정** (`utils/test_worker.py`)
+**변경 전** (Line 179):
+```python
+robot.update_planning_state(self.env.robot_locations)
+```
+
+**변경 후**:
+```python
+robot.update_planning_state()
+```
+
+**확인 사항**:
+- `test_driver.py`: occupancy 관련 직접 코드 없음 (정상)
+- `test_parameter.py`: `USE_COMMUNICATION = False` 올바르게 설정됨
+- 모든 호출 지점에서 `robot_locations` 파라미터 사용 제거 완료
+
+### 결론
+이제 **훈련**과 **테스트** 모두에서 `USE_COMMUNICATION=False` 설정 하에 진정한 분산 학습이 이루어집니다:
+- 각 에이전트는 자신의 관측(individual occupancy)만 사용
+- 다른 에이전트의 정보는 오직 FOV 내 시각적 감지를 통한 궤적만 활용
+- 글로벌 위치 정보 누설이 완전히 차단됨
+- **훈련(`driver.py`)**과 **테스트(`test_driver.py`)** 환경에서 동일한 조건 적용
   - 궤적 추출: FOV 내 감지된 다른 에이전트의 최근 10스텝 궤적만 사용
 
   4. 학습 데이터 구성 (driver.py:234-289)

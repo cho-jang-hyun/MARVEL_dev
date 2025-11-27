@@ -78,8 +78,8 @@ class MultiAgentWorker:
         done = False
         for robot in self.robot_list:
             robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
-        for robot in self.robot_list:    
-            robot.update_planning_state(self.env.robot_locations)
+        for robot in self.robot_list:
+            robot.update_planning_state()
 
         for i in range(MAX_EPISODE_STEP):
 
@@ -92,7 +92,7 @@ class MultiAgentWorker:
                     robot_locations=self.env.robot_locations,
                     trajectory_buffer=self.trajectory_buffer
                 )
-                ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, self.env.robot_locations)
+                ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
 
                 robot.save_observation(observation)
                 robot.save_ground_truth_observation(ground_truth_observation)
@@ -228,7 +228,7 @@ class MultiAgentWorker:
                 # When USE_COMMUNICATION=False, agents rely solely on FOV-detected trajectories
                 if USE_COMMUNICATION:
                     robot.save_all_indices(curr_node_indices)
-                robot.update_planning_state(self.env.robot_locations)
+                robot.update_planning_state()
                 robot.save_done(done)
 
             if done:
@@ -245,7 +245,7 @@ class MultiAgentWorker:
                 robot_locations=self.env.robot_locations,
                 trajectory_buffer=self.trajectory_buffer
             )
-            ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, self.env.robot_locations)
+            ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
             robot.save_next_observations(observation, next_node_index_list)
             robot.save_next_ground_truth_observations(ground_truth_observation)
             for i in range(len(self.episode_buffer)):
