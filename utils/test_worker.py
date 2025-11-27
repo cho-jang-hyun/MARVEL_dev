@@ -450,8 +450,8 @@ class TestWorker:
         plt.tight_layout()
 
         # Save the frame
-        if self.save_image:
-            plt.savefig(gifs_path + f'/individual_views_{self.global_step}_{step}.png', dpi=150, bbox_inches='tight')
+        # if self.save_image:
+        #     plt.savefig(gifs_path + f'/individual_views_{self.global_step}_{step}.png', dpi=150, bbox_inches='tight')
         plt.close()
 
     def plot_local_env_sim(self, step, robot_locations, robot_headings):

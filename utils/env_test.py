@@ -78,7 +78,8 @@ class Env:
     def import_ground_truth(self, map_index):
         map_dir = f'maps_test'
         map_list = os.listdir(map_dir)
-        name = map_list[map_index]
+        # name = map_list[map_index]
+        name = '2.png'
         ground_truth = (io.imread(map_dir + '/' + name, 1)).astype(int)
 
         ground_truth = block_reduce(ground_truth, 2, np.min)

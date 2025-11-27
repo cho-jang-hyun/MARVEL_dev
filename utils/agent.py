@@ -324,7 +324,7 @@ class Agent:
                 neighbor_best_indices.append(top_n_indices)
             else:
                 neighbor_best_headings.append(heading_candidates)
-                neighbor_best_indices.append(np.zeros((1,3)))
+                neighbor_best_indices.append(np.zeros(3))
         neighbor_best_headings = torch.stack(neighbor_best_headings).unsqueeze(0).to(self.device)
         return neighbor_best_headings, neighbor_best_indices
     

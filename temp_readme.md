@@ -1183,6 +1183,86 @@ robot.update_planning_state()
 - 다른 에이전트의 정보는 오직 FOV 내 시각적 감지를 통한 궤적만 활용
 - 글로벌 위치 정보 누설이 완전히 차단됨
 - **훈련(`driver.py`)**과 **테스트(`test_driver.py`)** 환경에서 동일한 조건 적용
+
+---
+
+## 🔗 각 Agent별 독립 Node Manager 구현 (2024-11-27 추가 수정)
+
+### 문제점 발견
+기존 코드에서 모든 agent가 동일한 `node_manager`를 공유하여 frontier_distribution, utility, map belief 등이 모두 공유되고 있었습니다.
+
+#### 정보 공유 문제:
+- **공유되던 정보**: frontier_distribution, utility, guidepost, map belief
+- **결과**: 모든 agent가 동일한 환경 인식으로 분산 학습 효과 제한
+
+### 수정 내용
+
+#### 1. **MultiAgentWorker** (`utils/multi_agent_worker.py:53-64`)
+**변경 전**:
+```python
+self.node_manager = NodeManager(self.fov, self.sensor_range, plot=self.save_image)
+self.robot_list = [Agent(i, ..., self.node_manager, ...) for i in range(self.n_agents)]
+```
+
+**변경 후**:
+```python
+# Create independent node managers for each agent to ensure decentralized learning
+self.robot_list = []
+for i in range(self.n_agents):
+    individual_node_manager = NodeManager(self.fov, self.sensor_range, plot=self.save_image)
+    individual_ground_truth_node_manager = GroundTruthNodeManager(individual_node_manager, ...)
+    agent = Agent(i, ..., individual_node_manager, individual_ground_truth_node_manager, ...)
+    self.robot_list.append(agent)
+```
+
+#### 2. **TestWorker** (`utils/test_worker.py:35-43`)
+동일하게 각 agent별 독립 node_manager 생성으로 수정
+
+### 수정 효과
+이제 각 agent가 **완전히 독립적**으로 가지는 정보:
+- ✅ **Individual Map Belief**: 각자의 탐사 기록
+- ✅ **Individual Frontier Distribution**: 각자의 frontier 인식
+- ✅ **Individual Utility**: 각자의 노드 유틸리티
+- ✅ **Individual Occupancy**: 자신의 위치만 표시
+
+---
+
+## 🎨 Agent별 개별 정보 시각화 기능 추가 (2024-11-27)
+
+각 agent의 독립적인 정보를 확인할 수 있도록 새로운 시각화 기능을 추가했습니다.
+
+### 새로운 시각화: `plot_individual_agent_views()`
+
+#### **3행 레이아웃**:
+1. **1행**: Global Environment (참조용)
+2. **2행**: 각 Agent별 Individual Map Belief
+3. **3행**: 각 Agent별 Frontier Distribution (극좌표계)
+
+#### **주요 기능**:
+- **독립성 확인**: 각 agent가 다른 map belief와 frontier distribution을 가짐을 시각화
+- **Polar Plot**: frontier distribution을 극좌표계로 표현
+- **통계 정보**: 하단에 agent별 frontier 통계 비교
+- **자동 생성**: 5프레임마다 `individual_views_{episode}_{step}.png` 파일로 저장
+
+#### **TestWorker 수정** (`utils/test_worker.py:157-163`)
+```python
+if self.save_image:
+    self.plot_local_env_sim(num_frame, robot_location_sim_step, robot_heading_sim_step)
+    # Also create individual agent views to show decentralized learning
+    if num_frame % 5 == 0:
+        self.plot_individual_agent_views(num_frame, robot_location_sim_step, robot_heading_sim_step)
+```
+
+### 시각화로 확인 가능한 내용
+- 🔍 **각 agent가 다른 map belief를 가짐**
+- 🔍 **각 agent가 다른 frontier distribution을 가짐**
+- 🔍 **분산 학습의 독립성 증명**
+- 🔍 **agent별 탐사 진행 차이**
+
+### 최종 달성: 완전한 분산 학습
+- **정보 공유 없음**: occupancy, frontier_distribution, utility, map belief 모두 독립
+- **FOV 기반 감지**: 다른 agent 정보는 오직 시각적 감지된 궤적만
+- **시각적 검증**: 개별 agent 정보를 통해 독립성 확인 가능
   - 궤적 추출: FOV 내 감지된 다른 에이전트의 최근 10스텝 궤적만 사용
 
   4. 학습 데이터 구성 (driver.py:234-289)
