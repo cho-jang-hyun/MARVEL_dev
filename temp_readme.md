@@ -1030,6 +1030,78 @@ USE_COMMUNICATION = False  # True: Use all agent communication
 - 다른 agent의 전역 위치 정보는 사용하지 않음
 - Training에서 `USE_COMMUNICATION=False`로 학습된 모델이 test에서 올바르게 평가됨
 
+
+### 학습 환경 정보 교류 제한 검증 결과:
+
+  1. 정보 교류 제한 설정 (parameter.py:101-104)
+
+  USE_COMMUNICATION = False  # 에이전트간 통신 비활성화
+
+  2. 학습 알고리즘 조정 (driver.py:53-72)
+
+  - USE_COMMUNICATION=False일 때 자동으로 통신 기반 알고리즘 비활성화
+  - TRAIN_ALGO 3 → 2 (Ground Truth만, 통신 없음)
+  - TRAIN_ALGO 1 → 0 (SAC만, 통신 없음)
+
+  3. FOV 기반 궤적 관측 (utils/agent.py:421-486)
+
+  - 거리 제한: distance <= sensor_range (10m)
+  - 각도 제한: |angle_diff| <= fov/2 (120°/2 = 60°)
+  - 궤적 추출: FOV 내 감지된 다른 에이전트의 최근 10스텝 궤적만 사용
+
+  4. 학습 데이터 구성 (driver.py:234-289)
+
+  - 궤적 정보: neighbor_best_headings (line 234-235)
+  - 통신 정보: USE_COMMUNICATION=False일 때 사용되지 않음 (line 256-261)
+
+  5. 신경망 아키텍처 (utils/model.py)
+
+  - TrajectoryEncoder: FOV 내 관측된 궤적을 transformer로 인코딩
+  - 궤적 임베딩과 현재 상태를 융합하여 정책 학습
+
+  결론: 시스템이 에이전트간 직접적 정보 교류 없이, 각 에이전트가 자신의 FOV(120°, 10m) 내에서 시각적으로 관측한
+  다른 에이전트들의 궤적 정보만을 활용하여 학습하도록 올바르게 구현되어 있습니다.
+
+### 테스트 환경 분석 결과:
+
+  1. 테스트 파라미터에서 통신 비활성화 (test_parameter.py:78-79)
+
+  USE_COMMUNICATION = False  # 테스트에서도 통신 비활성화
+
+  2. 동일한 궤적 추적 시스템 (utils/test_worker.py:43-53)
+
+  - 훈련과 동일하게 trajectory_buffer 사용
+  - 각 에이전트의 최근 10스텝 궤적 저장
+  - FOV 내 감지된 에이전트만 추적
+
+  3. FOV 기반 관측 (utils/test_worker.py:83-87)
+
+  observation = robot.get_observation(
+      pad=False,
+      robot_locations=self.env.robot_locations,
+      trajectory_buffer=self.trajectory_buffer  # FOV 내 궤적만 사용
+  )
+
+  4. Agent 초기화에서 통신 모듈 제거 (utils/test_worker.py:37)
+
+  # ground_truth_node_manager 파라미터를 None으로 설정
+  self.robot_list = [Agent(i, policy_net, self.fov, self.env.angles[i],
+                          self.sensor_range, self.node_manager, None, ...)]
+
+  5. 신경망 모델 일관성 (test_driver.py:40-45)
+
+  - 동일한 PolicyNet 사용 (use_trajectory=USE_TRAJECTORY)
+  - 훈련 시와 동일한 trajectory encoder 활용
+
+  결론:
+
+  test_driver.py를 통한 GIF 생성 시에도:
+  - 통신 없음: USE_COMMUNICATION = False
+  - FOV 제한: 120도, 10m 범위 내 관측만
+  - 궤적 기반: 시각적으로 감지된 다른 에이전트의 궤적만 활용
+  - 분산 학습: 각 에이전트가 독립적으로 의사결정
+
+
 ---
 
 ## 💡 향후 개선 방향
