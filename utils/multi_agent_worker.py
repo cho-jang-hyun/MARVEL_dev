@@ -49,12 +49,19 @@ class MultiAgentWorker:
 
         self.env = Env(global_step, self.fov, self.sensor_range, plot=self.save_image)
         self.n_agents = N_AGENTS
-        self.node_manager = NodeManager(self.fov, self.sensor_range, plot=self.save_image)
-        self.ground_truth_node_manager = GroundTruthNodeManager(self.node_manager, self.env.ground_truth_info, self.sensor_range,
-                                                                device=self.device, plot=self.save_image)
 
-        self.robot_list = [Agent(i, policy_net, self.fov, self.env.angles[i], self.sensor_range, self.node_manager, self.ground_truth_node_manager, self.device, self.save_image) for i in
-                           range(self.n_agents)]
+        # Create independent node managers for each agent to ensure decentralized learning
+        self.robot_list = []
+        for i in range(self.n_agents):
+            # Each agent gets its own independent node_manager and ground_truth_node_manager
+            individual_node_manager = NodeManager(self.fov, self.sensor_range, plot=self.save_image)
+            individual_ground_truth_node_manager = GroundTruthNodeManager(individual_node_manager, self.env.ground_truth_info, self.sensor_range,
+                                                                          device=self.device, plot=self.save_image)
+
+            agent = Agent(i, policy_net, self.fov, self.env.angles[i], self.sensor_range,
+                         individual_node_manager, individual_ground_truth_node_manager,
+                         self.device, self.save_image)
+            self.robot_list.append(agent)
 
         self.episode_buffer = []
         self.perf_metrics = dict()
@@ -183,7 +190,7 @@ class MultiAgentWorker:
                     velocity
                 ))
 
-                node = self.node_manager.nodes_dict.find((next_location[0], next_location[1])).data
+                node = robot.node_manager.nodes_dict.find((next_location[0], next_location[1])).data
                 observable_frontiers = node.observable_frontiers
                 observable_frontiers = np.array(list(observable_frontiers))
                 if observable_frontiers.shape[0] > 0:
@@ -348,7 +355,7 @@ class MultiAgentWorker:
 
         # Ground truth data
         plt.subplot(1, 3, 3)
-        plt.imshow(self.ground_truth_node_manager.ground_truth_map_info.map, cmap='gray')
+        plt.imshow(self.robot_list[0].ground_truth_node_manager.ground_truth_map_info.map, cmap='gray')
         plt.xlim(xlim[0], xlim[1])
         plt.ylim(ylim[0], ylim[1])
         for i, (location, heading) in enumerate(zip(robot_locations, robot_headings)):
@@ -361,8 +368,8 @@ class MultiAgentWorker:
             cone = Wedge(center=(location[0], location[1]), r=self.sensor_range / CELL_SIZE, theta1=(heading-self.fov/2), 
                          theta2=(heading+self.fov/2), color=c, alpha=0.5, zorder=10)
             plt.gca().add_artist(cone)
-            nodes = get_cell_position_from_coords(self.ground_truth_node_manager.ground_truth_node_coords, self.ground_truth_node_manager.ground_truth_map_info)
-            plt.scatter(nodes[:, 0], nodes[:, 1], c=self.ground_truth_node_manager.explored_sign, s=8, zorder=2)
+            nodes = get_cell_position_from_coords(self.robot_list[0].ground_truth_node_manager.ground_truth_node_coords, self.robot_list[0].ground_truth_node_manager.ground_truth_map_info)
+            plt.scatter(nodes[:, 0], nodes[:, 1], c=self.robot_list[0].ground_truth_node_manager.explored_sign, s=8, zorder=2)
 
         plt.axis('off')
         robot_headings = [f"{color_name[robot.id]}- {robot.heading:.0f}°" for robot in self.robot_list]

@@ -31,11 +31,16 @@ class TestWorker:
         self.scaling = 0.04
 
         self.env = Env(global_step, self.fov, self.n_agents, self.sensor_range, plot=self.save_image)
-        self.node_manager = NodeManager(self.fov, self.sensor_range, utility_range, plot=self.save_image)
-        self.ground_truth_node_manager = GroundTruthNodeManager(self.node_manager, self.env.ground_truth_info, self.sensor_range,
-                                                                device=self.device, plot=self.save_image)
-        self.robot_list = [Agent(i, policy_net, self.fov, self.env.angles[i], self.sensor_range, self.node_manager, None, self.device, self.save_image) for i in
-                           range(self.n_agents)]
+
+        # Create independent node managers for each agent to ensure decentralized testing
+        self.robot_list = []
+        for i in range(self.n_agents):
+            # Each agent gets its own independent node_manager for decentralized testing
+            individual_node_manager = NodeManager(self.fov, self.sensor_range, utility_range, plot=self.save_image)
+
+            agent = Agent(i, policy_net, self.fov, self.env.angles[i], self.sensor_range,
+                         individual_node_manager, None, self.device, self.save_image)
+            self.robot_list.append(agent)
 
         self.perf_metrics = dict()
 
@@ -151,7 +156,11 @@ class TestWorker:
                 
                 if self.save_image:
                     num_frame = i * self.sim_steps + l
+                    # Plot both the original view and individual agent views
                     self.plot_local_env_sim(num_frame, robot_location_sim_step, robot_heading_sim_step)
+                    # Also create individual agent views to show decentralized learning
+                    if num_frame % 5 == 0:  # Save individual views every 5 frames to avoid too many files
+                        self.plot_individual_agent_views(num_frame, robot_location_sim_step, robot_heading_sim_step)
 
             for robot, next_location, next_node_index in zip(self.robot_list, selected_locations, next_node_index_list):
                 self.env.final_sim_step(next_location, robot.id)
@@ -311,6 +320,139 @@ class TestWorker:
                 detected_robots.append(other_robot.id)
 
         return detected_robots
+
+    def plot_individual_agent_views(self, step, robot_locations, robot_headings):
+        """
+        Create visualization showing each agent's individual map belief and frontier distribution
+        to demonstrate they have different information due to decentralized learning.
+        """
+        plt.switch_backend('agg')
+
+        # Layout: 3 rows - Global view, Individual maps, Frontier distributions
+        n_agents = self.n_agents
+        fig = plt.figure(figsize=(4 * n_agents, 12))
+
+        color_list = ['r', 'b', 'g', 'y', 'c', 'm']
+        color_name = ['Red', 'Blue', 'Green', 'Yellow', 'Cyan', 'Magenta']
+
+        # Row 1: Global view for reference
+        plt.subplot(3, n_agents, 1)
+        plt.imshow(self.env.robot_belief, cmap='gray')
+        plt.title('Global Environment', fontsize=12, fontweight='bold')
+        plt.axis('off')
+
+        # Draw all agents on global view
+        for i, (robot, location, heading) in enumerate(zip(self.robot_list, robot_locations, robot_headings)):
+            plot_id = robot.id % len(color_list)
+            c = color_list[plot_id]
+            plt.plot(location[0], location[1], f'{c}o', markersize=8, zorder=5)
+
+        # Row 2: Each agent's individual map belief
+        for robot in self.robot_list:
+            plt.subplot(3, n_agents, n_agents + robot.id + 1)
+            # Get agent's individual map belief
+            agent_map = robot.map_info.map
+            plt.imshow(agent_map, cmap='gray')
+            plt.title(f'Agent {robot.id} Map Belief', fontsize=10, fontweight='bold')
+            plt.axis('off')
+
+            # Show agent's current location
+            agent_location = robot_locations[robot.id]
+            plot_id = robot.id % len(color_list)
+            c = color_list[plot_id]
+            plt.plot(agent_location[0], agent_location[1], f'{c}o', markersize=6, zorder=5)
+
+            # Show agent's nodes and utilities
+            try:
+                if hasattr(robot.node_manager, 'nodes_dict') and robot.node_manager.nodes_dict:
+                    node_coords = []
+                    node_utilities = []
+                    for node_item in robot.node_manager.nodes_dict:
+                        node = node_item.data
+                        coords_cell = get_cell_position_from_coords(np.array(node.coords), robot.map_info)
+                        node_coords.append(coords_cell)
+                        node_utilities.append(node.utility)
+
+                    if node_coords:
+                        node_coords = np.array(node_coords)
+                        node_utilities = np.array(node_utilities)
+
+                        # Show high utility nodes
+                        high_utility_mask = node_utilities > 0
+                        if np.any(high_utility_mask):
+                            plt.scatter(node_coords[high_utility_mask, 0], node_coords[high_utility_mask, 1],
+                                       c='orange', s=20, alpha=0.7, zorder=3, label='High Utility Nodes')
+            except Exception as e:
+                print(f"Warning: Could not visualize nodes for agent {robot.id}: {e}")
+
+        # Row 3: Each agent's frontier distribution
+        for robot in self.robot_list:
+            plt.subplot(3, n_agents, 2 * n_agents + robot.id + 1)
+
+            # Get agent's frontier distribution from their node manager
+            try:
+                # Update planning state to get latest frontier distribution
+                robot.update_planning_state()
+
+                if hasattr(robot, 'frontier_distribution') and robot.frontier_distribution is not None:
+                    frontier_dist = robot.frontier_distribution
+                    # Ensure frontier_dist is a 1D array
+                    if frontier_dist.ndim > 1:
+                        frontier_dist = frontier_dist.flatten()
+
+                    angles = np.arange(0, 360, 360 / len(frontier_dist))
+
+                    # Create polar plot for frontier distribution
+                    ax = plt.subplot(3, n_agents, 2 * n_agents + robot.id + 1, projection='polar')
+                    ax.plot(np.radians(angles), frontier_dist, color=color_list[robot.id % len(color_list)], linewidth=2)
+                    ax.fill(np.radians(angles), frontier_dist, color=color_list[robot.id % len(color_list)], alpha=0.3)
+                    ax.set_title(f'Agent {robot.id} Frontier Distribution', fontsize=10, fontweight='bold', pad=20)
+                    ax.set_theta_zero_location('N')  # 0 degrees at top
+                    ax.set_theta_direction(-1)  # Clockwise
+                    max_val = max(frontier_dist) if max(frontier_dist) > 0 else 1
+                    ax.set_ylim(0, max_val * 1.1)
+
+                    # Add frontier count info
+                    total_frontiers = np.sum(frontier_dist)
+                    ax.text(0.02, 0.98, f'Total: {total_frontiers:.1f}', transform=ax.transAxes,
+                           verticalalignment='top', fontsize=8,
+                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                else:
+                    plt.text(0.5, 0.5, f'No frontier data\nfor Agent {robot.id}',
+                            ha='center', va='center', transform=plt.gca().transAxes, fontsize=10)
+                    plt.axis('off')
+            except Exception as e:
+                plt.text(0.5, 0.5, f'Error visualizing\nAgent {robot.id}\nFrontier Distribution\n{str(e)[:30]}...',
+                        ha='center', va='center', transform=plt.gca().transAxes, fontsize=8)
+                plt.axis('off')
+
+        # Add statistics for comparison
+        stats_text = "Agent Comparison Stats:\n"
+        for robot in self.robot_list:
+            try:
+                if hasattr(robot, 'frontier_distribution') and robot.frontier_distribution is not None:
+                    total_frontiers = np.sum(robot.frontier_distribution)
+                    max_frontier = np.max(robot.frontier_distribution)
+                    stats_text += f"Agent {robot.id}: Total={total_frontiers:.1f}, Max={max_frontier:.1f}\n"
+                else:
+                    stats_text += f"Agent {robot.id}: No frontier data\n"
+            except:
+                stats_text += f"Agent {robot.id}: Error getting data\n"
+
+        # Add text box with statistics
+        fig.text(0.02, 0.02, stats_text, fontsize=9, verticalalignment='bottom',
+                bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+
+        # Overall title
+        plt.suptitle(f'Step {step}: Individual Agent Views (Decentralized Learning)\n'
+                    f'Each agent has independent map beliefs and frontier distributions',
+                    fontsize=14, fontweight='bold')
+        plt.tight_layout()
+
+        # Save the frame
+        if self.save_image:
+            plt.savefig(gifs_path + f'/individual_views_{self.global_step}_{step}.png', dpi=150, bbox_inches='tight')
+        plt.close()
 
     def plot_local_env_sim(self, step, robot_locations, robot_headings):
         plt.switch_backend('agg')
