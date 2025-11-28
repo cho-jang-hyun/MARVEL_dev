@@ -79,7 +79,7 @@ class Env:
         map_dir = f'maps_test'
         map_list = os.listdir(map_dir)
         # name = map_list[map_index]
-        name = '2.png'
+        name = '2.png' # map number 
         ground_truth = (io.imread(map_dir + '/' + name, 1)).astype(int)
 
         ground_truth = block_reduce(ground_truth, 2, np.min)

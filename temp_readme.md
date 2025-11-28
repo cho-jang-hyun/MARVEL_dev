@@ -1318,6 +1318,45 @@ if self.save_image:
   - 분산 학습: 각 에이전트가 독립적으로 의사결정
 
 
+  ### 1. TestWorker 초기화 (utils/test_worker.py:37-43):
+  for i in range(self.n_agents):
+      # Each agent gets its own independent node_manager for decentralized testing
+      individual_node_manager = NodeManager(self.fov, self.sensor_range, utility_range,
+                                           plot=self.save_image)
+
+      agent = Agent(i, policy_net, self.fov, self.env.angles[i], self.sensor_range,
+                   individual_node_manager, None, self.device, self.save_image)
+      self.robot_list.append(agent)
+
+  2. 각 agent의 frontier_distribution (utils/agent.py:188):
+  def get_observation(self, ...):
+      ...
+      node_frontier_distribution = self.frontier_distribution.reshape(-1, self.num_angles_bin)
+      # self.frontier_distribution은 self.node_manager에서 가져옴
+
+  3. update_planning_state (utils/agent.py:179-180):
+  def update_planning_state(self):
+      self.node_coords, self.utility, ..., self.frontier_distribution, ... = \
+          self.node_manager.get_all_node_graph(self.location)
+
+  실행 흐름:
+
+  test_driver.py (line 139)
+    └─> TestWorker 생성
+         └─> 각 agent 생성 (line 37-43)
+              ├─> individual_node_manager (독립적)
+              ├─> 독립적인 frontier_distribution
+              └─> 독립적인 node graph
+
+  결론:
+
+  ✅ test_driver.py: 각 agent가 고유한 NodeManager 보유
+  ✅ driver.py (training): 동일하게 각 agent가 고유한 NodeManager 보유 (multi_agent_worker.py:57)
+
+  모든 실행 환경에서 완전히 분산화된(decentralized) 구조입니다!
+
+
+
 ---
 
 ## 💡 향후 개선 방향

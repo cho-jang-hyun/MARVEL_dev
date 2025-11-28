@@ -113,6 +113,29 @@ def run_test():
                     print('|#Std distance to {} explored:'.format(INITIAL_EXPLORED_RATE), np.array(dist_to_0_90).std())
                     print('|#Average overlap ratio:', np.array(all_overlap_ratio_history).mean())
                     print('|#Std overlap ratio:', np.array(all_overlap_ratio_history).std())
+                    
+                    lines = [
+                    f"|#Test set: {TEST_SET}",
+                    f"|#Total test: {NUM_TEST}",
+                    f"|#Number of agents: {n_agent}",
+                    f"|#FOV (degrees): {fov}",
+                    f"|#Sensor range (m): {sensor_range}",
+                    f"|#Average max length: {np.array(dist_history).mean()}",
+                    f"|#Max max length: {np.array(dist_history).max()}",
+                    f"|#Min max length: {np.array(dist_history).min()}",
+                    f"|#Std max length: {np.array(dist_history).std()}",
+                    f"|#Average explored rate: {np.array(explore_rate).mean()}",
+                    f"|#Average success rate: {np.array(success_rate).mean()}",
+                    f"|#Average distance to {INITIAL_EXPLORED_RATE} explored: {np.array(dist_to_0_90).mean()}",
+                    f"|#Std distance to {INITIAL_EXPLORED_RATE} explored: {np.array(dist_to_0_90).std()}",
+                    f"|#Average overlap ratio: {np.array(all_overlap_ratio_history).mean()}",
+                    f"|#Std overlap ratio: {np.array(all_overlap_ratio_history).std()}",
+                    ]
+
+                    with open("record.txt", "a") as f:
+                        for line in lines:
+                            f.write(line + "\n")
+                        f.write("\n")  # 실행 1회 구분용 빈 줄
 
                 except KeyboardInterrupt:
                     print("CTRL_C pressed. Killing remote workers")
