@@ -68,6 +68,7 @@ class GroundTruthNodeManager:
         highest_utility_angles = []
         frontiers_distribution = []
         heading_visited = []
+        visited_by_others = []
 
         n_nodes = all_node_coords.shape[0]
         adjacent_matrix = np.ones((n_nodes, n_nodes)).astype(int)
@@ -79,6 +80,7 @@ class GroundTruthNodeManager:
             highest_utility_angles.append(node.highest_utility_angle)
             frontiers_distribution.append(node.frontiers_distribution)
             heading_visited.append(node.heading_visited)
+            visited_by_others.append(node.visited_by_others)
             for neighbor in node.neighbor_list:
                 index = np.argwhere(node_coords_to_check == neighbor[0] + neighbor[1] * 1j)
                 index = index[0][0]
@@ -89,6 +91,7 @@ class GroundTruthNodeManager:
         highest_utility_angles = np.array(highest_utility_angles)
         frontiers_distribution = np.array(frontiers_distribution)
         heading_visited = np.array(heading_visited)
+        visited_by_others = np.array(visited_by_others)
 
         current_index = np.argwhere(node_coords_to_check == robot_location[0] + robot_location[1] * 1j)[0][0]
         
@@ -106,6 +109,7 @@ class GroundTruthNodeManager:
         self.highest_utility_angles = highest_utility_angles
         self.frontiers_distribution = frontiers_distribution
         self.heading_visited = heading_visited
+        self.visited_by_others = visited_by_others
 
         indices = np.argwhere(utility > 0).reshape(-1)
         utility_node_coords = all_node_coords[indices]
@@ -140,6 +144,7 @@ class GroundTruthNodeManager:
         node_highest_utility_angles = highest_utility_angles.reshape(-1, 1)
         node_frontiers_distribution = frontiers_distribution.reshape(-1, self.num_angles_bin)
         node_heading_visited = heading_visited.reshape(-1, self.num_angles_bin)
+        node_visited_by_others = visited_by_others.reshape(-1, 1)
         current_index = current_index
         edge_mask = adjacent_matrix
         current_edge = neighbor_indices
@@ -153,7 +158,8 @@ class GroundTruthNodeManager:
         node_utility = node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
         node_frontiers_distribution = node_frontiers_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
         node_highest_utility_angles = node_highest_utility_angles / 360
-        node_inputs = np.concatenate((node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_explored_sign), axis=1)
+        # visited_by_others is already 0 or 1, no normalization needed
+        node_inputs = np.concatenate((node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_explored_sign), axis=1)
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
 
         assert node_coords.shape[0] < NODE_PADDING_SIZE, print(node_coords.shape[0], NODE_PADDING_SIZE)
@@ -339,6 +345,7 @@ class GroundTruthNodeManager:
             ground_truth_node.data.frontiers_distribution = node.data.frontiers_distribution
             ground_truth_node.data.highest_utility_angle = node.data.highest_utility_angle
             ground_truth_node.data.heading_visited = node.data.heading_visited
+            ground_truth_node.data.visited_by_others = node.data.visited_by_others
 
     def get_ground_truth_node_coords(location, ground_truth_map_info):
         x_min = ground_truth_map_info.map_origin_x
@@ -390,6 +397,7 @@ class Node:
         self.utility = -(sensor_range * 3.14 // FRONTIER_CELL_SIZE)
         self.explored = 0
         self.visited = 0
+        self.visited_by_others = 0  # Binary: marked when other agents visit this node
         self.highest_utility_angle = -360
         self.frontiers_distribution = np.zeros(num_angles_bin)
         self.heading_visited = np.zeros(num_angles_bin)

@@ -78,6 +78,7 @@ class NodeManager:
         frontiers_distribution = []
         highest_utility_angle = []
         heading_visited = []
+        visited_by_others = []
 
         n_nodes = all_node_coords.shape[0]
         adjacent_matrix = np.ones((n_nodes, n_nodes)).astype(int)
@@ -88,6 +89,7 @@ class NodeManager:
             frontiers_distribution.append(node.frontiers_distribution)
             heading_visited.append(node.heading_visited)
             highest_utility_angle.append(node.highest_utility_angle)
+            visited_by_others.append(node.visited_by_others)
 
             for neighbor in node.neighbor_list:
                 index = np.argwhere(node_coords_to_check == neighbor[0] + neighbor[1] * 1j)
@@ -99,6 +101,7 @@ class NodeManager:
         frontiers_distribution = np.array(frontiers_distribution)
         highest_utility_angle = np.array(highest_utility_angle)
         heading_visited = np.array(heading_visited)
+        visited_by_others = np.array(visited_by_others)
 
         indices = np.argwhere(utility > 0).reshape(-1)
         utility_node_coords = all_node_coords[indices]
@@ -125,7 +128,7 @@ class NodeManager:
         occupancy = np.zeros((n_nodes, 1))
         occupancy[current_index] = -1  # Mark only current robot's position
 
-        return all_node_coords, utility, guidepost, occupancy, adjacent_matrix, current_index, neighbor_indices, highest_utility_angle, frontiers_distribution, heading_visited, path_coords
+        return all_node_coords, utility, guidepost, occupancy, adjacent_matrix, current_index, neighbor_indices, highest_utility_angle, frontiers_distribution, heading_visited, visited_by_others, path_coords
 
     def Dijkstra(self, start):
         q = set()
@@ -279,6 +282,7 @@ class Node:
         self.heading_visited = np.zeros(self.num_angles_bin)
         self.observable_frontiers = self.initialize_observable_frontiers(frontiers, updating_map_info)
         self.visited = 0
+        self.visited_by_others = 0  # Binary: marked when other agents visit this node
 
         self.neighbor_matrix = -np.ones((NUM_NODE_NEIGHBORS, NUM_NODE_NEIGHBORS))
         self.neighbor_list = []

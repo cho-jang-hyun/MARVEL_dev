@@ -74,7 +74,7 @@ GAMMA = 1
 NUM_META_AGENT = 18
 
 # network parameters
-NODE_INPUT_DIM = 6
+NODE_INPUT_DIM = 7  # Changed from 6: added visited_by_others feature
 EMBEDDING_DIM = 128
 
 # Trajectory tracking parameters

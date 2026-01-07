@@ -220,6 +220,8 @@ class MultiAgentWorker:
                 reward_list.append(utility_reward + trajectory_reward)  
 
                 robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
+                # Mark nodes visited by other agents based on FoV detection
+                robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
 
             if self.robot_list[0].utility.sum() == 0:
                 done = True

@@ -69,7 +69,7 @@ class Agent:
         self.node_coords, self.utility, self.guidepost, self.occupancy = None, None, None, None
         self.current_index, self.adjacent_matrix, self.neighbor_indices = None, None, None
 
-        self.highest_utility_angles, self.frontier_distribution, self.heading_visited = None, None, None
+        self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.visited_by_others = None, None, None, None
         self.path_coords = None
 
         self.travel_dist = 0
@@ -176,7 +176,7 @@ class Agent:
                                        self.map_info)
 
     def update_planning_state(self):
-        self.node_coords, self.utility, self.guidepost, self.occupancy, self.adjacent_matrix, self.current_index, self.neighbor_indices, self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.path_coords = \
+        self.node_coords, self.utility, self.guidepost, self.occupancy, self.adjacent_matrix, self.current_index, self.neighbor_indices, self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.visited_by_others, self.path_coords = \
             self.node_manager.get_all_node_graph(self.location)
 
     def get_observation(self, pad=True, robot_locations=None, trajectory_buffer=None):
@@ -187,6 +187,7 @@ class Agent:
         node_highest_utility_angles = self.highest_utility_angles.reshape(-1, 1)
         node_frontier_distribution = self.frontier_distribution.reshape(-1, self.num_angles_bin)
         node_heading_visited = self.heading_visited.reshape(-1, self.num_angles_bin)
+        node_visited_by_others = self.visited_by_others.reshape(-1, 1)
         current_index = self.current_index
         edge_mask = self.adjacent_matrix
         current_edge = self.neighbor_indices
@@ -199,7 +200,8 @@ class Agent:
         node_utility = node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
         node_highest_utility_angles = node_highest_utility_angles / 360
         node_frontier_distribution = node_frontier_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
-        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles), axis=1)
+        # visited_by_others is already 0 or 1, no normalization needed
+        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others), axis=1)
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
         all_node_frontier_distribution = torch.Tensor(node_frontier_distribution).unsqueeze(0).to(self.device)
         node_heading_visited = torch.Tensor(node_heading_visited).unsqueeze(0).to(self.device)
@@ -484,7 +486,51 @@ class Agent:
         trajectory_mask = torch.BoolTensor(mask).unsqueeze(0).to(self.device)
 
         return detected_trajectories, trajectory_mask
-    
+
+    def mark_nodes_visited_by_others(self, robot_locations, trajectory_buffer):
+        """
+        Mark nodes as visited by other agents based on observed trajectories in FoV.
+
+        This method:
+        1. Detects other robots in FoV using get_robots_in_fov()
+        2. For each detected robot, retrieves its trajectory history
+        3. Identifies which nodes the detected robots have visited
+        4. Marks those nodes with visited_by_others = 1
+
+        Args:
+            robot_locations (np.ndarray): Array of all robot locations, shape (n_agents, 2)
+            trajectory_buffer (dict): Dictionary mapping agent_id to deque of (x, y, heading, velocity)
+
+        Returns:
+            None (modifies node_manager nodes in place)
+        """
+        detected_robot_ids = self.get_robots_in_fov(robot_locations)
+
+        for robot_id in detected_robot_ids:
+            # Skip if robot not in trajectory buffer or has empty trajectory
+            if robot_id not in trajectory_buffer or len(trajectory_buffer[robot_id]) == 0:
+                continue
+
+            trajectory = list(trajectory_buffer[robot_id])
+
+            for step in trajectory:
+                x, y, heading, velocity = step
+
+                # Skip zero-padded entries
+                if x == 0 and y == 0:
+                    continue
+
+                position = np.array([x, y])
+
+                # Find nearest node using quadtree
+                nodes_nearby = self.node_manager.nodes_dict.nearest_neighbors(position.tolist(), k=1)
+
+                if len(nodes_nearby) > 0:
+                    nearest_node = nodes_nearby[0]
+                    # Check distance threshold to ensure it's actually at this node
+                    if np.linalg.norm(nearest_node.data.coords - position) < NODE_RESOLUTION:
+                        nearest_node.data.visited_by_others = 1
+
     def calculate_overlap_reward(self, current_robot_location, all_robots_locations, robot_headings_list):
         ## Robot heading list in degrees
         current_sensing_mask = np.zeros_like(self.map_info.map)
