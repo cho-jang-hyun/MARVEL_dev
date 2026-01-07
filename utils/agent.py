@@ -247,19 +247,21 @@ class Agent:
         # Process trajectory information if available
         detected_trajectories = None
         trajectory_mask = None
+        trajectory_node_indices = None
         if robot_locations is not None and trajectory_buffer is not None:
-            detected_trajectories, trajectory_mask = self._get_detected_trajectories(
+            detected_trajectories, trajectory_mask, trajectory_node_indices = self._get_detected_trajectories(
                 robot_locations, trajectory_buffer
             )
 
         return [node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask,
                 all_node_frontier_distribution, node_heading_visited, node_neighbor_best_headings,
-                detected_trajectories, trajectory_mask]
+                detected_trajectories, trajectory_mask, trajectory_node_indices]
 
     def select_next_waypoint(self, observation, greedy = False):
-        _, _, _, _, current_edge, _, _, _, _, _, _ = observation
+        _, _, _, _, current_edge, _, _, _, _, _, _, _ = observation
         with torch.no_grad():
-            logp = self.policy_net(*observation[:9], detected_trajectories=observation[9], trajectory_mask=observation[10])
+            logp = self.policy_net(*observation[:9], detected_trajectories=observation[9],
+                                   trajectory_mask=observation[10], trajectory_node_indices=observation[11])
 
         if greedy:
             action_index = torch.argmax(logp, 1).long()
@@ -431,6 +433,7 @@ class Agent:
         Returns:
             detected_trajectories: torch.Tensor of shape [1, MAX_DETECTED_AGENTS, seq_len, feature_dim]
             trajectory_mask: torch.Tensor of shape [1, MAX_DETECTED_AGENTS], True for padded agents
+            trajectory_node_indices: torch.Tensor of shape [1, MAX_DETECTED_AGENTS, seq_len], -1 for invalid
         """
         # Detect robots in FOV
         detected_robot_ids = self.get_robots_in_fov(robot_locations)
@@ -441,6 +444,7 @@ class Agent:
         feature_dim = TRAJECTORY_FEATURE_DIM
 
         trajectories = np.zeros((max_agents, seq_len, feature_dim), dtype=np.float32)
+        trajectory_node_indices = np.full((max_agents, seq_len), -1, dtype=np.int64)  # -1 for invalid
         mask = np.ones(max_agents, dtype=bool)  # True means padded
 
         # Process each detected robot
@@ -463,6 +467,29 @@ class Agent:
                 heading = trajectory_array[:, 2]
                 velocity = trajectory_array[:, 3]
 
+                # Find corresponding node indices for each timestep
+                for t in range(seq_len):
+                    if x[t] == 0 and y[t] == 0:
+                        # Skip padded entries
+                        trajectory_node_indices[i, t] = -1
+                        continue
+
+                    position = np.array([x[t], y[t]])
+
+                    # Find nearest node
+                    if self.node_coords is not None and len(self.node_coords) > 0:
+                        # Calculate distances to all nodes
+                        distances = np.linalg.norm(self.node_coords - position, axis=1)
+                        nearest_idx = np.argmin(distances)
+
+                        # Check if nearest node is within threshold
+                        if distances[nearest_idx] < NODE_RESOLUTION:
+                            trajectory_node_indices[i, t] = nearest_idx
+                        else:
+                            trajectory_node_indices[i, t] = -1
+                    else:
+                        trajectory_node_indices[i, t] = -1
+
                 # Convert to relative coordinates (relative to current agent)
                 dx = x - self.location[0]
                 dy = y - self.location[1]
@@ -484,8 +511,9 @@ class Agent:
         # Convert to torch tensors
         detected_trajectories = torch.FloatTensor(trajectories).unsqueeze(0).to(self.device)
         trajectory_mask = torch.BoolTensor(mask).unsqueeze(0).to(self.device)
+        trajectory_node_indices_tensor = torch.LongTensor(trajectory_node_indices).unsqueeze(0).to(self.device)
 
-        return detected_trajectories, trajectory_mask
+        return detected_trajectories, trajectory_mask, trajectory_node_indices_tensor
 
     def mark_nodes_visited_by_others(self, robot_locations, trajectory_buffer):
         """
@@ -523,7 +551,7 @@ class Agent:
                 position = np.array([x, y])
 
                 # Find nearest node using quadtree
-                nodes_nearby = self.node_manager.nodes_dict.nearest_neighbors(position.tolist(), k=1)
+                nodes_nearby = self.node_manager.nodes_dict.nearest_neighbors(position.tolist())
 
                 if len(nodes_nearby) > 0:
                     nearest_node = nodes_nearby[0]

@@ -13,8 +13,7 @@ This file defines various parameters for:
 """
 TEST_SET = 'maps_test'
 LOAD_FOLDER_NAME = 'MARVEL'
-# load_path = f'load_model/{LOAD_FOLDER_NAME}'
-load_path = f'model/test_2'
+load_path = f'model/test_visit_node_and_node_embedding'
 gifs_path = f'results/gifs/{LOAD_FOLDER_NAME}'
 LOAD_MODEL = True  
 SAVE_IMG_GAP = 50
@@ -55,7 +54,7 @@ NUM_META_AGENT = 10
 INITIAL_EXPLORED_RATE = 0.90
 
 # Network parameters
-NODE_INPUT_DIM = 6
+NODE_INPUT_DIM = 7 # add visited node feature
 EMBEDDING_DIM = 128
 USE_TRAJECTORY = True  # Enable trajectory encoder
 
