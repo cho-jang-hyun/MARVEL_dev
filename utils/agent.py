@@ -582,7 +582,7 @@ class Agent:
         return overlap_reward
         
     def save_observation(self, observation):
-        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, detected_trajectories, trajectory_mask = observation
+        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, detected_trajectories, trajectory_mask, trajectory_node_indices = observation
         self.episode_buffer[0] += node_inputs
         self.episode_buffer[1] += node_padding_mask.bool()
         self.episode_buffer[2] += edge_mask.bool()
@@ -619,7 +619,7 @@ class Agent:
 
         self.episode_buffer[39] = copy.deepcopy(self.episode_buffer[38])[1:]
 
-        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, detected_trajectories, trajectory_mask = observation
+        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, detected_trajectories, trajectory_mask, trajectory_node_indices = observation
         self.episode_buffer[11] += node_inputs
         self.episode_buffer[12] += node_padding_mask.bool()
         self.episode_buffer[13] += edge_mask.bool()

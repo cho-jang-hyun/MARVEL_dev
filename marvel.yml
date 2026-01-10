@@ -403,6 +403,7 @@ dependencies:
       - python-dotenv==1.1.0
       - ray==2.44.0
       - uvloop==0.21.0
-      - wandb==0.17.5
+      - wandb==0.16.6
+      - protobuf==3.20.3
       - websockets==15.0.1
 prefix: /home/jimmy/miniconda3/envs/nav
