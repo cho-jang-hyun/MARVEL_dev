@@ -172,6 +172,9 @@ class MultiAgentWorker:
                     self.plot_local_env_sim(num_frame, robot_location_sim_step, robot_heading_sim_step)
 
             reward_list = []
+            # Collect robot headings for overlap reward calculation
+            robot_headings_list = [robot.heading for robot in self.robot_list]
+
             for robot, next_location, next_node_index in zip(self.robot_list, selected_locations, next_node_index_list):
                 self.env.final_sim_step(next_location, robot.id)
 
@@ -194,7 +197,7 @@ class MultiAgentWorker:
                 observable_frontiers = node.observable_frontiers
                 observable_frontiers = np.array(list(observable_frontiers))
                 if observable_frontiers.shape[0] > 0:
- 
+
                     coords = np.array(node.coords)
 
                     delta = observable_frontiers - coords
@@ -202,8 +205,8 @@ class MultiAgentWorker:
 
                     angle_diff = (angles - robot.heading + 180) % 360 - 180
                     current_observable_frontiers = observable_frontiers[np.abs(angle_diff) <= robot.fov / 2]
- 
-                    utility_reward = len(current_observable_frontiers) / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / (360/robot.fov))    
+
+                    utility_reward = len(current_observable_frontiers) / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / (360/robot.fov))
 
                 else:
                     utility_reward = 0
@@ -214,10 +217,18 @@ class MultiAgentWorker:
                 else:
                     angle_reward = np.cos(np.radians(robot.heading - preferred_angle))
 
-                trajectory_angle = np.degrees(np.arctan2(next_location[1] - robot.location[1], 
+                trajectory_angle = np.degrees(np.arctan2(next_location[1] - robot.location[1],
                                                next_location[0] - robot.location[0]) % (2 * np.pi))
-                trajectory_reward = np.cos(np.radians(robot.heading - trajectory_angle)) 
-                reward_list.append(utility_reward + trajectory_reward)  
+                trajectory_reward = np.cos(np.radians(robot.heading - trajectory_angle))
+
+                # Calculate overlap reward for this agent
+                overlap_reward = robot.calculate_overlap_reward(
+                    next_location,
+                    self.env.robot_locations,
+                    robot_headings_list
+                )
+
+                reward_list.append(utility_reward + trajectory_reward + overlap_reward)  
 
                 robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
                 # Mark nodes visited by other agents based on FoV detection
