@@ -223,7 +223,7 @@ class MultiAgentWorker:
 
                 # Calculate overlap reward for this agent
                 overlap_reward = robot.calculate_overlap_reward(
-                    next_location,
+                    robot.location,
                     self.env.robot_locations,
                     robot_headings_list
                 )
