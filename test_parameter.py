@@ -13,7 +13,7 @@ This file defines various parameters for:
 """
 TEST_SET = 'maps_test'
 LOAD_FOLDER_NAME = 'MARVEL'
-load_path = f'model/test_visit_node_and_embedding_and_reward'
+load_path = f'model/test_reward2'
 gifs_path = f'results/gifs/{LOAD_FOLDER_NAME}'
 LOAD_MODEL = True  
 SAVE_IMG_GAP = 50

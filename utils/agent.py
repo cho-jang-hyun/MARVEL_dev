@@ -563,11 +563,15 @@ class Agent:
         ## Robot heading list in degrees
         current_sensing_mask = np.zeros_like(self.map_info.map)
         other_robot_sensing_mask = np.zeros_like(self.map_info.map)
-        
-        for robot_location, robot_heading in zip(all_robots_locations, robot_headings_list):
-            if np.array_equal(current_robot_location, robot_location):       
-                current_sensing_mask = self.create_sensing_mask(robot_location, robot_heading, current_sensing_mask) 
-            else:
+
+        # Get robots in FoV (no communication - observation only)
+        detected_robot_ids = self.get_robots_in_fov(all_robots_locations)
+
+        for robot_id, (robot_location, robot_heading) in enumerate(zip(all_robots_locations, robot_headings_list)):
+            if robot_id == self.id:
+                current_sensing_mask = self.create_sensing_mask(robot_location, robot_heading, current_sensing_mask)
+            elif robot_id in detected_robot_ids:
+                # Only consider robots within FoV
                 other_robot_sensing_mask = self.create_sensing_mask(robot_location, robot_heading, other_robot_sensing_mask)
 
         # Keep cell value of 1 only for cells that hold a value of 255 in self.global_map_info.map
