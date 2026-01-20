@@ -580,14 +580,15 @@ class Agent:
         # Compute the number of cells that have a value of 1 in current_sensing_mask and 0 in other_robot_sensing_mask
         current_free_area_not_scanned_size = np.sum(unique_sensing_mask)
 
-        # Handle division by zero: if no free area in FoV, return 0 reward
+        # Handle division by zero: if no free area in FoV, return 0 penalty
         if current_free_area_size == 0:
-            overlap_reward = 0.0
+            overlap_penalty = 0.0
         else:
-            overlap_reward = np.square(current_free_area_not_scanned_size / current_free_area_size)
+            # Calculate overlap ratio (how much of current sensing area overlaps with others)
+            overlap_area_size = current_free_area_size - current_free_area_not_scanned_size
+            overlap_penalty = np.square(overlap_area_size / current_free_area_size)
 
-
-        return overlap_reward
+        return overlap_penalty
         
     def save_observation(self, observation):
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, detected_trajectories, trajectory_mask, trajectory_node_indices = observation

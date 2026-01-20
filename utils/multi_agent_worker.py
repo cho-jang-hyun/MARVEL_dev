@@ -221,14 +221,14 @@ class MultiAgentWorker:
                                                next_location[0] - robot.location[0]) % (2 * np.pi))
                 trajectory_reward = np.cos(np.radians(robot.heading - trajectory_angle))
 
-                # Calculate overlap reward for this agent
-                overlap_reward = robot.calculate_overlap_reward(
+                # Calculate overlap penalty for this agent
+                overlap_penalty = robot.calculate_overlap_reward(
                     robot.location,
                     self.env.robot_locations,
                     robot_headings_list
                 )
 
-                reward_list.append(utility_reward + trajectory_reward + overlap_reward)  
+                reward_list.append(utility_reward + trajectory_reward - overlap_penalty)  
 
                 robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
                 # Mark nodes visited by other agents based on FoV detection
