@@ -309,10 +309,11 @@ class TrajectoryEncoder(nn.Module):
 
 
 class PolicyNet(nn.Module):
-    def __init__(self, node_dim, embedding_dim, num_angles_bin, use_trajectory=True):
+    def __init__(self, node_dim, embedding_dim, num_angles_bin, use_trajectory=True, gated_attention=True):
         super(PolicyNet, self).__init__()
 
         self.use_trajectory = use_trajectory
+        self.gated_attention = gated_attention
 
         # Graph Encoder
         self.initial_embedding = nn.Linear(node_dim, embedding_dim)
@@ -344,6 +345,12 @@ class PolicyNet(nn.Module):
             )
             # Cross attention to fuse trajectory information with current state
             self.trajectory_cross_attention = MultiHeadAttention(embedding_dim, n_heads=4)
+            # Gating mechanism for cross attention
+            if gated_attention:
+                self.trajectory_gate = nn.Sequential(
+                    nn.Linear(embedding_dim * 2, embedding_dim),
+                    nn.Sigmoid()
+                )
 
         # Decoder
         self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1)
@@ -461,8 +468,15 @@ class PolicyNet(nn.Module):
                 key_padding_mask=trajectory_padding_mask
             )
 
-            # Add residual connection
-            enhanced_current_node_feature = enhanced_current_node_feature + attended_features
+            # Apply gated or standard residual connection
+            if self.gated_attention:
+                # Compute gate based on both original and attended features
+                gate = self.trajectory_gate(torch.cat([enhanced_current_node_feature, attended_features], dim=-1))
+                # Gated residual connection
+                enhanced_current_node_feature = enhanced_current_node_feature + gate * attended_features
+            else:
+                # Standard residual connection
+                enhanced_current_node_feature = enhanced_current_node_feature + attended_features
 
         return current_node_feature, enhanced_current_node_feature
 
@@ -522,10 +536,11 @@ class PolicyNet(nn.Module):
 
 
 class QNet(nn.Module):
-    def __init__(self, node_dim, embedding_dim, num_angles_bin, train_algo, use_trajectory=True):
+    def __init__(self, node_dim, embedding_dim, num_angles_bin, train_algo, use_trajectory=True, gated_attention=True):
         super(QNet, self).__init__()
 
         self.use_trajectory = use_trajectory
+        self.gated_attention = gated_attention
 
         # Graph encoder
         self.encoder = Encoder(embedding_dim=embedding_dim, n_head=4, n_layer=6)
@@ -556,6 +571,12 @@ class QNet(nn.Module):
             )
             # Cross attention to fuse trajectory information with current state
             self.trajectory_cross_attention = MultiHeadAttention(embedding_dim, n_heads=4)
+            # Gating mechanism for cross attention
+            if gated_attention:
+                self.trajectory_gate = nn.Sequential(
+                    nn.Linear(embedding_dim * 2, embedding_dim),
+                    nn.Sigmoid()
+                )
 
         # Decoder
         self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1)
@@ -686,8 +707,15 @@ class QNet(nn.Module):
                 key_padding_mask=trajectory_padding_mask
             )
 
-            # Add residual connection
-            enhanced_current_node_feature = enhanced_current_node_feature + attended_features
+            # Apply gated or standard residual connection
+            if self.gated_attention:
+                # Compute gate based on both original and attended features
+                gate = self.trajectory_gate(torch.cat([enhanced_current_node_feature, attended_features], dim=-1))
+                # Gated residual connection
+                enhanced_current_node_feature = enhanced_current_node_feature + gate * attended_features
+            else:
+                # Standard residual connection
+                enhanced_current_node_feature = enhanced_current_node_feature + attended_features
 
         return current_node_feature, enhanced_current_node_feature
 

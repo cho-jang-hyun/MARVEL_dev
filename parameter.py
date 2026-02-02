@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = 'test_reward6'
+FOLDER_NAME = 'added_gated_attention'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -82,6 +82,7 @@ TRAJECTORY_HISTORY_LENGTH = 10  # Number of recent steps to track
 TRAJECTORY_FEATURE_DIM = 4      # (dx, dy, heading, velocity)
 TRAJECTORY_EMBEDDING_DIM = 64   # Trajectory encoder output dimension
 MAX_DETECTED_AGENTS = N_AGENTS - 1  # Maximum number of detectable agents in FOV
+GATED_ATTENTION = True  # Use gated attention for cross attention (True: gated, False: standard residual)
 
 # Graph parameters
 NUM_NODE_NEIGHBORS = 5

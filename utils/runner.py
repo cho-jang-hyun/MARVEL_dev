@@ -27,7 +27,7 @@ class Runner(object):
     def __init__(self, meta_agent_id):
         self.meta_agent_id = meta_agent_id
         self.device = torch.device('cuda') if USE_GPU else torch.device('cpu')
-        self.network = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN)
+        self.network = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, use_trajectory=True, gated_attention=GATED_ATTENTION)
         self.network.to(self.device)
 
     def get_weights(self):
