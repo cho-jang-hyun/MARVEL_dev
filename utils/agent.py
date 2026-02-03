@@ -586,7 +586,7 @@ class Agent:
         else:
             # Calculate overlap ratio (how much of current sensing area overlaps with others)
             overlap_area_size = current_free_area_size - current_free_area_not_scanned_size
-            overlap_penalty = np.square(overlap_area_size / current_free_area_size)
+            overlap_penalty = overlap_area_size / current_free_area_sizes
 
         return overlap_penalty
         
