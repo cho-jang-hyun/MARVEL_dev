@@ -130,19 +130,32 @@ class Normalization(nn.Module):
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, embedding_dim, n_head):
+    def __init__(self, embedding_dim, n_head, gated_attention=True):
         super(EncoderLayer, self).__init__()
+        self.gated_attention = gated_attention
         self.multiHeadAttention = MultiHeadAttention(embedding_dim, n_head)
         self.normalization1 = Normalization(embedding_dim)
         self.feedForward = nn.Sequential(nn.Linear(embedding_dim, 512), nn.ReLU(inplace=True),
                                          nn.Linear(512, embedding_dim))
         self.normalization2 = Normalization(embedding_dim)
 
+        # Gating mechanism for attention
+        if gated_attention:
+            self.attention_gate = nn.Sequential(
+                nn.Linear(embedding_dim * 2, embedding_dim),
+                nn.Sigmoid()
+            )
+
     def forward(self, src, key_padding_mask=None, attn_mask=None):
         h0 = src
         h = self.normalization1(src)
         h, _ = self.multiHeadAttention(q=h, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
-        h = h + h0
+        # Apply gated or standard residual connection
+        if self.gated_attention:
+            gate = self.attention_gate(torch.cat([h0, h], dim=-1))
+            h = h0 + gate * h
+        else:
+            h = h + h0
         h1 = h
         h = self.normalization2(h)
         h = self.feedForward(h)
@@ -151,8 +164,9 @@ class EncoderLayer(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, embedding_dim, n_head):
+    def __init__(self, embedding_dim, n_head, gated_attention=True):
         super(DecoderLayer, self).__init__()
+        self.gated_attention = gated_attention
         self.multiHeadAttention = MultiHeadAttention(embedding_dim, n_head)
         self.normalization1 = Normalization(embedding_dim)
         self.feedForward = nn.Sequential(nn.Linear(embedding_dim, 512),
@@ -160,13 +174,25 @@ class DecoderLayer(nn.Module):
                                          nn.Linear(512, embedding_dim))
         self.normalization2 = Normalization(embedding_dim)
 
+        # Gating mechanism for cross attention
+        if gated_attention:
+            self.attention_gate = nn.Sequential(
+                nn.Linear(embedding_dim * 2, embedding_dim),
+                nn.Sigmoid()
+            )
+
     def forward(self, tgt, memory, key_padding_mask=None, attn_mask=None):
         h0 = tgt
         tgt = self.normalization1(tgt)
         memory = self.normalization1(memory)
         h, w = self.multiHeadAttention(q=tgt, k=memory, v=memory, key_padding_mask=key_padding_mask,
                                        attn_mask=attn_mask)
-        h = h + h0
+        # Apply gated or standard residual connection
+        if self.gated_attention:
+            gate = self.attention_gate(torch.cat([h0, h], dim=-1))
+            h = h0 + gate * h
+        else:
+            h = h + h0
         h1 = h
         h = self.normalization2(h)
         h = self.feedForward(h)
@@ -175,9 +201,9 @@ class DecoderLayer(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, embedding_dim=128, n_head=8, n_layer=1):
+    def __init__(self, embedding_dim=128, n_head=8, n_layer=1, gated_attention=True):
         super(Encoder, self).__init__()
-        self.layers = nn.ModuleList(EncoderLayer(embedding_dim, n_head) for i in range(n_layer))
+        self.layers = nn.ModuleList(EncoderLayer(embedding_dim, n_head, gated_attention) for i in range(n_layer))
 
     def forward(self, src, key_padding_mask=None, attn_mask=None):
         for layer in self.layers:
@@ -186,9 +212,9 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, embedding_dim=128, n_head=8, n_layer=1):
+    def __init__(self, embedding_dim=128, n_head=8, n_layer=1, gated_attention=True):
         super(Decoder, self).__init__()
-        self.layers = nn.ModuleList([DecoderLayer(embedding_dim, n_head) for i in range(n_layer)])
+        self.layers = nn.ModuleList([DecoderLayer(embedding_dim, n_head, gated_attention) for i in range(n_layer)])
 
     def forward(self, tgt, memory, key_padding_mask=None, attn_mask=None):
         for layer in self.layers:
@@ -224,11 +250,12 @@ class TrajectoryEncoder(nn.Module):
     Output:
         trajectory_embedding: [batch, trajectory_embedding_dim]
     """
-    def __init__(self, feature_dim, trajectory_embedding_dim, seq_len, n_head=4, n_layer=2):
+    def __init__(self, feature_dim, trajectory_embedding_dim, seq_len, n_head=4, n_layer=2, gated_attention=True):
         super(TrajectoryEncoder, self).__init__()
         self.feature_dim = feature_dim
         self.trajectory_embedding_dim = trajectory_embedding_dim
         self.seq_len = seq_len
+        self.gated_attention = gated_attention
 
         # Project trajectory features to embedding dimension
         self.feature_projection = nn.Linear(feature_dim, trajectory_embedding_dim)
@@ -237,7 +264,7 @@ class TrajectoryEncoder(nn.Module):
         self.positional_encoding = PositionalEncoding(trajectory_embedding_dim, max_len=seq_len)
 
         # Temporal transformer encoder for each agent's trajectory
-        self.temporal_encoder = Encoder(embedding_dim=trajectory_embedding_dim, n_head=n_head, n_layer=n_layer)
+        self.temporal_encoder = Encoder(embedding_dim=trajectory_embedding_dim, n_head=n_head, n_layer=n_layer, gated_attention=gated_attention)
 
         # Agent aggregation layer
         self.agent_attention = MultiHeadAttention(trajectory_embedding_dim, n_heads=n_head)
@@ -317,7 +344,7 @@ class PolicyNet(nn.Module):
 
         # Graph Encoder
         self.initial_embedding = nn.Linear(node_dim, embedding_dim)
-        self.encoder = Encoder(embedding_dim=embedding_dim, n_head=4, n_layer=6)
+        self.encoder = Encoder(embedding_dim=embedding_dim, n_head=4, n_layer=6, gated_attention=gated_attention)
 
         # Local frontiers distribution encoder
         self.frontiers_embedding =  nn.Conv1d(num_angles_bin, embedding_dim, kernel_size=3, padding=1)
@@ -331,7 +358,8 @@ class PolicyNet(nn.Module):
                 trajectory_embedding_dim=TRAJECTORY_EMBEDDING_DIM,
                 seq_len=TRAJECTORY_HISTORY_LENGTH,
                 n_head=4,
-                n_layer=2
+                n_layer=2,
+                gated_attention=gated_attention
             )
             # Fusion layer to combine current state with trajectory information
             self.trajectory_fusion = nn.Linear(embedding_dim + TRAJECTORY_EMBEDDING_DIM, embedding_dim)
@@ -353,7 +381,7 @@ class PolicyNet(nn.Module):
                 )
 
         # Decoder
-        self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1)
+        self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1, gated_attention=gated_attention)
         self.current_embedding = nn.Linear(embedding_dim * 2, embedding_dim)
 
         # Heading layer
@@ -543,7 +571,7 @@ class QNet(nn.Module):
         self.gated_attention = gated_attention
 
         # Graph encoder
-        self.encoder = Encoder(embedding_dim=embedding_dim, n_head=4, n_layer=6)
+        self.encoder = Encoder(embedding_dim=embedding_dim, n_head=4, n_layer=6, gated_attention=gated_attention)
 
         # Local frontiers distribution encoder
         self.frontiers_embedding = nn.Conv1d(num_angles_bin, embedding_dim, kernel_size=3, padding=1)
@@ -557,7 +585,8 @@ class QNet(nn.Module):
                 trajectory_embedding_dim=TRAJECTORY_EMBEDDING_DIM,
                 seq_len=TRAJECTORY_HISTORY_LENGTH,
                 n_head=4,
-                n_layer=2
+                n_layer=2,
+                gated_attention=gated_attention
             )
             # Fusion layer to combine current state with trajectory information
             self.trajectory_fusion = nn.Linear(embedding_dim + TRAJECTORY_EMBEDDING_DIM, embedding_dim)
@@ -579,7 +608,7 @@ class QNet(nn.Module):
                 )
 
         # Decoder
-        self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1)
+        self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1, gated_attention=gated_attention)
         self.current_embedding = nn.Linear(embedding_dim * 2, embedding_dim)
 
         # Heeading layer
@@ -595,7 +624,7 @@ class QNet(nn.Module):
             self.initial_embedding = nn.Linear(node_dim, embedding_dim)
 
         if train_algo in (1, 3):
-            self.agent_decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1)
+            self.agent_decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1, gated_attention=gated_attention)
             self.all_agent_embedding = nn.Linear(embedding_dim * 2, embedding_dim)
 
             self.q_values_layer = nn.Linear(embedding_dim * 3, 1)
