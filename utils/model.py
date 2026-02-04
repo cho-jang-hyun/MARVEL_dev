@@ -269,6 +269,11 @@ class TrajectoryEncoder(nn.Module):
         # Agent aggregation layer
         self.agent_attention = MultiHeadAttention(trajectory_embedding_dim, n_heads=n_head)
         self.agent_aggregation = nn.Linear(trajectory_embedding_dim, trajectory_embedding_dim)
+        if gated_attention:
+            self.agent_attention_gate = nn.Sequential(
+                nn.Linear(trajectory_embedding_dim * 2, trajectory_embedding_dim),
+                nn.Sigmoid()
+            )
 
         # Output projection
         self.output_layer = nn.Sequential(
@@ -326,6 +331,13 @@ class TrajectoryEncoder(nn.Module):
             v=agent_representations,
             key_padding_mask=attention_mask
         )
+
+        # Apply gated or standard residual connection
+        if self.gated_attention:
+            gate = self.agent_attention_gate(torch.cat([query, aggregated], dim=-1))
+            aggregated = query + gate * aggregated
+        else:
+            aggregated = query + aggregated
 
         # Squeeze and apply output layer
         # [batch, trajectory_embedding_dim]

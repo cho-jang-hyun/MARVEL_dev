@@ -13,7 +13,7 @@ This file defines various parameters for:
 """
 TEST_SET = 'maps_test'
 LOAD_FOLDER_NAME = 'MARVEL'
-load_path = f'model/added_gated_attention_to_all_attention'
+load_path = f'model/added_gated_attention_including_trajectory_encoder'
 gifs_path = f'results/gifs/{LOAD_FOLDER_NAME}'
 LOAD_MODEL = True  
 SAVE_IMG_GAP = 50

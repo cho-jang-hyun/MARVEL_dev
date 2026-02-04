@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = 'added_gated_attention_to_all_attention'
+FOLDER_NAME = 'added_gated_attention_including_trajectory_encoder'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
