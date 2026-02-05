@@ -93,6 +93,7 @@ def main():
 
     curr_episode = 0
     target_q_update_counter = 1
+    best_success_rate = -float('inf')  # Track best performance for saving best model
 
     if USE_WANDB:
         import parameter
@@ -105,18 +106,19 @@ def main():
     # load model and optimizer trained before
     if LOAD_MODEL:
         print('Loading Model...')
-        checkpoint = torch.load(model_path + '/checkpoint.pth', map_location=device)
+        checkpoint = torch.load(model_path + '/latest.pth', map_location=device)
         global_policy_net.load_state_dict(checkpoint['policy_model'])
         global_q_net1.load_state_dict(checkpoint['q_net1_model'])
         global_q_net2.load_state_dict(checkpoint['q_net2_model'])
         log_alpha = checkpoint['log_alpha']
         log_alpha_optimizer = optim.Adam([log_alpha], lr=1e-4)
-        
+
         global_policy_optimizer.load_state_dict(checkpoint['policy_optimizer'])
         global_q_net1_optimizer.load_state_dict(checkpoint['q_net1_optimizer'])
         global_q_net2_optimizer.load_state_dict(checkpoint['q_net2_optimizer'])
         log_alpha_optimizer.load_state_dict(checkpoint['log_alpha_optimizer'])
         curr_episode = checkpoint['episode']
+        best_success_rate = checkpoint.get('best_success_rate', -float('inf'))
 
     global_target_q_net1.load_state_dict(global_q_net1.state_dict())
     global_target_q_net2.load_state_dict(global_q_net2.state_dict())
@@ -392,10 +394,27 @@ def main():
                               "q_net2_optimizer": global_q_net2_optimizer.state_dict(),
                               "log_alpha_optimizer": log_alpha_optimizer.state_dict(),
                               "episode": curr_episode,
+                              "best_success_rate": best_success_rate,
                               }
-                path_checkpoint = "./" + model_path + "/checkpoint.pth"
-                torch.save(checkpoint, path_checkpoint)
-                print('Saved model', end='\n')
+
+                # Save latest model (always)
+                path_latest = "./" + model_path + "/checkpoint.pth"
+                torch.save(checkpoint, path_latest)
+                print(f'Saved latest model (episode {curr_episode})')
+
+                # Save checkpoint every 1000 steps
+                if curr_episode % 1000 == 0:
+                    path_checkpoint = "./" + model_path + f"/checkpoint_{curr_episode}.pth"
+                    torch.save(checkpoint, path_checkpoint)
+                    print(f'Saved checkpoint_{curr_episode}.pth')
+
+                # Save best model if performance improved
+                current_success_rate = np.nanmean(perf_metrics['success_rate']) if len(perf_metrics['success_rate']) > 0 else -float('inf')
+                if current_success_rate > best_success_rate:
+                    best_success_rate = current_success_rate
+                    path_best = "./" + model_path + "/best.pth"
+                    torch.save(checkpoint, path_best)
+                    print(f'Saved best model (success_rate: {best_success_rate:.4f})')
 
     except KeyboardInterrupt:
         print("CTRL_C pressed. Killing remote workers")
