@@ -234,7 +234,13 @@ class MultiAgentWorker:
                 # Mark nodes visited by other agents based on FoV detection
                 robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
 
-            if self.robot_list[0].utility.sum() == 0:
+            # Check termination conditions
+            # 1. All utility exhausted (sum of all robots' utility)
+            # 2. Explored rate reaches SUCCESS_THRESHOLD
+            total_utility = sum(robot.utility.sum() for robot in self.robot_list)
+            if total_utility == 0:
+                done = True
+            if self.env.explored_rate >= SUCCESS_THRESHOLD:
                 done = True
 
             team_reward = self.env.calculate_team_reward() - 0.5

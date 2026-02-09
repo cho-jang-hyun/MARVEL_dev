@@ -383,7 +383,7 @@ def main():
                 global_target_q_net2.eval()
 
             # save the model
-            if curr_episode % 32 == 0:
+            if curr_episode % 32 == 0 or curr_episode % 1000 == 0:
                 print('Saving model', end='\n')
                 checkpoint = {"policy_model": global_policy_net.state_dict(),
                               "q_net1_model": global_q_net1.state_dict(),
@@ -398,7 +398,7 @@ def main():
                               }
 
                 # Save latest model (always)
-                path_latest = "./" + model_path + "/checkpoint.pth"
+                path_latest = "./" + model_path + "/latest.pth"
                 torch.save(checkpoint, path_latest)
                 print(f'Saved latest model (episode {curr_episode})')
 

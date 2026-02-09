@@ -37,6 +37,7 @@ USE_CONTINUOUS_SIM = True
 NUM_SIM_STEPS = 6
 VELOCITY = 1
 YAW_RATE = 35 # in degrees
+SUCCESS_THRESHOLD = 0.99  # Episode ends when explored_rate >= this value
 
 # Heading parameters
 FOV = 120   # in degrees
