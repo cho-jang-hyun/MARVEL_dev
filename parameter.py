@@ -95,6 +95,7 @@ NODE_PADDING_SIZE = 360  # the number of nodes will be padded to this value
 USE_GPU = False  # Workers use CPU to avoid GPU memory conflict with Ray
 USE_GPU_GLOBAL = True  # Main training process uses GPU
 NUM_GPU = 1  # Number of GPUs for DataParallel in main process
+GPU_ID = 0  # Which GPU to use (0 or 1). Set to None to use all available GPUs
 
 USE_WANDB = False
 TRAIN_ALGO = 3

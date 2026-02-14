@@ -46,8 +46,13 @@ if not os.path.exists(load_path):
 
 
 def main():
+    # Set specific GPU if GPU_ID is specified
+    if USE_GPU_GLOBAL and GPU_ID is not None:
+        torch.cuda.set_device(GPU_ID)
+        print(f"Using GPU {GPU_ID}: {torch.cuda.get_device_name(GPU_ID)}")
+
     # use GPU/CPU for driver/worker
-    device = torch.device('cuda') if USE_GPU_GLOBAL else torch.device('cpu')
+    device = torch.device(f'cuda:{GPU_ID}') if USE_GPU_GLOBAL and GPU_ID is not None else torch.device('cuda') if USE_GPU_GLOBAL else torch.device('cpu')
     local_device = torch.device('cuda') if USE_GPU else torch.device('cpu')
 
     # Determine effective training algorithm based on communication setting
