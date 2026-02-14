@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = 'added_gated_attention_including_trajectory_encoder'
+FOLDER_NAME = 'fixed_and_added_soft_update'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -72,6 +72,7 @@ MINIMUM_BUFFER_SIZE = 2000
 BATCH_SIZE = 256
 LR = 1e-5
 GAMMA = 1
+TAU = 0.005  # Soft update coefficient for target network (0.001 ~ 0.01)
 NUM_META_AGENT = 18
 
 # network parameters

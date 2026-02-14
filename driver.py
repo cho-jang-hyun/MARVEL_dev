@@ -92,7 +92,6 @@ def main():
     entropy_target = 0.05 * (-np.log(1 / K_SIZE))
 
     curr_episode = 0
-    target_q_update_counter = 1
     best_success_rate = -float('inf')  # Track best performance for saving best model
 
     if USE_WANDB:
@@ -345,7 +344,11 @@ def main():
                     alpha_loss.backward()
                     log_alpha_optimizer.step()
 
-                    target_q_update_counter += 1
+                    # Soft update target networks
+                    for target_param, param in zip(global_target_q_net1.parameters(), global_q_net1.parameters()):
+                        target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
+                    for target_param, param in zip(global_target_q_net2.parameters(), global_q_net2.parameters()):
+                        target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
 
                 # data record to be written in tensorboard
                 perf_data = []
@@ -372,15 +375,6 @@ def main():
             else:
                 policy_weights = global_policy_net.to(local_device).state_dict()
             weights_set.append(policy_weights)
-
-            # update the target q net
-            if target_q_update_counter > 64:
-                print("Updating target q net")
-                target_q_update_counter = 1
-                global_target_q_net1.load_state_dict(global_q_net1.state_dict())
-                global_target_q_net2.load_state_dict(global_q_net2.state_dict())
-                global_target_q_net1.eval()
-                global_target_q_net2.eval()
 
             # save the model
             if curr_episode % 32 == 0 or curr_episode % 1000 == 0:
