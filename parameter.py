@@ -72,8 +72,12 @@ MINIMUM_BUFFER_SIZE = 2000
 BATCH_SIZE = 256
 LR = 1e-5
 GAMMA = 1
-TAU = 0.005  # Soft update coefficient for target network (0.001 ~ 0.01)
+TAU = 0.001  # Soft update coefficient for target network (0.001 ~ 0.01)
 NUM_META_AGENT = 18
+
+# Gradient clipping parameters
+GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5.0)
+GRAD_CLIP_Q = 10.0      # Max gradient norm for Q networks (typical: 1.0 ~ 10.0)
 
 # network parameters
 NODE_INPUT_DIM = 7  # Changed from 6: added visited_by_others feature

@@ -76,6 +76,7 @@ def main():
     print(f"  Effective TRAIN_ALGO for QNet: {effective_train_algo}")
     print(f"  Using Trajectory Encoder: True")
     print(f"  Using Gated Attention: {GATED_ATTENTION}")
+    print(f"  Gradient Clipping - Policy: {GRAD_CLIP_POLICY}, Q: {GRAD_CLIP_Q}")
 
     # initialize neural networks
     global_policy_net = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, use_trajectory=True, gated_attention=GATED_ATTENTION).to(device)
@@ -308,7 +309,7 @@ def main():
 
                     global_policy_optimizer.zero_grad()
                     policy_loss.backward()
-                    policy_grad_norm = torch.nn.utils.clip_grad_norm_(global_policy_net.parameters(), max_norm=100,
+                    policy_grad_norm = torch.nn.utils.clip_grad_norm_(global_policy_net.parameters(), max_norm=GRAD_CLIP_POLICY,
                                                                       norm_type=2)
                     global_policy_optimizer.step()
 
@@ -329,7 +330,7 @@ def main():
                     q1_loss = mse_loss(q1, target_q_batch.detach()).mean()
                     global_q_net1_optimizer.zero_grad()
                     q1_loss.backward()
-                    q_grad_norm = torch.nn.utils.clip_grad_norm_(global_q_net1.parameters(), max_norm=20000,
+                    q_grad_norm = torch.nn.utils.clip_grad_norm_(global_q_net1.parameters(), max_norm=GRAD_CLIP_Q,
                                                                  norm_type=2)
                     global_q_net1_optimizer.step()
 
@@ -338,11 +339,11 @@ def main():
                     q2_loss = mse_loss(q2, target_q_batch.detach()).mean()
                     global_q_net2_optimizer.zero_grad()
                     q2_loss.backward()
-                    q_grad_norm = torch.nn.utils.clip_grad_norm_(global_q_net2.parameters(), max_norm=20000,
+                    q_grad_norm = torch.nn.utils.clip_grad_norm_(global_q_net2.parameters(), max_norm=GRAD_CLIP_Q,
                                                                  norm_type=2)
                     global_q_net2_optimizer.step()
 
-                    entropy = (logp * logp.exp()).sum(dim=-1)
+                    entropy = -(logp * logp.exp()).sum(dim=-1) # negative entropy
                     alpha_loss = -(log_alpha * (entropy.detach() + entropy_target)).mean()
 
                     log_alpha_optimizer.zero_grad()

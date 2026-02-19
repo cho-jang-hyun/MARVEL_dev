@@ -327,12 +327,11 @@ class MultiAgentWorker:
           
         for robot in self.robot_list:
             c = color_list[robot.id]
-            
-            if robot.id == 0:
-                nodes = get_cell_position_from_coords(robot.node_coords, robot.map_info)
-                plt.scatter(nodes[:, 0], nodes[:, 1], c=robot.utility, s=8, zorder=2)
-                for i, (x, y) in enumerate(nodes):
-                    plt.text(x-3, y-3, f'{robot.utility[i]:.0f}', ha='center', va='bottom', fontsize=3, color='blue', zorder=3)
+            # Plot nodes for all robots
+            nodes = get_cell_position_from_coords(robot.node_coords, robot.map_info)
+            plt.scatter(nodes[:, 0], nodes[:, 1], c=c, s=8, zorder=2, alpha=0.7)
+            for i, (x, y) in enumerate(nodes):
+                plt.text(x-3, y-3, f'{robot.utility[i]:.0f}', ha='center', va='bottom', fontsize=3, color=c, zorder=3)
                    
         # Plot frontiers
         global_frontiers = get_frontier_in_map(self.env.belief_info)
