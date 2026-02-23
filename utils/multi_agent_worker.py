@@ -171,13 +171,15 @@ class MultiAgentWorker:
                     num_frame = i * self.sim_steps + l
                     self.plot_local_env_sim(num_frame, robot_location_sim_step, robot_heading_sim_step)
 
+            # Apply all final positions before reward computation to avoid order-dependent rewards.
+            for robot, next_location in zip(self.robot_list, selected_locations):
+                self.env.final_sim_step(next_location, robot.id)
+
             reward_list = []
             # Collect robot headings for overlap reward calculation
             robot_headings_list = [robot.heading for robot in self.robot_list]
 
             for robot, next_location, next_node_index in zip(self.robot_list, selected_locations, next_node_index_list):
-                self.env.final_sim_step(next_location, robot.id)
-
                 # Update trajectory buffer
                 prev_trajectory = self.trajectory_buffer[robot.id][-1] if len(self.trajectory_buffer[robot.id]) > 0 else None
                 if prev_trajectory is not None:
@@ -223,8 +225,8 @@ class MultiAgentWorker:
 
                 # Calculate overlap penalty for this agent
                 overlap_penalty = robot.calculate_overlap_reward(
-                    robot.location,
-                    self.env.robot_locations,
+                    next_location,
+                    selected_locations,
                     robot_headings_list
                 )
 

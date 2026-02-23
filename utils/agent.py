@@ -385,16 +385,23 @@ class Agent:
 
         return mask
 
-    def get_robots_in_fov(self, robot_locations):
+    def get_robots_in_fov(self, robot_locations, observer_location=None, observer_heading=None):
         """
         Detect other robots within the agent's field of view (FOV).
 
         Args:
             robot_locations (np.ndarray): Array of all robot locations, shape (n_agents, 2)
+            observer_location (np.ndarray, optional): Override observer location.
+            observer_heading (float, optional): Override observer heading.
 
         Returns:
             List[int]: List of agent IDs that are within FOV and sensor range
         """
+        if observer_location is None:
+            observer_location = self.location
+        if observer_heading is None:
+            observer_heading = self.heading
+
         detected_robots = []
 
         for robot_id, robot_location in enumerate(robot_locations):
@@ -403,18 +410,18 @@ class Agent:
                 continue
 
             # Calculate distance
-            distance = np.linalg.norm(robot_location - self.location)
+            distance = np.linalg.norm(robot_location - observer_location)
 
             # Check if within sensor range
             if distance > self.sensor_range:
                 continue
 
             # Calculate angle to the other robot
-            delta = robot_location - self.location
+            delta = robot_location - observer_location
             angle_to_robot = np.degrees(np.arctan2(delta[1], delta[0])) % 360
 
             # Calculate angle difference considering FOV
-            angle_diff = (angle_to_robot - self.heading + 180) % 360 - 180
+            angle_diff = (angle_to_robot - observer_heading + 180) % 360 - 180
 
             # Check if within FOV
             if np.abs(angle_diff) <= self.fov / 2:
@@ -565,11 +572,16 @@ class Agent:
         other_robot_sensing_mask = np.zeros_like(self.map_info.map)
 
         # Get robots in FoV (no communication - observation only)
-        detected_robot_ids = self.get_robots_in_fov(all_robots_locations)
+        observer_heading = robot_headings_list[self.id]
+        detected_robot_ids = self.get_robots_in_fov(
+            all_robots_locations,
+            observer_location=current_robot_location,
+            observer_heading=observer_heading
+        )
 
         for robot_id, (robot_location, robot_heading) in enumerate(zip(all_robots_locations, robot_headings_list)):
             if robot_id == self.id:
-                current_sensing_mask = self.create_sensing_mask(robot_location, robot_heading, current_sensing_mask)
+                current_sensing_mask = self.create_sensing_mask(current_robot_location, robot_heading, current_sensing_mask)
             elif robot_id in detected_robot_ids:
                 # Only consider robots within FoV
                 other_robot_sensing_mask = self.create_sensing_mask(robot_location, robot_heading, other_robot_sensing_mask)
@@ -589,9 +601,30 @@ class Agent:
             overlap_penalty = overlap_area_size / current_free_area_size
 
         return overlap_penalty
+
+    def _get_empty_trajectory_tensors(self):
+        detected_trajectories = torch.zeros(
+            (1, MAX_DETECTED_AGENTS, TRAJECTORY_HISTORY_LENGTH, TRAJECTORY_FEATURE_DIM),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        trajectory_mask = torch.ones(
+            (1, MAX_DETECTED_AGENTS),
+            dtype=torch.bool,
+            device=self.device,
+        )
+        trajectory_node_indices = torch.full(
+            (1, MAX_DETECTED_AGENTS, TRAJECTORY_HISTORY_LENGTH),
+            -1,
+            dtype=torch.long,
+            device=self.device,
+        )
+        return detected_trajectories, trajectory_mask, trajectory_node_indices
         
     def save_observation(self, observation):
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, detected_trajectories, trajectory_mask, trajectory_node_indices = observation
+        if detected_trajectories is None or trajectory_mask is None or trajectory_node_indices is None:
+            detected_trajectories, trajectory_mask, trajectory_node_indices = self._get_empty_trajectory_tensors()
         self.episode_buffer[0] += node_inputs
         self.episode_buffer[1] += node_padding_mask.bool()
         self.episode_buffer[2] += edge_mask.bool()
@@ -601,7 +634,9 @@ class Agent:
         self.episode_buffer[6] += frontier_distribution
         self.episode_buffer[7] += heading_visited
         self.episode_buffer[38] += neighbor_best_headings
-        # Note: detected_trajectories and trajectory_mask are not saved to episode_buffer for now
+        self.episode_buffer[40] += detected_trajectories
+        self.episode_buffer[41] += trajectory_mask
+        self.episode_buffer[42] += trajectory_node_indices
 
     def save_action(self, action_index):
         self.episode_buffer[8] += action_index.reshape(1, 1, 1)
@@ -627,8 +662,13 @@ class Agent:
             self.episode_buffer[36] = copy.deepcopy(self.episode_buffer[35])[1:]
 
         self.episode_buffer[39] = copy.deepcopy(self.episode_buffer[38])[1:]
+        self.episode_buffer[43] = copy.deepcopy(self.episode_buffer[40])[1:]
+        self.episode_buffer[44] = copy.deepcopy(self.episode_buffer[41])[1:]
+        self.episode_buffer[45] = copy.deepcopy(self.episode_buffer[42])[1:]
 
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, detected_trajectories, trajectory_mask, trajectory_node_indices = observation
+        if detected_trajectories is None or trajectory_mask is None or trajectory_node_indices is None:
+            detected_trajectories, trajectory_mask, trajectory_node_indices = self._get_empty_trajectory_tensors()
         self.episode_buffer[11] += node_inputs
         self.episode_buffer[12] += node_padding_mask.bool()
         self.episode_buffer[13] += edge_mask.bool()
@@ -638,6 +678,9 @@ class Agent:
         self.episode_buffer[17] += frontier_distribution
         self.episode_buffer[18] += heading_visited
         self.episode_buffer[39] += neighbor_best_headings
+        self.episode_buffer[43] += detected_trajectories
+        self.episode_buffer[44] += trajectory_mask
+        self.episode_buffer[45] += trajectory_node_indices
 
         # Only update agent indices buffers if they were initialized
         if len(self.episode_buffer[35]) > 0:
@@ -678,4 +721,3 @@ class Agent:
 
     def save_all_indices(self, all_agent_indices):
         self.episode_buffer[35] += torch.tensor(all_agent_indices).reshape(1, -1, 1).to(self.device)
-

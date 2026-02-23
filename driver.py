@@ -70,6 +70,12 @@ def main():
         else:
             effective_train_algo = TRAIN_ALGO  # 0 or 2 already have no communication
 
+    # target entropy for SAC (discrete action space)
+    action_dim = K_SIZE * NUM_HEADING_CANDIDATES
+    entropy_target = 0.5 * np.log(action_dim)
+    log_alpha_min = -8.0
+    log_alpha_max = 2.0
+
     print(f"Training Configuration:")
     print(f"  TRAIN_ALGO: {TRAIN_ALGO}")
     print(f"  USE_COMMUNICATION: {USE_COMMUNICATION}")
@@ -77,6 +83,7 @@ def main():
     print(f"  Using Trajectory Encoder: True")
     print(f"  Using Gated Attention: {GATED_ATTENTION}")
     print(f"  Gradient Clipping - Policy: {GRAD_CLIP_POLICY}, Q: {GRAD_CLIP_Q}")
+    print(f"  Entropy Target: {entropy_target:.4f} (action_dim={action_dim})")
 
     # initialize neural networks
     global_policy_net = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, use_trajectory=True, gated_attention=GATED_ATTENTION).to(device)
@@ -93,9 +100,6 @@ def main():
     global_q_net1_optimizer = optim.Adam(global_q_net1.parameters(), lr=LR)
     global_q_net2_optimizer = optim.Adam(global_q_net2.parameters(), lr=LR)
     log_alpha_optimizer = optim.Adam([log_alpha], lr=1e-4)
-
-    # target entropy for SAC
-    entropy_target = 0.05 * (-np.log(1 / K_SIZE))
 
     curr_episode = 0
     best_success_rate = -float('inf')  # Track best performance for saving best model
@@ -115,7 +119,8 @@ def main():
         global_policy_net.load_state_dict(checkpoint['policy_model'])
         global_q_net1.load_state_dict(checkpoint['q_net1_model'])
         global_q_net2.load_state_dict(checkpoint['q_net2_model'])
-        log_alpha = checkpoint['log_alpha']
+        log_alpha = checkpoint['log_alpha'].to(device)
+        log_alpha.requires_grad_(True)
         log_alpha_optimizer = optim.Adam([log_alpha], lr=1e-4)
 
         global_policy_optimizer.load_state_dict(checkpoint['policy_optimizer'])
@@ -241,6 +246,12 @@ def main():
                     next_heading_visited = torch.stack(rollouts[18]).to(device)
                     neighbor_best_headings = torch.stack(rollouts[38]).to(device)
                     next_neighbor_best_headings = torch.stack(rollouts[39]).to(device)
+                    detected_trajectories = torch.stack(rollouts[40]).to(device)
+                    trajectory_mask = torch.stack(rollouts[41]).to(device)
+                    trajectory_node_indices = torch.stack(rollouts[42]).to(device)
+                    next_detected_trajectories = torch.stack(rollouts[43]).to(device)
+                    next_trajectory_mask = torch.stack(rollouts[44]).to(device)
+                    next_trajectory_node_indices = torch.stack(rollouts[45]).to(device)
 
                     # Load ground truth data if needed
                     if effective_train_algo in (2,3):
@@ -273,36 +284,90 @@ def main():
                     next_observation = [next_node_inputs, next_node_padding_mask, next_local_edge_mask,
                                         next_current_local_index, next_current_local_edge, next_local_edge_padding_mask, next_frontier_distribution, next_heading_visited, next_neighbor_best_headings]
 
+                    policy_kwargs = dict(
+                        detected_trajectories=detected_trajectories,
+                        trajectory_mask=trajectory_mask,
+                        trajectory_node_indices=trajectory_node_indices,
+                    )
+                    next_policy_kwargs = dict(
+                        detected_trajectories=next_detected_trajectories,
+                        trajectory_mask=next_trajectory_mask,
+                        trajectory_node_indices=next_trajectory_node_indices,
+                    )
+
                     # Construct state based on effective_train_algo (respects USE_COMMUNICATION setting)
                     if effective_train_algo == 0:
                         # SAC: observation only, no communication
                         state = observation
                         next_state = next_observation
+                        q_kwargs = dict(
+                            detected_trajectories=detected_trajectories,
+                            trajectory_mask=trajectory_mask,
+                            trajectory_node_indices=trajectory_node_indices,
+                        )
+                        next_q_kwargs = dict(
+                            detected_trajectories=next_detected_trajectories,
+                            trajectory_mask=next_trajectory_mask,
+                            trajectory_node_indices=next_trajectory_node_indices,
+                        )
                     elif effective_train_algo == 1:
                         # MAAC with communication: observation + agent indices
-                        state = [*observation, all_agent_indices, all_agent_next_indices]
-                        next_state = [*next_observation, all_agent_next_indices, next_all_agent_next_indices]
+                        state = observation
+                        next_state = next_observation
+                        q_kwargs = dict(
+                            all_agent_indices=all_agent_indices,
+                            all_agent_next_indices=all_agent_next_indices,
+                            detected_trajectories=detected_trajectories,
+                            trajectory_mask=trajectory_mask,
+                            trajectory_node_indices=trajectory_node_indices,
+                        )
+                        next_q_kwargs = dict(
+                            all_agent_indices=all_agent_next_indices,
+                            all_agent_next_indices=next_all_agent_next_indices,
+                            detected_trajectories=next_detected_trajectories,
+                            trajectory_mask=next_trajectory_mask,
+                            trajectory_node_indices=next_trajectory_node_indices,
+                        )
                     elif effective_train_algo == 2:
                         # Ground truth only, no communication
                         state = [gt_node_inputs, gt_node_padding_mask, gt_edge_mask, gt_current_index,
                                  gt_current_edge, gt_edge_padding_mask, gt_frontier_distribution, gt_heading_visited, neighbor_best_headings]
                         next_state = [gt_next_node_inputs, gt_next_node_padding_mask, gt_next_edge_mask,
                                       gt_next_current_index, gt_next_current_edge, gt_next_edge_padding_mask, gt_next_frontier_distribution, gt_next_heading_visited, next_neighbor_best_headings]
+                        q_kwargs = dict(
+                            detected_trajectories=detected_trajectories,
+                            trajectory_mask=trajectory_mask,
+                        )
+                        next_q_kwargs = dict(
+                            detected_trajectories=next_detected_trajectories,
+                            trajectory_mask=next_trajectory_mask,
+                        )
                     elif effective_train_algo == 3:
                         # MAAC with ground truth and communication
                         state = [gt_node_inputs, gt_node_padding_mask, gt_edge_mask, gt_current_index,
-                                 gt_current_edge, gt_edge_padding_mask, gt_frontier_distribution, gt_heading_visited, neighbor_best_headings, all_agent_indices, all_agent_next_indices]
+                                 gt_current_edge, gt_edge_padding_mask, gt_frontier_distribution, gt_heading_visited, neighbor_best_headings]
                         next_state = [gt_next_node_inputs, gt_next_node_padding_mask, gt_next_edge_mask,
-                                      gt_next_current_index, gt_next_current_edge, gt_next_edge_padding_mask, gt_next_frontier_distribution, gt_next_heading_visited, next_neighbor_best_headings,
-                                      all_agent_next_indices, next_all_agent_next_indices]
+                                      gt_next_current_index, gt_next_current_edge, gt_next_edge_padding_mask, gt_next_frontier_distribution, gt_next_heading_visited, next_neighbor_best_headings]
+                        q_kwargs = dict(
+                            all_agent_indices=all_agent_indices,
+                            all_agent_next_indices=all_agent_next_indices,
+                            detected_trajectories=detected_trajectories,
+                            trajectory_mask=trajectory_mask,
+                        )
+                        next_q_kwargs = dict(
+                            all_agent_indices=all_agent_next_indices,
+                            all_agent_next_indices=next_all_agent_next_indices,
+                            detected_trajectories=next_detected_trajectories,
+                            trajectory_mask=next_trajectory_mask,
+                        )
 
                     # SAC
                     with torch.no_grad():
-                        q_values1 = dp_q_net1(*state)
-                        q_values2 = dp_q_net2(*state)
+                        q_values1 = dp_q_net1(*state, **q_kwargs)
+                        q_values2 = dp_q_net2(*state, **q_kwargs)
                         q_values = torch.min(q_values1, q_values2)
 
-                    logp = dp_policy(*observation)
+                    logp = dp_policy(*observation, **policy_kwargs)
                     policy_loss = torch.sum(
                         (logp.exp().unsqueeze(2) * (log_alpha.exp().detach() * logp.unsqueeze(2) - q_values.detach())),
                         dim=1).mean()
@@ -314,9 +379,9 @@ def main():
                     global_policy_optimizer.step()
 
                     with torch.no_grad():
-                        next_logp = dp_policy(*next_observation)
-                        next_q_values1 = dp_target_q_net1(*next_state)
-                        next_q_values2 = dp_target_q_net2(*next_state)
+                        next_logp = dp_policy(*next_observation, **next_policy_kwargs)
+                        next_q_values1 = dp_target_q_net1(*next_state, **next_q_kwargs)
+                        next_q_values2 = dp_target_q_net2(*next_state, **next_q_kwargs)
                         next_q_values = torch.min(next_q_values1, next_q_values2)
                         value_prime = torch.sum(
                             next_logp.unsqueeze(2).exp() * (next_q_values - log_alpha.exp() * next_logp.unsqueeze(2)),
@@ -325,7 +390,7 @@ def main():
 
                     mse_loss = nn.MSELoss()
 
-                    q_values1 = dp_q_net1(*state)
+                    q_values1 = dp_q_net1(*state, **q_kwargs)
                     q1 = torch.gather(q_values1, 1, action)
                     q1_loss = mse_loss(q1, target_q_batch.detach()).mean()
                     global_q_net1_optimizer.zero_grad()
@@ -334,7 +399,7 @@ def main():
                                                                  norm_type=2)
                     global_q_net1_optimizer.step()
 
-                    q_values2 = dp_q_net2(*state)
+                    q_values2 = dp_q_net2(*state, **q_kwargs)
                     q2 = torch.gather(q_values2, 1, action)
                     q2_loss = mse_loss(q2, target_q_batch.detach()).mean()
                     global_q_net2_optimizer.zero_grad()
@@ -343,12 +408,14 @@ def main():
                                                                  norm_type=2)
                     global_q_net2_optimizer.step()
 
-                    entropy = -(logp * logp.exp()).sum(dim=-1) # negative entropy
-                    alpha_loss = -(log_alpha * (entropy.detach() + entropy_target)).mean()
+                    entropy = -(logp.exp() * logp).sum(dim=-1, keepdim=True)
+                    alpha_loss = -(log_alpha * (entropy_target - entropy).detach()).mean()
 
                     log_alpha_optimizer.zero_grad()
                     alpha_loss.backward()
                     log_alpha_optimizer.step()
+                    with torch.no_grad():
+                        log_alpha.clamp_(log_alpha_min, log_alpha_max)
 
                     # Soft update target networks
                     for target_param, param in zip(global_target_q_net1.parameters(), global_q_net1.parameters()):

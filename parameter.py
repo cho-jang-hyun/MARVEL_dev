@@ -29,7 +29,7 @@ gifs_path = f'gifs/{FOLDER_NAME}' # save gif
 SUMMARY_WINDOW = 32
 LOAD_MODEL = False  # do you want to load the model trained before
 SAVE_IMG_GAP = 1000
-NUM_EPISODE_BUFFER = 40
+NUM_EPISODE_BUFFER = 46
 
 # Sim parameters
 N_AGENTS = 4
@@ -71,7 +71,7 @@ REPLAY_SIZE = 10000
 MINIMUM_BUFFER_SIZE = 2000
 BATCH_SIZE = 256
 LR = 1e-5
-GAMMA = 1
+GAMMA = 0.99
 TAU = 0.001  # Soft update coefficient for target network (0.001 ~ 0.01)
 NUM_META_AGENT = 18
 
