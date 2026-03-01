@@ -12,6 +12,7 @@ from utils.node_manager import NodeManager
 from utils.ground_truth_node_manager import GroundTruthNodeManager
 from utils.model import PolicyNet
 from utils.motion_model import compute_allowable_heading
+from utils.sensor import sensor_work_heading
 from test_parameter import *
 
 if not os.path.exists(gifs_path):
@@ -56,6 +57,19 @@ class TestWorker:
                 self.env.angles[i],
                 0.0
             ))
+
+        # Initialize individual observation maps for each agent (for visualization)
+        # Each agent tracks what ONLY they have observed
+        self.individual_maps = {}
+        for i in range(self.n_agents):
+            # Start with unknown map (127)
+            self.individual_maps[i] = np.ones(self.env.ground_truth_size) * UNKNOWN
+            # Initialize with starting observation
+            robot_cell = get_cell_position_from_coords(self.env.robot_locations[i], self.env.belief_info)
+            self.individual_maps[i] = sensor_work_heading(
+                robot_cell, self.sensor_range / CELL_SIZE, self.individual_maps[i],
+                self.env.ground_truth, self.env.angles[i], self.fov
+            )
 
     def run_episode(self):
         done = False
@@ -151,9 +165,15 @@ class TestWorker:
                 robot_heading_sim_step = []
                 for q in range(self.n_agents):
                     self.env.update_robot_belief(robot_locations_sim[q][l], robot_headings_sim[q][l])
+                    # Update individual agent's observation map
+                    self.individual_maps[q] = sensor_work_heading(
+                        robot_locations_sim[q][l], self.sensor_range / CELL_SIZE,
+                        self.individual_maps[q], self.env.ground_truth,
+                        robot_headings_sim[q][l], self.fov
+                    )
                     robot_location_sim_step.append(robot_locations_sim[q][l])
                     robot_heading_sim_step.append(robot_headings_sim[q][l])
-                
+
                 if self.save_image:
                     num_frame = i * self.sim_steps + l
                     # Plot both the original view and individual agent views
@@ -350,8 +370,8 @@ class TestWorker:
         # Row 2: Each agent's individual map belief
         for robot in self.robot_list:
             plt.subplot(3, n_agents, n_agents + robot.id + 1)
-            # Get agent's individual map belief
-            agent_map = robot.map_info.map
+            # Get agent's individual observation map (NOT the merged map)
+            agent_map = self.individual_maps[robot.id]
             plt.imshow(agent_map, cmap='gray')
             plt.title(f'Agent {robot.id} Map Belief', fontsize=10, fontweight='bold')
             plt.axis('off')
@@ -541,8 +561,8 @@ class TestWorker:
             plot_id = robot.id % len(color_list)
             c = color_list[plot_id]
 
-            # Get this agent's individual map belief (NOT the merged map)
-            agent_map = robot.map_info.map.copy()
+            # Get this agent's individual observation map (NOT the merged map)
+            agent_map = self.individual_maps[robot.id].copy()
 
             plt.imshow(agent_map, cmap='gray')
             plt.axis('off')
@@ -553,8 +573,8 @@ class TestWorker:
             trajectory_y = robot.trajectory_y.copy()
             trajectory_x.append(robot_location[0])
             trajectory_y.append(robot_location[1])
-            plt.plot((np.array(trajectory_x) - robot.map_info.map_origin_x) / robot.cell_size,
-                     (np.array(trajectory_y) - robot.map_info.map_origin_y) / robot.cell_size, c,
+            plt.plot((np.array(trajectory_x) - self.env.belief_info.map_origin_x) / CELL_SIZE,
+                     (np.array(trajectory_y) - self.env.belief_info.map_origin_y) / CELL_SIZE, c,
                      linewidth=2, alpha=0.9, zorder=2)
 
             # Draw current position and heading
@@ -571,15 +591,16 @@ class TestWorker:
                         color=c, alpha=0.3, zorder=10)
             plt.gca().add_artist(cone)
 
-            # Draw this agent's frontiers
-            if robot.frontier:
-                agent_frontiers = []
-                for frontier_coords in robot.frontier:
-                    frontier_cell = get_cell_position_from_coords(np.array(frontier_coords), robot.map_info)
-                    agent_frontiers.append(frontier_cell)
-                if agent_frontiers:
-                    agent_frontiers = np.array(agent_frontiers)
-                    plt.scatter(agent_frontiers[:, 0], agent_frontiers[:, 1], s=3, c='r', zorder=8)
+            # Draw frontiers from this agent's individual map
+            agent_map_info = MapInfo(agent_map, self.env.belief_info.map_origin_x,
+                                     self.env.belief_info.map_origin_y, CELL_SIZE)
+            agent_frontiers_set = get_frontier_in_map(agent_map_info)
+            if len(agent_frontiers_set) > 0:
+                agent_frontiers = get_cell_position_from_coords(
+                    np.array(list(agent_frontiers_set)), agent_map_info)
+                if len(agent_frontiers_set) == 1:
+                    agent_frontiers = agent_frontiers.reshape(1, 2)
+                plt.scatter(agent_frontiers[:, 0], agent_frontiers[:, 1], s=3, c='r', zorder=8)
 
             # Calculate explored percentage for this agent
             total_free = np.sum(self.env.ground_truth == FREE)
@@ -597,8 +618,8 @@ class TestWorker:
             plot_id = robot.id % len(color_list)
             c = color_list[plot_id]
 
-            # Use agent's individual map for local view
-            agent_map = robot.map_info.map
+            # Use agent's individual observation map for local view
+            agent_map = self.individual_maps[robot.id]
             center_cell = robot_locations[robot.id]
             half_size = local_map_size // 2
 
@@ -656,11 +677,14 @@ class TestWorker:
                     else:
                         plt.plot(other_local_x, other_local_y, 'o', color=other_c, markersize=6, alpha=0.5, zorder=5)
 
-            # Draw local frontiers from agent's perspective
-            if robot.frontier:
+            # Draw local frontiers from agent's individual map
+            agent_map_info = MapInfo(agent_map, self.env.belief_info.map_origin_x,
+                                     self.env.belief_info.map_origin_y, CELL_SIZE)
+            agent_frontiers_set = get_frontier_in_map(agent_map_info)
+            if len(agent_frontiers_set) > 0:
                 local_frontiers = []
-                for frontier_coords in robot.frontier:
-                    frontier_cell = get_cell_position_from_coords(np.array(frontier_coords), robot.map_info)
+                for frontier_coords in agent_frontiers_set:
+                    frontier_cell = get_cell_position_from_coords(np.array(frontier_coords), agent_map_info)
                     frontier_local_x = frontier_cell[0] - col_start
                     frontier_local_y = frontier_cell[1] - row_start
                     if 0 <= frontier_local_x < local_map.shape[1] and 0 <= frontier_local_y < local_map.shape[0]:
