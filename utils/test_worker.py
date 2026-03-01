@@ -457,12 +457,12 @@ class TestWorker:
     def plot_local_env_sim(self, step, robot_locations, robot_headings):
         plt.switch_backend('agg')
 
-        # Calculate layout: top row has 2 panels, bottom row has one panel per agent
+        # Layout: Top row - merged map + FOV view, Bottom row - each agent's individual map
         n_cols = max(2, self.n_agents)
-        fig = plt.figure(figsize=(3 * n_cols, 6))
+        fig = plt.figure(figsize=(3 * n_cols, 9))
 
-        color_list = ['r', 'b', 'g', 'y']
-        color_name = ['Red', 'Blue', 'Green', 'Yellow']
+        color_list = ['r', 'b', 'g', 'y', 'c', 'm']
+        color_name = ['Red', 'Blue', 'Green', 'Yellow', 'Cyan', 'Magenta']
         sensing_range = SENSOR_RANGE / CELL_SIZE
 
         # Detect robots in FOV for each robot
@@ -470,19 +470,19 @@ class TestWorker:
         for robot in self.robot_list:
             fov_detections[robot.id] = self.get_detected_robots_in_fov(robot, robot_locations, robot_headings)
 
-        # Top row - Panel 1: Global belief map with trajectories
-        plt.subplot(2, n_cols, 1)
+        # Top row - Panel 1: Global merged belief map
+        plt.subplot(3, n_cols, 1)
         plt.imshow(self.env.robot_belief, cmap='gray')
         plt.axis('off')
         xlim = plt.gca().get_xlim()
         ylim = plt.gca().get_ylim()
         plt.xlim(xlim[0], xlim[1])
         plt.ylim(ylim[0], ylim[1])
-        plt.title('Global Belief Map', fontsize=10, fontweight='bold')
+        plt.title('Merged Map (Ground Truth)', fontsize=10, fontweight='bold')
 
-        # First pass: Draw all trajectories (thinner, semi-transparent)
+        # Draw trajectories and arrows on merged map
         for i, (robot, location, heading) in enumerate(zip(self.robot_list, robot_locations, robot_headings)):
-            plot_id = robot.id % 4
+            plot_id = robot.id % len(color_list)
             c = color_list[plot_id]
             robot_location = get_coords_from_cell_position(location, self.env.belief_info)
             trajectory_x = robot.trajectory_x.copy()
@@ -491,142 +491,123 @@ class TestWorker:
             trajectory_y.append(robot_location[1])
             plt.plot((np.array(trajectory_x) - robot.map_info.map_origin_x) / robot.cell_size,
                      (np.array(trajectory_y) - robot.map_info.map_origin_y) / robot.cell_size, c,
-                     linewidth=1.2, alpha=0.4, zorder=1)
+                     linewidth=1.5, alpha=0.7, zorder=1)
 
-        # Second pass: Highlight detected trajectories and draw arrows
-        for i, (robot, location, heading) in enumerate(zip(self.robot_list, robot_locations, robot_headings)):
-            plot_id = robot.id % 4
-            c = color_list[plot_id]
             dx, dy = self.heading_to_vector(heading, length=sensing_range)
             arrow = FancyArrowPatch((location[0], location[1]), (location[0] + dx/1.25, location[1] + dy/1.25),
-                                    mutation_scale=10,
-                                    color=c,
-                                    arrowstyle='-|>')
+                                    mutation_scale=10, color=c, arrowstyle='-|>')
             plt.gca().add_artist(arrow)
-
-            # Highlight trajectory if this robot is detected by any other robot
-            is_detected = False
-            for detector_id, detected_list in fov_detections.items():
-                if robot.id in detected_list:
-                    is_detected = True
-                    break
-
-            if is_detected:
-                robot_location = get_coords_from_cell_position(location, self.env.belief_info)
-                trajectory_x = robot.trajectory_x.copy()
-                trajectory_y = robot.trajectory_y.copy()
-                trajectory_x.append(robot_location[0])
-                trajectory_y.append(robot_location[1])
-                # Draw highlighted trajectory (thicker, brighter)
-                plt.plot((np.array(trajectory_x) - robot.map_info.map_origin_x) / robot.cell_size,
-                         (np.array(trajectory_y) - robot.map_info.map_origin_y) / robot.cell_size, c,
-                         linewidth=3.0, alpha=1.0, zorder=3, linestyle='--',
-                         label=f'Detected: {color_name[plot_id]}')
-                # Add a circle marker at current position
-                plt.plot(location[0], location[1], 'o', color=c, markersize=8,
-                         markeredgewidth=2, markeredgecolor='white', zorder=4)
 
         global_frontiers = get_frontier_in_map(self.env.belief_info)
         if len(global_frontiers) != 0:
-            frontiers_cell = get_cell_position_from_coords(np.array(list(global_frontiers)), self.env.belief_info) #shape is (2,)
+            frontiers_cell = get_cell_position_from_coords(np.array(list(global_frontiers)), self.env.belief_info)
             if len(global_frontiers) == 1:
                 frontiers_cell = frontiers_cell.reshape(1,2)
-            plt.scatter(frontiers_cell[:, 0], frontiers_cell[:, 1], s=1, c='r')       
+            plt.scatter(frontiers_cell[:, 0], frontiers_cell[:, 1], s=1, c='r')
 
-        # Top row - Panel 2: Global belief map with FOV cones
-        plt.subplot(2, n_cols, 2)
+        # Top row - Panel 2: FOV & Detections view
+        plt.subplot(3, n_cols, 2)
         plt.imshow(self.env.robot_belief, cmap='gray')
         plt.axis('off')
         plt.xlim(xlim[0], xlim[1])
         plt.ylim(ylim[0], ylim[1])
         plt.title('FOV & Detections', fontsize=10, fontweight='bold')
 
-        # First pass: Draw all trajectories (thinner, semi-transparent)
         for i, (robot, location, heading) in enumerate(zip(self.robot_list, robot_locations, robot_headings)):
-            plot_id = robot.id % 4
+            plot_id = robot.id % len(color_list)
             c = color_list[plot_id]
-            robot_location = get_coords_from_cell_position(location, self.env.belief_info)
+            dx, dy = self.heading_to_vector(heading, length=sensing_range)
+            arrow = FancyArrowPatch((location[0], location[1]), (location[0] + dx/1.25, location[1] + dy/1.25),
+                                    mutation_scale=10, color=c, arrowstyle='-|>')
+            plt.gca().add_artist(arrow)
+            cone = Wedge(center=(location[0], location[1]), r=SENSOR_RANGE / CELL_SIZE,
+                        theta1=(heading-self.fov/2), theta2=(heading+self.fov/2), color=c, alpha=0.3, zorder=10)
+            plt.gca().add_artist(cone)
+
+        # Draw detection connections
+        for detector_id, detected_list in fov_detections.items():
+            for detected_id in detected_list:
+                detector_loc = robot_locations[detector_id]
+                detected_loc = robot_locations[detected_id]
+                plt.plot([detector_loc[0], detected_loc[0]], [detector_loc[1], detected_loc[1]],
+                         'w--', linewidth=1.5, alpha=0.6, zorder=11)
+
+        if len(global_frontiers) != 0:
+            plt.scatter(frontiers_cell[:, 0], frontiers_cell[:, 1], s=3, c='r')
+
+        # Middle row: Each agent's INDIVIDUAL partially observed map (full view)
+        for robot in self.robot_list:
+            plt.subplot(3, n_cols, n_cols + robot.id + 1)
+            plot_id = robot.id % len(color_list)
+            c = color_list[plot_id]
+
+            # Get this agent's individual map belief (NOT the merged map)
+            agent_map = robot.map_info.map.copy()
+
+            plt.imshow(agent_map, cmap='gray')
+            plt.axis('off')
+
+            # Draw this agent's trajectory
+            robot_location = get_coords_from_cell_position(robot_locations[robot.id], self.env.belief_info)
             trajectory_x = robot.trajectory_x.copy()
             trajectory_y = robot.trajectory_y.copy()
             trajectory_x.append(robot_location[0])
             trajectory_y.append(robot_location[1])
             plt.plot((np.array(trajectory_x) - robot.map_info.map_origin_x) / robot.cell_size,
                      (np.array(trajectory_y) - robot.map_info.map_origin_y) / robot.cell_size, c,
-                     linewidth=1.2, alpha=0.4, zorder=1)
+                     linewidth=2, alpha=0.9, zorder=2)
 
-        # Second pass: Draw FOV cones, arrows, and highlighted trajectories
-        for i, (robot, location, heading) in enumerate(zip(self.robot_list, robot_locations, robot_headings)):
-            plot_id = robot.id % 4
-            c = color_list[plot_id]
+            # Draw current position and heading
+            location = robot_locations[robot.id]
+            heading = robot_headings[robot.id]
             dx, dy = self.heading_to_vector(heading, length=sensing_range)
             arrow = FancyArrowPatch((location[0], location[1]), (location[0] + dx/1.25, location[1] + dy/1.25),
-                                    mutation_scale=10,
-                                    color=c,
-                                    arrowstyle='-|>')
+                                    mutation_scale=10, color=c, arrowstyle='-|>', linewidth=2)
             plt.gca().add_artist(arrow)
 
-            # Draw cone representing field of vision
-            cone = Wedge(center=(location[0], location[1]), r=SENSOR_RANGE / CELL_SIZE, theta1=(heading-self.fov/2),
-                         theta2=(heading+self.fov/2), color=c, alpha=0.3, zorder=10)
+            # Draw FOV cone
+            cone = Wedge(center=(location[0], location[1]), r=SENSOR_RANGE / CELL_SIZE,
+                        theta1=(heading - self.fov/2), theta2=(heading + self.fov/2),
+                        color=c, alpha=0.3, zorder=10)
             plt.gca().add_artist(cone)
 
-            # Highlight trajectory if detected by any other robot
-            is_detected = False
-            for detector_id, detected_list in fov_detections.items():
-                if robot.id in detected_list:
-                    is_detected = True
-                    break
+            # Draw this agent's frontiers
+            if robot.frontier:
+                agent_frontiers = []
+                for frontier_coords in robot.frontier:
+                    frontier_cell = get_cell_position_from_coords(np.array(frontier_coords), robot.map_info)
+                    agent_frontiers.append(frontier_cell)
+                if agent_frontiers:
+                    agent_frontiers = np.array(agent_frontiers)
+                    plt.scatter(agent_frontiers[:, 0], agent_frontiers[:, 1], s=3, c='r', zorder=8)
 
-            if is_detected:
-                robot_location = get_coords_from_cell_position(location, self.env.belief_info)
-                trajectory_x = robot.trajectory_x.copy()
-                trajectory_y = robot.trajectory_y.copy()
-                trajectory_x.append(robot_location[0])
-                trajectory_y.append(robot_location[1])
-                # Draw highlighted trajectory (thicker, brighter)
-                plt.plot((np.array(trajectory_x) - robot.map_info.map_origin_x) / robot.cell_size,
-                         (np.array(trajectory_y) - robot.map_info.map_origin_y) / robot.cell_size, c,
-                         linewidth=3.0, alpha=1.0, zorder=3, linestyle='--')
-                # Add a circle marker at current position
-                plt.plot(location[0], location[1], 'o', color=c, markersize=8,
-                         markeredgewidth=2, markeredgecolor='white', zorder=15)
+            # Calculate explored percentage for this agent
+            total_free = np.sum(self.env.ground_truth == FREE)
+            agent_explored = np.sum(agent_map == FREE)
+            agent_explored_rate = agent_explored / total_free if total_free > 0 else 0
 
-        # Draw detection connections (dashed lines from detector to detected robot)
-        for detector_id, detected_list in fov_detections.items():
-            for detected_id in detected_list:
-                detector_loc = robot_locations[detector_id]
-                detected_loc = robot_locations[detected_id]
-                plt.plot([detector_loc[0], detected_loc[0]], [detector_loc[1], detected_loc[1]],
-                         'w--', linewidth=1.5, alpha=0.6, zorder=11,
-                         label='Detection' if detector_id == 0 and detected_id == detected_list[0] else '')
+            plt.title(f'{color_name[plot_id]} Agent Map\nExplored: {agent_explored_rate:.1%}',
+                     fontsize=9, fontweight='bold', color=c)
 
-        # Plot frontiers
-        if len(global_frontiers) != 0:
-            plt.scatter(frontiers_cell[:, 0], frontiers_cell[:, 1], s=3, c='r')
-
-        plt.axis('off')
-
-        # Bottom row: Individual agent local views
+        # Bottom row: Individual agent local views (zoomed)
         local_map_size = int(UPDATING_MAP_SIZE / CELL_SIZE)
 
         for robot in self.robot_list:
-            plt.subplot(2, n_cols, n_cols + robot.id + 1)
-
-            robot_location = get_coords_from_cell_position(robot_locations[robot.id], self.env.belief_info)
-            plot_id = robot.id % 4
+            plt.subplot(3, n_cols, 2 * n_cols + robot.id + 1)
+            plot_id = robot.id % len(color_list)
             c = color_list[plot_id]
 
-            # Extract local map centered on robot
+            # Use agent's individual map for local view
+            agent_map = robot.map_info.map
             center_cell = robot_locations[robot.id]
             half_size = local_map_size // 2
 
             row_start = max(0, int(center_cell[1] - half_size))
-            row_end = min(self.env.robot_belief.shape[0], int(center_cell[1] + half_size))
+            row_end = min(agent_map.shape[0], int(center_cell[1] + half_size))
             col_start = max(0, int(center_cell[0] - half_size))
-            col_end = min(self.env.robot_belief.shape[1], int(center_cell[0] + half_size))
+            col_end = min(agent_map.shape[1], int(center_cell[0] + half_size))
 
-            local_map = self.env.robot_belief[row_start:row_end, col_start:col_end]
-
+            local_map = agent_map[row_start:row_end, col_start:col_end]
             plt.imshow(local_map, cmap='gray')
             plt.axis('off')
 
@@ -639,10 +620,7 @@ class TestWorker:
             arrow = FancyArrowPatch(
                 (robot_local_x, robot_local_y),
                 (robot_local_x + dx/1.25, robot_local_y + dy/1.25),
-                mutation_scale=10,
-                color=c,
-                arrowstyle='-|>',
-                linewidth=2
+                mutation_scale=10, color=c, arrowstyle='-|>', linewidth=2
             )
             plt.gca().add_artist(arrow)
 
@@ -652,9 +630,7 @@ class TestWorker:
                 r=SENSOR_RANGE / CELL_SIZE,
                 theta1=(robot_headings[robot.id] - self.fov/2),
                 theta2=(robot_headings[robot.id] + self.fov/2),
-                color=c,
-                alpha=0.3,
-                zorder=10
+                color=c, alpha=0.3, zorder=10
             )
             plt.gca().add_artist(cone)
 
@@ -667,32 +643,24 @@ class TestWorker:
                 other_local_x = other_location[0] - col_start
                 other_local_y = other_location[1] - row_start
 
-                # Check if other robot is within local view bounds
                 if 0 <= other_local_x < local_map.shape[1] and 0 <= other_local_y < local_map.shape[0]:
-                    other_plot_id = other_robot.id % 4
+                    other_plot_id = other_robot.id % len(color_list)
                     other_c = color_list[other_plot_id]
-
-                    # Check if this other robot is detected by current robot
                     is_detected = other_robot.id in fov_detections.get(robot.id, [])
 
                     if is_detected:
-                        # Highlight detected robots
-                        plt.plot(other_local_x, other_local_y, 'o',
-                                color=other_c, markersize=10,
+                        plt.plot(other_local_x, other_local_y, 'o', color=other_c, markersize=10,
                                 markeredgewidth=3, markeredgecolor='yellow', zorder=15)
-                        # Draw detection line
                         plt.plot([robot_local_x, other_local_x], [robot_local_y, other_local_y],
                                 'y--', linewidth=2, alpha=0.8, zorder=12)
                     else:
-                        # Draw non-detected robots with less emphasis
-                        plt.plot(other_local_x, other_local_y, 'o',
-                                color=other_c, markersize=6, alpha=0.5, zorder=5)
+                        plt.plot(other_local_x, other_local_y, 'o', color=other_c, markersize=6, alpha=0.5, zorder=5)
 
-            # Draw local frontiers
+            # Draw local frontiers from agent's perspective
             if robot.frontier:
                 local_frontiers = []
                 for frontier_coords in robot.frontier:
-                    frontier_cell = get_cell_position_from_coords(np.array(frontier_coords), self.env.belief_info)
+                    frontier_cell = get_cell_position_from_coords(np.array(frontier_coords), robot.map_info)
                     frontier_local_x = frontier_cell[0] - col_start
                     frontier_local_y = frontier_cell[1] - row_start
                     if 0 <= frontier_local_x < local_map.shape[1] and 0 <= frontier_local_y < local_map.shape[0]:
@@ -702,29 +670,27 @@ class TestWorker:
                     local_frontiers = np.array(local_frontiers)
                     plt.scatter(local_frontiers[:, 0], local_frontiers[:, 1], s=2, c='r', zorder=8)
 
-            # Title for each agent's view
-            detected_names = [color_name[did % 4] for did in fov_detections.get(robot.id, [])]
-            detected_text = f"Detects: {', '.join(detected_names)}" if detected_names else "No detections"
-            plt.title(f'{color_name[plot_id]} Agent Local View\n{detected_text}',
-                     fontsize=9, fontweight='bold', color=c)
+            detected_names = [color_name[did % len(color_list)] for did in fov_detections.get(robot.id, [])]
+            detected_text = f"Sees: {', '.join(detected_names)}" if detected_names else "No detections"
+            plt.title(f'{color_name[plot_id]} Local View\n{detected_text}', fontsize=9, fontweight='bold', color=c)
 
         # Build detection summary
         detection_summary = []
         for robot_id, detected_list in fov_detections.items():
             if len(detected_list) > 0:
-                detected_colors = [color_name[did % 4] for did in detected_list]
-                detection_summary.append(f"{color_name[robot_id % 4]} detects: {', '.join(detected_colors)}")
+                detected_colors = [color_name[did % len(color_list)] for did in detected_list]
+                detection_summary.append(f"{color_name[robot_id % len(color_list)]}: {', '.join(detected_colors)}")
 
         detection_text = ' | '.join(detection_summary) if detection_summary else 'No detections'
 
-        robot_headings_text = [f"{color_name[robot.id%4]}- {robot.heading:.0f}°" for robot in self.robot_list]
+        robot_headings_text = [f"{color_name[robot.id % len(color_list)]}: {robot.heading:.0f}°" for robot in self.robot_list]
         plt.suptitle('Explored: {:.4g}  Distance: {:.4g}\nHeadings: {}\nFOV Detections: {}'.format(
             self.env.explored_rate,
             max([robot.travel_dist for robot in self.robot_list]),
             ', '.join(robot_headings_text),
             detection_text
-        ), fontweight='bold', fontsize=10, y=0.98)
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        ), fontweight='bold', fontsize=10, y=0.99)
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
         plt.savefig('{}/{}_{}_{}_{}_{}_samples.png'.format(gifs_path, self.global_step, step, self.n_agents, self.fov, self.sensor_range), dpi=150)
         plt.close()
         frame = '{}/{}_{}_{}_{}_{}_samples.png'.format(gifs_path, self.global_step, step, self.n_agents, self.fov, self.sensor_range)

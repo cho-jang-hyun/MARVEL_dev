@@ -408,8 +408,8 @@ def main():
                                                                  norm_type=2)
                     global_q_net2_optimizer.step()
 
-                    entropy = -(logp.exp() * logp).sum(dim=-1, keepdim=True)
-                    alpha_loss = -(log_alpha * (entropy_target - entropy).detach()).mean()
+                    entropy = (logp.exp() * logp).sum(dim=-1, keepdim=True)
+                    alpha_loss = -(log_alpha * (entropy.detach() - entropy_target)).mean()
 
                     log_alpha_optimizer.zero_grad()
                     alpha_loss.backward()

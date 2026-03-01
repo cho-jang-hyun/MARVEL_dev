@@ -13,7 +13,7 @@ This file defines various parameters for:
 """
 TEST_SET = 'maps_test'
 LOAD_FOLDER_NAME = 'MARVEL'
-load_path = f'model/fixed_and_added_soft_update'
+load_path = f'model/fixed_partial_map_visualization_for_test'
 gifs_path = f'results/gifs/{LOAD_FOLDER_NAME}'
 LOAD_MODEL = True  
 SAVE_IMG_GAP = 50
