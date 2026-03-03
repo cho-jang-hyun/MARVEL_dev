@@ -268,7 +268,6 @@ class TrajectoryEncoder(nn.Module):
 
         # Agent aggregation layer
         self.agent_attention = MultiHeadAttention(trajectory_embedding_dim, n_heads=n_head)
-        self.agent_aggregation = nn.Linear(trajectory_embedding_dim, trajectory_embedding_dim)
         if gated_attention:
             self.agent_attention_gate = nn.Sequential(
                 nn.Linear(trajectory_embedding_dim * 2, trajectory_embedding_dim),
@@ -281,8 +280,11 @@ class TrajectoryEncoder(nn.Module):
             nn.ReLU(),
             nn.Linear(trajectory_embedding_dim, trajectory_embedding_dim)
         )
+        # Learned fallback when no trajectory information is usable.
+        self.null_trajectory_embedding = nn.Parameter(torch.zeros(trajectory_embedding_dim))
+        self.latest_debug = {}
 
-    def forward(self, detected_trajectories, trajectory_mask):
+    def forward(self, detected_trajectories, trajectory_mask, trajectory_node_indices=None):
         """
         Args:
             detected_trajectories: [batch, max_detected_agents, seq_len, feature_dim]
@@ -293,8 +295,14 @@ class TrajectoryEncoder(nn.Module):
         """
         batch_size, max_agents, seq_len, feature_dim = detected_trajectories.shape
 
-        # Reshape to process all agents together
-        # [batch * max_agents, seq_len, feature_dim]
+        # Build timestep validity mask (True means invalid/padded timestep).
+        if trajectory_node_indices is not None:
+            timestep_mask = trajectory_node_indices < 0
+        else:
+            timestep_mask = detected_trajectories.abs().sum(dim=-1) == 0
+        timestep_mask = timestep_mask | trajectory_mask.unsqueeze(-1)
+
+        # Reshape to process all agents together: [batch * max_agents, seq_len, feature_dim]
         trajectories_flat = detected_trajectories.reshape(batch_size * max_agents, seq_len, feature_dim)
 
         # Project features to embedding dimension
@@ -304,28 +312,29 @@ class TrajectoryEncoder(nn.Module):
         # Add positional encoding
         embedded = self.positional_encoding(embedded)
 
-        # Apply temporal transformer encoder
-        # [batch * max_agents, seq_len, trajectory_embedding_dim]
-        temporal_features = self.temporal_encoder(embedded)
+        # Apply temporal transformer encoder with timestep mask.
+        temporal_padding_mask = timestep_mask.reshape(batch_size * max_agents, 1, seq_len)
+        temporal_features = self.temporal_encoder(embedded, key_padding_mask=temporal_padding_mask)
+        temporal_features = temporal_features.reshape(batch_size, max_agents, seq_len, self.trajectory_embedding_dim)
 
-        # Take the last timestep as the trajectory representation
-        # [batch * max_agents, trajectory_embedding_dim]
-        agent_representations = temporal_features[:, -1, :]
+        # Aggregate only valid timesteps into an agent representation.
+        valid_timestep = ~timestep_mask
+        valid_timestep_count = valid_timestep.sum(dim=2, keepdim=True).clamp(min=1).float()
+        agent_representations = (temporal_features * valid_timestep.unsqueeze(-1).float()).sum(dim=2) / valid_timestep_count
 
-        # Reshape back to separate agents
-        # [batch, max_agents, trajectory_embedding_dim]
-        agent_representations = agent_representations.reshape(batch_size, max_agents, self.trajectory_embedding_dim)
+        # Agent is usable only if not padded and it has at least one valid timestep.
+        agent_valid = (~trajectory_mask) & valid_timestep.any(dim=2)
+        agent_representations = agent_representations * agent_valid.unsqueeze(-1).float()
 
-        # Prepare mask for attention (expand dimensions)
-        # [batch, 1, max_agents]
-        attention_mask = trajectory_mask.unsqueeze(1)
+        # Apply multi-head attention across agents.
+        # Query is computed from valid agents only.
+        valid_agent_count = agent_valid.sum(dim=1, keepdim=True).clamp(min=1).float()
+        query = (
+            agent_representations * agent_valid.unsqueeze(-1).float()
+        ).sum(dim=1, keepdim=True) / valid_agent_count.unsqueeze(-1)
 
-        # Apply multi-head attention across agents
-        # Query: mean of all agent representations (or learnable query)
-        query = agent_representations.mean(dim=1, keepdim=True)  # [batch, 1, trajectory_embedding_dim]
-
-        # [batch, 1, trajectory_embedding_dim]
-        aggregated, _ = self.agent_attention(
+        attention_mask = (~agent_valid).unsqueeze(1)  # [batch, 1, max_agents]
+        aggregated, agent_attention_weights = self.agent_attention(
             q=query,
             k=agent_representations,
             v=agent_representations,
@@ -339,10 +348,37 @@ class TrajectoryEncoder(nn.Module):
         else:
             aggregated = query + aggregated
 
-        # Squeeze and apply output layer
-        # [batch, trajectory_embedding_dim]
+        # If all agents are invalid, suppress attended output.
+        has_valid_agents = agent_valid.any(dim=1)
+        aggregated = aggregated * has_valid_agents.view(batch_size, 1, 1).float()
+
+        # Squeeze and apply output layer: [batch, trajectory_embedding_dim]
         aggregated = aggregated.squeeze(1)
         trajectory_embedding = self.output_layer(aggregated)
+
+        # Use learned null embedding when no usable agent trajectory is available.
+        if (~has_valid_agents).any():
+            null_embedding = self.null_trajectory_embedding.unsqueeze(0).expand(batch_size, -1)
+            trajectory_embedding = torch.where(
+                has_valid_agents.unsqueeze(1),
+                trajectory_embedding,
+                null_embedding
+            )
+
+        # Debug metrics for TensorBoard.
+        attention_probs = agent_attention_weights.squeeze(2).detach()  # [heads, batch, max_agents]
+        attention_entropy = -(attention_probs.clamp_min(1e-8) * attention_probs.clamp_min(1e-8).log()).sum(dim=-1)
+        if has_valid_agents.any():
+            valid_attention_entropy = attention_entropy[:, has_valid_agents].mean()
+        else:
+            valid_attention_entropy = trajectory_embedding.new_tensor(0.0)
+        self.latest_debug = {
+            "detected_agents_mean": (~trajectory_mask).float().sum(dim=1).mean().detach(),
+            "usable_agents_mean": agent_valid.float().sum(dim=1).mean().detach(),
+            "valid_timestep_ratio": valid_timestep.float().mean().detach(),
+            "embedding_norm": trajectory_embedding.norm(dim=-1).mean().detach(),
+            "agent_attention_entropy": valid_attention_entropy.detach(),
+        }
 
         return trajectory_embedding
 
@@ -466,7 +502,8 @@ class PolicyNet(nn.Module):
 
         return trajectory_node_features
 
-    def decode_state(self, enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding=None, trajectory_node_features=None, trajectory_mask=None):
+    def decode_state(self, enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding=None,
+                     trajectory_node_features=None, trajectory_mask=None, trajectory_node_indices=None):
         embedding_dim = enhanced_node_feature.size()[2]
         current_node_feature = torch.gather(enhanced_node_feature, 1,
                                                   current_index.repeat(1, 1, embedding_dim))
@@ -491,12 +528,13 @@ class PolicyNet(nn.Module):
             # Reshape to [batch, max_agents * seq_len, embedding_dim]
             trajectory_features_flat = trajectory_node_features.reshape(batch_size, max_agents * seq_len, embedding_dim)
 
-            # Create mask for invalid trajectory positions
-            # trajectory_mask: [batch, max_agents] - True for padded agents
-            # Expand to [batch, max_agents, seq_len]
-            trajectory_padding_mask = trajectory_mask.unsqueeze(2).repeat(1, 1, seq_len)
-            # Reshape to [batch, 1, max_agents * seq_len]
-            trajectory_padding_mask = trajectory_padding_mask.reshape(batch_size, 1, max_agents * seq_len)
+            if trajectory_node_indices is not None:
+                trajectory_token_mask = trajectory_node_indices < 0
+            else:
+                trajectory_token_mask = trajectory_mask.unsqueeze(2).expand(batch_size, max_agents, seq_len)
+            trajectory_token_mask = trajectory_token_mask | trajectory_mask.unsqueeze(2)
+            trajectory_padding_mask = trajectory_token_mask.reshape(batch_size, 1, max_agents * seq_len)
+            has_valid_tokens = (~trajectory_token_mask).reshape(batch_size, -1).any(dim=1)
 
             # Apply cross attention
             # Query: enhanced_current_node_feature [batch, 1, embedding_dim]
@@ -507,6 +545,7 @@ class PolicyNet(nn.Module):
                 v=trajectory_features_flat,
                 key_padding_mask=trajectory_padding_mask
             )
+            attended_features = attended_features * has_valid_tokens.view(batch_size, 1, 1).float()
 
             # Apply gated or standard residual connection
             if self.gated_attention:
@@ -558,7 +597,7 @@ class PolicyNet(nn.Module):
         trajectory_embedding = None
         trajectory_node_features = None
         if self.use_trajectory and detected_trajectories is not None and trajectory_mask is not None:
-            trajectory_embedding = self.trajectory_encoder(detected_trajectories, trajectory_mask)
+            trajectory_embedding = self.trajectory_encoder(detected_trajectories, trajectory_mask, trajectory_node_indices)
 
             # Encode trajectory node features if node indices are provided
             if trajectory_node_indices is not None:
@@ -568,7 +607,7 @@ class PolicyNet(nn.Module):
 
         current_node_feature, enhanced_current_node_feature = self.decode_state(
             enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding,
-            trajectory_node_features, trajectory_mask)
+            trajectory_node_features, trajectory_mask, trajectory_node_indices)
         logp = self.output_policy(current_node_feature, enhanced_current_node_feature,
                                   enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings)
 
@@ -706,7 +745,8 @@ class QNet(nn.Module):
 
         return trajectory_node_features
 
-    def decode_state(self, enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding=None, trajectory_node_features=None, trajectory_mask=None):
+    def decode_state(self, enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding=None,
+                     trajectory_node_features=None, trajectory_mask=None, trajectory_node_indices=None):
         embedding_dim = enhanced_node_feature.size()[2]
         current_node_feature = torch.gather(enhanced_node_feature, 1,
                                                   current_index.repeat(1, 1, embedding_dim))
@@ -731,12 +771,13 @@ class QNet(nn.Module):
             # Reshape to [batch, max_agents * seq_len, embedding_dim]
             trajectory_features_flat = trajectory_node_features.reshape(batch_size, max_agents * seq_len, embedding_dim)
 
-            # Create mask for invalid trajectory positions
-            # trajectory_mask: [batch, max_agents] - True for padded agents
-            # Expand to [batch, max_agents, seq_len]
-            trajectory_padding_mask = trajectory_mask.unsqueeze(2).repeat(1, 1, seq_len)
-            # Reshape to [batch, 1, max_agents * seq_len]
-            trajectory_padding_mask = trajectory_padding_mask.reshape(batch_size, 1, max_agents * seq_len)
+            if trajectory_node_indices is not None:
+                trajectory_token_mask = trajectory_node_indices < 0
+            else:
+                trajectory_token_mask = trajectory_mask.unsqueeze(2).expand(batch_size, max_agents, seq_len)
+            trajectory_token_mask = trajectory_token_mask | trajectory_mask.unsqueeze(2)
+            trajectory_padding_mask = trajectory_token_mask.reshape(batch_size, 1, max_agents * seq_len)
+            has_valid_tokens = (~trajectory_token_mask).reshape(batch_size, -1).any(dim=1)
 
             # Apply cross attention
             # Query: enhanced_current_node_feature [batch, 1, embedding_dim]
@@ -747,6 +788,7 @@ class QNet(nn.Module):
                 v=trajectory_features_flat,
                 key_padding_mask=trajectory_padding_mask
             )
+            attended_features = attended_features * has_valid_tokens.view(batch_size, 1, 1).float()
 
             # Apply gated or standard residual connection
             if self.gated_attention:
@@ -809,7 +851,7 @@ class QNet(nn.Module):
         trajectory_embedding = None
         trajectory_node_features = None
         if self.use_trajectory and detected_trajectories is not None and trajectory_mask is not None:
-            trajectory_embedding = self.trajectory_encoder(detected_trajectories, trajectory_mask)
+            trajectory_embedding = self.trajectory_encoder(detected_trajectories, trajectory_mask, trajectory_node_indices)
 
             # Encode trajectory node features if node indices are provided
             if trajectory_node_indices is not None:
@@ -819,7 +861,7 @@ class QNet(nn.Module):
 
         current_node_feature, enhanced_current_node_feature = self.decode_state(
             enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding,
-            trajectory_node_features, trajectory_mask)
+            trajectory_node_features, trajectory_mask, trajectory_node_indices)
         q_values = self.output_q(current_node_feature, enhanced_current_node_feature,
                                  enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings, current_index, all_agent_indices, all_agent_next_indices)
         return q_values

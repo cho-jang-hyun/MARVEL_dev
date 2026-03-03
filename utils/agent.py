@@ -501,18 +501,20 @@ class Agent:
                 dx = x - self.location[0]
                 dy = y - self.location[1]
 
-                # Normalize coordinates
-                dx_norm = dx / (UPDATING_MAP_SIZE / 2)
-                dy_norm = dy / (UPDATING_MAP_SIZE / 2)
+                # Normalize coordinates to roughly [-1, 1]
+                dx_norm = np.clip(dx / (UPDATING_MAP_SIZE / 2), -1.0, 1.0)
+                dy_norm = np.clip(dy / (UPDATING_MAP_SIZE / 2), -1.0, 1.0)
 
-                # Normalize heading to [0, 1]
-                heading_norm = heading / 360.0
+                # Encode heading as periodic features to avoid 0/360 discontinuity
+                heading_rad = np.radians(heading)
+                heading_sin = np.sin(heading_rad)
+                heading_cos = np.cos(heading_rad)
 
-                # Normalize velocity (assuming max velocity is 1.0 * NUM_SIM_STEPS)
-                velocity_norm = velocity / (VELOCITY * NUM_SIM_STEPS)
+                # Normalize velocity to [0, 1]
+                velocity_norm = np.clip(velocity / (VELOCITY * NUM_SIM_STEPS), 0.0, 1.0)
 
-                # Stack features
-                trajectories[i] = np.stack([dx_norm, dy_norm, heading_norm, velocity_norm], axis=1)
+                # Stack features: (dx, dy, sin(heading), cos(heading), velocity)
+                trajectories[i] = np.stack([dx_norm, dy_norm, heading_sin, heading_cos, velocity_norm], axis=1)
                 mask[i] = False  # This agent is not padded
 
         # Convert to torch tensors

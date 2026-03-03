@@ -85,7 +85,7 @@ EMBEDDING_DIM = 128
 
 # Trajectory tracking parameters
 TRAJECTORY_HISTORY_LENGTH = 10  # Number of recent steps to track
-TRAJECTORY_FEATURE_DIM = 4      # (dx, dy, heading, velocity)
+TRAJECTORY_FEATURE_DIM = 5      # (dx, dy, sin(heading), cos(heading), velocity)
 TRAJECTORY_EMBEDDING_DIM = 64   # Trajectory encoder output dimension
 MAX_DETECTED_AGENTS = N_AGENTS - 1  # Maximum number of detectable agents in FOV
 GATED_ATTENTION = True  # Use gated attention for cross attention (True: gated, False: standard residual)
