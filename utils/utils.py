@@ -162,7 +162,7 @@ def is_frontier(location, map_info):
         else:
             return False
 
-def check_collision(start, end, map_info):
+def check_collision(start, end, map_info, allow_unknown=False):
     # Bresenham line algorithm checking
     collision = False
 
@@ -189,7 +189,7 @@ def check_collision(start, end, map_info):
         if k == OCCUPIED:
             collision = True
             break
-        if k == UNKNOWN:
+        if k == UNKNOWN and not allow_unknown:
             collision = True
             break
         if error > 0:
