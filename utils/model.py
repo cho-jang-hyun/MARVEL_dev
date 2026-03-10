@@ -440,6 +440,14 @@ class PolicyNet(nn.Module):
         # pointer
         self.pointer = SingleHeadAttention(embedding_dim)
 
+        # PHANTOM: AIR Head Context-Conditioned Penalty
+        from parameter import K_SIZE
+        self.air_penalty_head = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim // 2),
+            nn.ReLU(),
+            nn.Linear(embedding_dim // 2, K_SIZE * num_angles_bin)
+        )
+
     def encode_graph(self, node_inputs, node_padding_mask, edge_mask, frontier_distribution):
         node_feature = self.initial_embedding(node_inputs)
         enhanced_node_feature = self.encoder(src=node_feature,
@@ -585,6 +593,10 @@ class PolicyNet(nn.Module):
         current_mask = edge_padding_mask.unsqueeze(-1).repeat(1, 1, 1, num_best_headings).reshape(batch_size, 1, -1)
         logp = self.pointer(current_state_feature, enhanced_neighbor_features, current_mask)
         logp = logp.squeeze(1)
+
+        # Apply Context-Conditioned Dispersal Penalty
+        air_penalty = self.air_penalty_head(enhanced_current_node_feature)
+        logp = logp - torch.abs(air_penalty.squeeze(1))
 
         return logp
 

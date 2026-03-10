@@ -467,10 +467,33 @@ class Agent:
                 self.observed_trajectory_buffer[robot_id].append(current_step)
             else:
                 if robot_id in self.observed_trajectory_buffer:
-                    # Not in FOV, pad with zero tuple to softly fade memory (solving instant amnesia)
-                    self.observed_trajectory_buffer[robot_id].append((0.0, 0.0, 0.0, 0.0))
+                    # Trajectory Hallucination - predict next step via forward kinematics
+                    last_valid = None
+                    for j in range(len(self.observed_trajectory_buffer[robot_id]) - 1, -1, -1):
+                        step = self.observed_trajectory_buffer[robot_id][j]
+                        if step[3] > 0.01: # Check if it had velocity
+                            last_valid = step
+                            break
+                    
+                    if last_valid is not None:
+                        last_x, last_y, last_heading, last_velocity = last_valid
+                        
+                        # Hallucinate forward (NUM_SIM_STEPS represents time delta)
+                        hallucinated_x = last_x + last_velocity * 4 * np.cos(np.radians(last_heading))
+                        hallucinated_y = last_y + last_velocity * 4 * np.sin(np.radians(last_heading))
+                        
+                        # Decay velocity so prediction eventually stalls
+                        decayed_velocity = last_velocity * 0.70
+                        if decayed_velocity < 0.05:
+                            decayed_velocity = 0.0
+                            
+                        self.observed_trajectory_buffer[robot_id].append((hallucinated_x, hallucinated_y, last_heading, decayed_velocity))
+                    else:
+                        # No valid history or fully decayed, soft fade
+                        self.observed_trajectory_buffer[robot_id].append((0.0, 0.0, 0.0, 0.0))
+                        
                     # Check if memory has completely faded
-                    if all(x[0] == 0.0 and x[1] == 0.0 for x in self.observed_trajectory_buffer[robot_id]):
+                    if all(x[3] == 0.0 for x in self.observed_trajectory_buffer[robot_id]):
                         del self.observed_trajectory_buffer[robot_id]
 
         # Initialize output tensors
@@ -517,11 +540,8 @@ class Agent:
                     distances = np.linalg.norm(self.node_coords - position, axis=1)
                     nearest_idx = np.argmin(distances)
 
-                    # Check if nearest node is within threshold
-                    if distances[nearest_idx] < NODE_RESOLUTION:
-                        trajectory_node_indices[i, t] = nearest_idx
-                    else:
-                        trajectory_node_indices[i, t] = -1
+                    # Ghost Edges: Anchor hallucinated coordinates to nearest mapped topological node regardless of distance
+                    trajectory_node_indices[i, t] = nearest_idx
                 else:
                     trajectory_node_indices[i, t] = -1
 
