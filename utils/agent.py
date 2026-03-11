@@ -442,12 +442,10 @@ class Agent:
         Returns:
             detected_trajectories: torch.Tensor of shape [1, MAX_DETECTED_AGENTS, seq_len, feature_dim]
             trajectory_mask: torch.Tensor of shape [1, MAX_DETECTED_AGENTS], True for padded agents
-            trajectory_node_indices: torch.Tensor of shape [1, MAX_DETECTED_AGENTS, seq_len], -1 for invalid
+            trajectory_node_indices: torch.Tensor of shape [1, MAX_DETECTED_AGENTS], containing the latest node index
         """
-        # Do not cheat using trajectory_buffer true past. Maintain agent's own history.
-        if not hasattr(self, 'observed_trajectory_buffer'):
-            from collections import deque
-            self.observed_trajectory_buffer = {}
+        if not hasattr(self, 'unseen_teammates'):
+            self.unseen_teammates = {}
 
         # Detect robots in FOV
         detected_robot_ids = self.get_robots_in_fov(robot_locations)
@@ -458,115 +456,42 @@ class Agent:
                 continue
 
             if robot_id in detected_robot_ids:
-                if robot_id not in self.observed_trajectory_buffer:
-                    from collections import deque
-                    self.observed_trajectory_buffer[robot_id] = deque(maxlen=TRAJECTORY_HISTORY_LENGTH)
-                
-                # Fetch only the CURRENT step from true buffer to simulate sensing it presently
+                # Agent is in FOV, get current node
                 current_step = trajectory_buffer[robot_id][-1]
-                self.observed_trajectory_buffer[robot_id].append(current_step)
-            else:
-                if robot_id in self.observed_trajectory_buffer:
-                    # Trajectory Hallucination - predict next step via forward kinematics
-                    last_valid = None
-                    for j in range(len(self.observed_trajectory_buffer[robot_id]) - 1, -1, -1):
-                        step = self.observed_trajectory_buffer[robot_id][j]
-                        if step[3] > 0.01: # Check if it had velocity
-                            last_valid = step
-                            break
-                    
-                    if last_valid is not None:
-                        last_x, last_y, last_heading, last_velocity = last_valid
-                        
-                        # Hallucinate forward (NUM_SIM_STEPS represents time delta)
-                        hallucinated_x = last_x + last_velocity * 4 * np.cos(np.radians(last_heading))
-                        hallucinated_y = last_y + last_velocity * 4 * np.sin(np.radians(last_heading))
-                        
-                        # Decay velocity so prediction eventually stalls
-                        decayed_velocity = last_velocity * 0.70
-                        if decayed_velocity < 0.05:
-                            decayed_velocity = 0.0
-                            
-                        self.observed_trajectory_buffer[robot_id].append((hallucinated_x, hallucinated_y, last_heading, decayed_velocity))
-                    else:
-                        # No valid history or fully decayed, soft fade
-                        self.observed_trajectory_buffer[robot_id].append((0.0, 0.0, 0.0, 0.0))
-                        
-                    # Check if memory has completely faded
-                    if all(x[3] == 0.0 for x in self.observed_trajectory_buffer[robot_id]):
-                        del self.observed_trajectory_buffer[robot_id]
-
-        # Initialize output tensors
-        max_agents = MAX_DETECTED_AGENTS
-        seq_len = TRAJECTORY_HISTORY_LENGTH
-        feature_dim = TRAJECTORY_FEATURE_DIM
-
-        trajectories = np.zeros((max_agents, seq_len, feature_dim), dtype=np.float32)
-        trajectory_node_indices = np.full((max_agents, seq_len), -1, dtype=np.int64)  # -1 for invalid
-        mask = np.ones(max_agents, dtype=bool)  # True means padded
-
-        # Process each detected/remembered robot
-        detected_or_remembered_ids = list(self.observed_trajectory_buffer.keys())
-        for i, robot_id in enumerate(detected_or_remembered_ids[:max_agents]):
-            trajectory = list(self.observed_trajectory_buffer[robot_id])
-
-            # Pad if trajectory is shorter than seq_len
-            if len(trajectory) < seq_len:
-                # Pad with zeros at the beginning
-                padding_length = seq_len - len(trajectory)
-                trajectory = [(0, 0, 0, 0)] * padding_length + trajectory
-
-            # Convert to numpy array
-            trajectory_array = np.array(trajectory[-seq_len:])  # Take last seq_len steps
-
-            # Extract features: (x, y, heading, velocity)
-            x = trajectory_array[:, 0]
-            y = trajectory_array[:, 1]
-            heading = trajectory_array[:, 2]
-            velocity = trajectory_array[:, 3]
-
-            # Find corresponding node indices for each timestep
-            for t in range(seq_len):
-                if x[t] == 0 and y[t] == 0:
-                    # Skip padded entries
-                    trajectory_node_indices[i, t] = -1
-                    continue
-
-                position = np.array([x[t], y[t]])
-
-                # Find nearest node
+                x, y, heading, velocity = current_step
+                position = np.array([x, y])
+                nearest_idx = -1
                 if self.node_coords is not None and len(self.node_coords) > 0:
-                    # Calculate distances to all nodes
                     distances = np.linalg.norm(self.node_coords - position, axis=1)
-                    nearest_idx = np.argmin(distances)
+                    if distances.min() < NODE_RESOLUTION:
+                        nearest_idx = np.argmin(distances)
 
-                    # Ghost Edges: Anchor hallucinated coordinates to nearest mapped topological node regardless of distance
-                    trajectory_node_indices[i, t] = nearest_idx
-                else:
-                    trajectory_node_indices[i, t] = -1
+                self.unseen_teammates[robot_id] = {
+                    "node": nearest_idx,
+                    "steps": 0
+                }
+            else:
+                if robot_id in self.unseen_teammates:
+                    self.unseen_teammates[robot_id]["steps"] += 1
+                    # Hard forget if unseen for too long (e.g. 100 steps)
+                    if self.unseen_teammates[robot_id]["steps"] > 100:
+                        del self.unseen_teammates[robot_id]
 
-            # Convert to relative coordinates (relative to current agent)
-            dx = x - self.location[0]
-            dy = y - self.location[1]
-
-            # Normalize coordinates to roughly [-1, 1]
-            dx_norm = np.clip(dx / (UPDATING_MAP_SIZE / 2), -1.0, 1.0)
-            dy_norm = np.clip(dy / (UPDATING_MAP_SIZE / 2), -1.0, 1.0)
-
-            # Encode heading as periodic features to avoid 0/360 discontinuity
-            heading_rad = np.radians(heading)
-            heading_sin = np.sin(heading_rad)
-            heading_cos = np.cos(heading_rad)
-
-            # Normalize velocity to [0, 1]
-            velocity_norm = np.clip(velocity / (VELOCITY * NUM_SIM_STEPS), 0.0, 1.0)
-
-            # Stack features: (dx, dy, sin(heading), cos(heading), velocity)
-            trajectories[i] = np.stack([dx_norm, dy_norm, heading_sin, heading_cos, velocity_norm], axis=1)
-            mask[i] = False  # This agent is not padded
-
-        # Convert to torch tensors
-        detected_trajectories = torch.FloatTensor(trajectories).unsqueeze(0).to(self.device)
+        max_agents = MAX_DETECTED_AGENTS
+        
+        unseen_steps = np.zeros(max_agents, dtype=np.float32)
+        trajectory_node_indices = np.full(max_agents, -1, dtype=np.int64)
+        mask = np.ones(max_agents, dtype=bool)
+        
+        tracked_ids = list(self.unseen_teammates.keys())
+        for i, robot_id in enumerate(tracked_ids[:max_agents]):
+            info = self.unseen_teammates[robot_id]
+            if info["node"] != -1:
+                unseen_steps[i] = info["steps"]
+                trajectory_node_indices[i] = info["node"]
+                mask[i] = False
+                
+        detected_trajectories = torch.FloatTensor(unseen_steps).unsqueeze(0).to(self.device)
         trajectory_mask = torch.BoolTensor(mask).unsqueeze(0).to(self.device)
         trajectory_node_indices_tensor = torch.LongTensor(trajectory_node_indices).unsqueeze(0).to(self.device)
 
@@ -589,29 +514,16 @@ class Agent:
         Returns:
             None (modifies node_manager nodes in place)
         """
-        if not hasattr(self, 'observed_trajectory_buffer'):
+        if not hasattr(self, 'unseen_teammates'):
             return
             
-        for robot_id, trajectory_queue in self.observed_trajectory_buffer.items():
-            trajectory = list(trajectory_queue)
-
-            for step in trajectory:
-                x, y, heading, velocity = step
-
-                # Skip zero-padded entries
-                if x == 0 and y == 0:
-                    continue
-
-                position = np.array([x, y])
-
-                # Find nearest node using quadtree
-                nodes_nearby = self.node_manager.nodes_dict.nearest_neighbors(position.tolist())
-
-                if len(nodes_nearby) > 0:
-                    nearest_node = nodes_nearby[0]
-                    # Check distance threshold to ensure it's actually at this node
-                    if np.linalg.norm(nearest_node.data.coords - position) < NODE_RESOLUTION:
-                        nearest_node.data.visited_by_others = 1
+        for robot_id, info in self.unseen_teammates.items():
+            node_idx = info["node"]
+            if node_idx != -1 and node_idx < len(self.node_coords):
+                node_coord = self.node_coords[node_idx]
+                node = self.node_manager.nodes_dict.find((node_coord[0], node_coord[1]))
+                if node is not None:
+                    node.data.visited_by_others = 1
 
     def calculate_overlap_reward(self, current_robot_location, all_robots_locations, robot_headings_list):
         ## Robot heading list in degrees
@@ -651,7 +563,7 @@ class Agent:
 
     def _get_empty_trajectory_tensors(self):
         detected_trajectories = torch.zeros(
-            (1, MAX_DETECTED_AGENTS, TRAJECTORY_HISTORY_LENGTH, TRAJECTORY_FEATURE_DIM),
+            (1, MAX_DETECTED_AGENTS),
             dtype=torch.float32,
             device=self.device,
         )
@@ -661,7 +573,7 @@ class Agent:
             device=self.device,
         )
         trajectory_node_indices = torch.full(
-            (1, MAX_DETECTED_AGENTS, TRAJECTORY_HISTORY_LENGTH),
+            (1, MAX_DETECTED_AGENTS),
             -1,
             dtype=torch.long,
             device=self.device,
