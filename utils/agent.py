@@ -201,7 +201,13 @@ class Agent:
         node_highest_utility_angles = node_highest_utility_angles / 360
         node_frontier_distribution = node_frontier_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
         # visited_by_others is already 0 or 1, no normalization needed
-        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others), axis=1)
+        # Add dual-scale budget features:
+        # 1. Absolute Urgency: steps_left / MAX_EPISODE_STEP
+        # 2. Relative Progress: steps_left / initial_budget
+        # This ensures perception is distinct at timestep 0 for different RIB samples
+        abs_budget = np.full((n_node, 1), steps_left / MAX_EPISODE_STEP, dtype=np.float32)
+        rel_budget = np.full((n_node, 1), steps_left / initial_budget, dtype=np.float32)
+        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, abs_budget, rel_budget), axis=1)
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
         all_node_frontier_distribution = torch.Tensor(node_frontier_distribution).unsqueeze(0).to(self.device)
         node_heading_visited = torch.Tensor(node_heading_visited).unsqueeze(0).to(self.device)
@@ -260,8 +266,10 @@ class Agent:
     def select_next_waypoint(self, observation, greedy = False):
         _, _, _, _, current_edge, _, _, _, _, _, _, _ = observation
         with torch.no_grad():
-            logp = self.policy_net(*observation[:9], detected_trajectories=observation[9],
+            logp, mih_prediction, alpha, imagined_neighbor_state = self.policy_net(*observation[:9], detected_trajectories=observation[9],
                                    trajectory_mask=observation[10], trajectory_node_indices=observation[11])
+        
+        self.last_mih_prediction = mih_prediction
 
         if greedy:
             action_index = torch.argmax(logp, 1).long()
@@ -273,7 +281,7 @@ class Agent:
         heading_index = self.neighbor_best_indices[waypoint_index][action_index.item() % self.num_heading_candidates]
         next_position = self.node_coords[next_node_index]
 
-        return next_position, next_node_index, action_index, heading_index
+        return next_position, next_node_index, action_index, heading_index, current_in_edge, mih_prediction.item(), alpha.detach(), imagined_neighbor_state.detach()
     
     def compute_best_heading(self, node_coords, frontier_distribution, neighbor_nodes):
         neighbor_best_headings = []
@@ -580,7 +588,7 @@ class Agent:
         )
         return detected_trajectories, trajectory_mask, trajectory_node_indices
         
-    def save_observation(self, observation):
+    def save_observation(self, observation, alpha=None, imagined_neighbor_state=None):
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, detected_trajectories, trajectory_mask, trajectory_node_indices = observation
         if detected_trajectories is None or trajectory_mask is None or trajectory_node_indices is None:
             detected_trajectories, trajectory_mask, trajectory_node_indices = self._get_empty_trajectory_tensors()
@@ -596,6 +604,22 @@ class Agent:
         self.episode_buffer[40] += detected_trajectories
         self.episode_buffer[41] += trajectory_mask
         self.episode_buffer[42] += trajectory_node_indices
+
+        # Save MIH, Alpha, and SLI for supervision
+        if hasattr(self, 'last_mih_prediction'):
+            self.episode_buffer[46] += self.last_mih_prediction.reshape(1, 1, 1)
+        else:
+            self.episode_buffer[46] += torch.zeros((1, 1, 1)).to(self.device)
+
+        if alpha is not None:
+            self.episode_buffer[48] += alpha.reshape(1, 1, 1)
+        else:
+            self.episode_buffer[48] += torch.zeros((1, 1, 1)).to(self.device)
+        
+        if imagined_neighbor_state is not None:
+            self.episode_buffer[49] += imagined_neighbor_state.reshape(1, 1, -1)
+        else:
+            self.episode_buffer[49] += torch.zeros((1, 1, EMBEDDING_DIM)).to(self.device)
 
     def save_action(self, action_index):
         self.episode_buffer[8] += action_index.reshape(1, 1, 1)

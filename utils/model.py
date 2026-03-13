@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import math
 import numpy as np
+from utils.egbd import EvidentialLayer, BeliefDiffusion
 
 class SingleHeadAttention(nn.Module):
     def __init__(self, embedding_dim):
@@ -204,10 +205,14 @@ class Encoder(nn.Module):
     def __init__(self, embedding_dim=128, n_head=8, n_layer=1, gated_attention=True):
         super(Encoder, self).__init__()
         self.layers = nn.ModuleList(EncoderLayer(embedding_dim, n_head, gated_attention) for i in range(n_layer))
+        self.belief_diffusion = BeliefDiffusion(embedding_dim, n_heads=n_head)
 
     def forward(self, src, key_padding_mask=None, attn_mask=None):
         for layer in self.layers:
             src = layer(src, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
+        
+        # Apply belief diffusion across the encoded nodes
+        src, _ = self.belief_diffusion(src, adj_mask=key_padding_mask)
         return src
 
 
@@ -351,15 +356,20 @@ class PolicyNet(nn.Module):
         self.frontiers_embedding =  nn.Conv1d(num_angles_bin, embedding_dim, kernel_size=3, padding=1)
         self.node_frontiers_embedding = nn.Linear(embedding_dim * 2, embedding_dim)
 
-        # Trajectory encoder
-        if use_trajectory:
-            from parameter import NODE_PADDING_SIZE
-            self.trajectory_encoder = EvidentialGraphBeliefDiffusion(
-                num_nodes=NODE_PADDING_SIZE,
-                embedding_dim=embedding_dim,
-            )
-            # Diffusion output is appended to node embeddings or applied directly
-            self.trajectory_fusion = nn.Linear(embedding_dim + 1, embedding_dim)
+        # Predict marginal info yield
+        self.mih_head = nn.Sequential(
+            nn.Linear(embedding_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+
+        # Social Latent Imagination Head - predicts the evidential state of neighboring agents
+        self.social_imagination = nn.Sequential(
+            nn.Linear(embedding_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, embedding_dim)
+        )
+        self.evidential_head = EvidentialLayer(embedding_dim, 1) # Dirichlet parameter for state value/utility
 
         # Decoder
         self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1, gated_attention=gated_attention)
@@ -440,10 +450,21 @@ class PolicyNet(nn.Module):
 
         current_node_feature, enhanced_current_node_feature = self.decode_state(
             enhanced_node_feature, current_index, node_padding_mask)
+        
+        # Predict marginal information yield
+        mih_prediction = self.mih_head(enhanced_current_node_feature).squeeze(1)
+
+        # Social Latent Imagination: Predict neighbor states
+        # [batch, 1, embedding_dim] -> [batch, 1, embedding_dim]
+        imagined_neighbor_state = self.social_imagination(enhanced_current_node_feature)
+
+        # Evidential parameter (alpha) for current state utility
+        alpha = self.evidential_head(enhanced_current_node_feature).squeeze(1)
+
         logp = self.output_policy(current_node_feature, enhanced_current_node_feature,
                                   enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings)
 
-        return logp
+        return logp, mih_prediction, alpha, imagined_neighbor_state
 
 
 class QNet(nn.Module):
@@ -498,6 +519,9 @@ class QNet(nn.Module):
         self.best_headings_embedding = nn.Linear(num_angles_bin, embedding_dim)
         self.visited_headings_embedding = nn.Linear(num_angles_bin, embedding_dim)
         self.neighboring_node_embedding = nn.Linear(embedding_dim * 3, embedding_dim)
+
+        # Evidential parameter (alpha) for state-action value
+        self.evidential_head = EvidentialLayer(embedding_dim, 1)
 
         # Agent decoder
         if train_algo in (2 ,3):

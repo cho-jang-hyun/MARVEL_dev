@@ -30,6 +30,7 @@ import wandb
 
 from utils.model import PolicyNet, QNet
 from utils.runner import RLRunner
+from utils.egbd import kl_divergence_dirichlet
 from parameter import *
 
 ray.init()
@@ -92,6 +93,10 @@ def main():
     log_alpha = torch.FloatTensor([-2]).to(device)
     log_alpha.requires_grad = True
 
+    # Lagrangian multiplier for Budgeted MDP (BMDP) constraint
+    log_lambda_budget = torch.FloatTensor([-2]).to(device)
+    log_lambda_budget.requires_grad = True
+
     global_target_q_net1 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, effective_train_algo, use_trajectory=True, gated_attention=GATED_ATTENTION).to(device)
     global_target_q_net2 = QNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, effective_train_algo, use_trajectory=True, gated_attention=GATED_ATTENTION).to(device)
 
@@ -100,6 +105,7 @@ def main():
     global_q_net1_optimizer = optim.Adam(global_q_net1.parameters(), lr=LR)
     global_q_net2_optimizer = optim.Adam(global_q_net2.parameters(), lr=LR)
     log_alpha_optimizer = optim.Adam([log_alpha], lr=1e-4)
+    log_lambda_budget_optimizer = optim.Adam([log_lambda_budget], lr=1e-4)
 
     curr_episode = 0
     best_success_rate = -float('inf')  # Track best performance for saving best model
@@ -252,6 +258,10 @@ def main():
                     next_detected_trajectories = torch.stack(rollouts[43]).to(device)
                     next_trajectory_mask = torch.stack(rollouts[44]).to(device)
                     next_trajectory_node_indices = torch.stack(rollouts[45]).to(device)
+                    mih_prediction_buffer = torch.stack(rollouts[46]).to(device)
+                    next_mih_prediction_buffer = torch.stack(rollouts[47]).to(device)
+                    alpha_buffer = torch.stack(rollouts[48]).to(device)
+                    imagined_neighbor_state_buffer = torch.stack(rollouts[49]).to(device)
 
                     # Load ground truth data if needed
                     if effective_train_algo in (2,3):
@@ -371,13 +381,35 @@ def main():
                         q_values2 = dp_q_net2(*state, **q_kwargs)
                         q_values = torch.min(q_values1, q_values2)
 
-                    logp = dp_policy(*observation, **policy_kwargs)
+                    logp, mih_prediction, alpha, imagined_neighbor_state = dp_policy(*observation, **policy_kwargs)
+                    
+                    # Policy Gradient Loss
                     policy_loss = torch.sum(
                         (logp.exp().unsqueeze(2) * (log_alpha.exp().detach() * logp.unsqueeze(2) - q_values.detach())),
                         dim=1).mean()
+                    
+                    # MIH Loss
+                    mih_loss = mse_loss(mih_prediction, reward.squeeze(2))
+                    
+                    # Evidential KL Loss (Uncertainty Calibration)
+                    # We encourage high evidence in harvested areas and low in unknown
+                    target_alpha = torch.ones_like(alpha) + reward.squeeze(2) * 10.0
+                    evidential_loss = kl_divergence_dirichlet(alpha, target_alpha.detach()).mean()
+
+                    # Budget-Aware Constraint Loss (Lagrangian)
+                    # Use rel_budget from node_inputs (index -1 in our Agent.get_observation)
+                    rel_budget = node_inputs[:, 0, -1]
+                    budget_cost = 1.0 - rel_budget # Progress cost
+                    budget_constraint_loss = (log_lambda_budget.exp().detach() * budget_cost).mean()
+                    
+                    # Social Latent Imagination Loss
+                    # Supervise predicted neighbor states with mean detected trajectory context
+                    sli_loss = mse_loss(imagined_neighbor_state.squeeze(1), detected_trajectories.mean(dim=2).mean(dim=1))
+
+                    total_policy_loss = policy_loss + 0.1 * mih_loss + 0.01 * evidential_loss + budget_constraint_loss + 0.05 * sli_loss
 
                     global_policy_optimizer.zero_grad()
-                    policy_loss.backward()
+                    total_policy_loss.backward()
                     policy_grad_norm = torch.nn.utils.clip_grad_norm_(global_policy_net.parameters(), max_norm=GRAD_CLIP_POLICY,
                                                                       norm_type=2)
                     global_policy_optimizer.step()
@@ -421,6 +453,13 @@ def main():
                     with torch.no_grad():
                         log_alpha.clamp_(log_alpha_min, log_alpha_max)
 
+                    # Update Lagrangian multiplier for budget constraint
+                    budget_error = (1.0 - rel_budget.mean()) - 0.5 
+                    lambda_loss = -(log_lambda_budget * budget_error.detach()).mean()
+                    log_lambda_budget_optimizer.zero_grad()
+                    lambda_loss.backward()
+                    log_lambda_budget_optimizer.step()
+
                     # Soft update target networks
                     for target_param, param in zip(global_target_q_net1.parameters(), global_q_net1.parameters()):
                         target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
@@ -440,10 +479,10 @@ def main():
                 traj_embedding_norm = float(trajectory_debug.get('embedding_norm', torch.tensor(0.0)).item())
                 traj_attention_entropy = float(trajectory_debug.get('agent_attention_entropy', torch.tensor(0.0)).item())
 
-                data = [reward.mean().item(), value_prime.mean().item(), policy_loss.item(), q1_loss.item(),
+                data = [reward.mean().item(), value_prime.mean().item(), policy_loss.item(), mih_loss.item(), q1_loss.item(),
                         entropy.mean().item(), policy_grad_norm.item(), q_grad_norm.item(), log_alpha.item(),
                         alpha_loss.item(), traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio,
-                        traj_embedding_norm, traj_attention_entropy, *perf_data]
+                        traj_embedding_norm, traj_attention_entropy, evidential_loss.item(), lambda_loss.item(), sli_loss.item(), *perf_data]
                 training_data.append(data)
 
             # write record to tensorboard
@@ -508,10 +547,14 @@ def main():
 def write_to_tensor_board(writer, tensorboard_data, curr_episode):
     tensorboard_data = np.array(tensorboard_data)
     tensorboard_data = list(np.nanmean(tensorboard_data, axis=0))
-    reward, value, policy_loss, q_value_loss, entropy, policy_grad_norm, q_value_grad_norm, log_alpha, alpha_loss, traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio, traj_embedding_norm, traj_attention_entropy, travel_dist, success_rate, explored_rate = tensorboard_data
+    reward, value, policy_loss, mih_loss, q_value_loss, entropy, policy_grad_norm, q_value_grad_norm, log_alpha, alpha_loss, traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio, traj_embedding_norm, traj_attention_entropy, evidential_loss, lambda_loss, sli_loss, travel_dist, success_rate, explored_rate = tensorboard_data
 
     writer.add_scalar(tag='Losses/Value', scalar_value=value, global_step=curr_episode)
     writer.add_scalar(tag='Losses/Policy Loss', scalar_value=policy_loss, global_step=curr_episode)
+    writer.add_scalar(tag='Losses/MIH Loss', scalar_value=mih_loss, global_step=curr_episode)
+    writer.add_scalar(tag='Losses/Evidential Loss', scalar_value=evidential_loss, global_step=curr_episode)
+    writer.add_scalar(tag='Losses/Lambda Budget Loss', scalar_value=lambda_loss, global_step=curr_episode)
+    writer.add_scalar(tag='Losses/SLI Loss', scalar_value=sli_loss, global_step=curr_episode)
     writer.add_scalar(tag='Losses/Alpha Loss', scalar_value=alpha_loss, global_step=curr_episode)
     writer.add_scalar(tag='Losses/Q Value Loss', scalar_value=q_value_loss, global_step=curr_episode)
     writer.add_scalar(tag='Losses/Entropy', scalar_value=entropy, global_step=curr_episode)

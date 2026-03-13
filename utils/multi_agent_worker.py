@@ -101,10 +101,10 @@ class MultiAgentWorker:
                 )
                 ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
 
-                robot.save_observation(observation)
-                robot.save_ground_truth_observation(ground_truth_observation)
+                next_location, next_node_index, action_index, next_heading_index, current_in_edge, mih_prediction, alpha, imagined_neighbor_state = robot.select_next_waypoint(observation)
 
-                next_location, next_node_index, action_index, next_heading_index = robot.select_next_waypoint(observation)
+                robot.save_observation(observation, alpha=alpha, imagined_neighbor_state=imagined_neighbor_state)
+                robot.save_ground_truth_observation(ground_truth_observation)
 
                 robot.save_action(action_index)
 
@@ -235,6 +235,10 @@ class MultiAgentWorker:
                 robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
                 # Mark nodes visited by other agents based on FoV detection
                 robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
+                
+                # Periodically update topological clusters (e.g. every 10 steps)
+                if i % 10 == 0:
+                    robot.node_manager.cluster_nodes()
 
             # Check termination conditions
             # 1. All utility exhausted (sum of all robots' utility)

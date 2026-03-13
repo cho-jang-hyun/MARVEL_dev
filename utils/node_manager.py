@@ -20,6 +20,13 @@ from parameter import *
 import utils.quads as quads
 
 
+class TopologicalSector:
+    def __init__(self, sector_id, centroid):
+        self.id = sector_id
+        self.centroid = centroid
+        self.nodes = []
+        self.neighbors = set() # ids of adjacent sectors
+
 class NodeManager:
     def __init__(self, fov, sensor_range, utility_range=None, plot=False):
         self.nodes_dict = quads.QuadTree((0, 0), 1000, 1000)
@@ -129,6 +136,52 @@ class NodeManager:
         occupancy[current_index] = -1  # Mark only current robot's position
 
         return all_node_coords, utility, guidepost, occupancy, adjacent_matrix, current_index, neighbor_indices, highest_utility_angle, frontiers_distribution, heading_visited, visited_by_others, path_coords
+    
+    def cluster_nodes(self, max_sector_radius=5.0):
+        """
+        Group nodes into topological sectors using a simple distance-based clustering
+        that respects connectivity.
+        """
+        from sklearn.cluster import AgglomerativeClustering
+        
+        all_nodes = list(self.nodes_dict.__iter__())
+        if len(all_nodes) < 2:
+            return
+            
+        coords = np.array([node.data.coords for node in all_nodes])
+        
+        # We use connectivity-constrained clustering if possible, 
+        # but for simplicity here we use distance-based agglomerative clustering
+        clustering = AgglomerativeClustering(
+            n_clusters=None, 
+            distance_threshold=max_sector_radius,
+            linkage='average'
+        ).fit(coords)
+        
+        self.sectors = {}
+        for i, label in enumerate(clustering.labels_):
+            all_nodes[i].data.sector_id = int(label)
+            if label not in self.sectors:
+                self.sectors[int(label)] = []
+            self.sectors[int(label)].append(all_nodes[i].data)
+            
+        # Update sector centroids and neighbors
+        self.topological_sectors = {}
+        for sid, snodes in self.sectors.items():
+            centroid = np.mean([n.coords for n in snodes], axis=0)
+            sector = TopologicalSector(sid, centroid)
+            sector.nodes = snodes
+            self.topological_sectors[sid] = sector
+            
+        # Determine sector connectivity
+        for node in all_nodes:
+            sid = node.data.sector_id
+            for neighbor_coords in node.data.neighbor_list:
+                neighbor_node = self.nodes_dict.find(neighbor_coords)
+                if neighbor_node:
+                    nsid = neighbor_node.data.sector_id
+                    if nsid != sid:
+                        self.topological_sectors[sid].neighbors.add(nsid)
 
     def Dijkstra(self, start):
         q = set()
@@ -283,6 +336,7 @@ class Node:
         self.observable_frontiers = self.initialize_observable_frontiers(frontiers, updating_map_info)
         self.visited = 0
         self.visited_by_others = 0  # Binary: marked when other agents visit this node
+        self.sector_id = -1 # -1 means not yet clustered
 
         self.neighbor_matrix = -np.ones((NUM_NODE_NEIGHBORS, NUM_NODE_NEIGHBORS))
         self.neighbor_list = []
