@@ -170,7 +170,7 @@ def main():
         job_list.append(meta_agent.job.remote(weights_set, curr_episode))
 
     # initialize metric collector
-    metric_name = ['travel_dist', 'success_rate', 'explored_rate']
+    metric_name = ['travel_dist', 'success_rate', 'explored_rate', 'return_success_proportion']
     training_data = []
     perf_metrics = {}
     for n in metric_name:
@@ -215,7 +215,9 @@ def main():
                 # training for n times each step
                 for j in range(4):
                     # randomly sample a batch data
+                    # Change sampling to maintain alignment across buffers
                     sample_indices = random.sample(indices, BATCH_SIZE)
+                    
                     rollouts = []
                     for i in range(len(experience_buffer)):
                         # Skip empty buffers (e.g., agent indices when USE_COMMUNICATION=False)
@@ -440,10 +442,18 @@ def main():
                 traj_embedding_norm = float(trajectory_debug.get('embedding_norm', torch.tensor(0.0)).item())
                 traj_attention_entropy = float(trajectory_debug.get('agent_attention_entropy', torch.tensor(0.0)).item())
 
+                # Calculate curriculum phase
+                if curr_episode < CURRICULUM_STEP1:
+                    curriculum_phase = 0
+                elif curr_episode < CURRICULUM_STEP2:
+                    curriculum_phase = 1
+                else:
+                    curriculum_phase = 2
+
                 data = [reward.mean().item(), value_prime.mean().item(), policy_loss.item(), q1_loss.item(),
                         entropy.mean().item(), policy_grad_norm.item(), q_grad_norm.item(), log_alpha.item(),
                         alpha_loss.item(), traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio,
-                        traj_embedding_norm, traj_attention_entropy, *perf_data]
+                        traj_embedding_norm, traj_attention_entropy, *perf_data, curriculum_phase]
                 training_data.append(data)
 
             # write record to tensorboard
@@ -508,7 +518,7 @@ def main():
 def write_to_tensor_board(writer, tensorboard_data, curr_episode):
     tensorboard_data = np.array(tensorboard_data)
     tensorboard_data = list(np.nanmean(tensorboard_data, axis=0))
-    reward, value, policy_loss, q_value_loss, entropy, policy_grad_norm, q_value_grad_norm, log_alpha, alpha_loss, traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio, traj_embedding_norm, traj_attention_entropy, travel_dist, success_rate, explored_rate = tensorboard_data
+    reward, value, policy_loss, q_value_loss, entropy, policy_grad_norm, q_value_grad_norm, log_alpha, alpha_loss, traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio, traj_embedding_norm, traj_attention_entropy, travel_dist, success_rate, explored_rate, return_success_rate, curriculum_phase = tensorboard_data
 
     writer.add_scalar(tag='Losses/Value', scalar_value=value, global_step=curr_episode)
     writer.add_scalar(tag='Losses/Policy Loss', scalar_value=policy_loss, global_step=curr_episode)
@@ -527,6 +537,8 @@ def write_to_tensor_board(writer, tensorboard_data, curr_episode):
     writer.add_scalar(tag='Perf/Travel Distance', scalar_value=travel_dist, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Explored Rate', scalar_value=explored_rate, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Success Rate', scalar_value=success_rate, global_step=curr_episode)
+    writer.add_scalar(tag='Perf/Return Success Rate', scalar_value=return_success_rate, global_step=curr_episode)
+    writer.add_scalar(tag='Perf/Curriculum Phase', scalar_value=curriculum_phase, global_step=curr_episode)
 
 if __name__ == "__main__":
     main()

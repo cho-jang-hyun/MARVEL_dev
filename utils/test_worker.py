@@ -40,7 +40,8 @@ class TestWorker:
             individual_node_manager = NodeManager(self.fov, self.sensor_range, utility_range, plot=self.save_image)
 
             agent = Agent(i, policy_net, self.fov, self.env.angles[i], self.sensor_range,
-                         individual_node_manager, None, self.device, self.save_image)
+                         individual_node_manager, None, self.device, self.save_image,
+                         base_location=self.env.robot_locations[i].copy())
             self.robot_list.append(agent)
 
         self.perf_metrics = dict()
@@ -92,7 +93,9 @@ class TestWorker:
         headings = [[] for _ in range(self.n_agents)]
 
 
+        current_budget = MAX_EPISODE_STEP
         for i in range(MAX_EPISODE_STEP):
+            current_budget -= 1
             # print(' Current timestep: {}/{}'.format(i, MAX_EPISODE_STEP))
             selected_locations = []
             dist_list = []
@@ -100,9 +103,9 @@ class TestWorker:
             next_heading_index_list = []
             for robot in self.robot_list:
                 observation = robot.get_observation(
-                    pad=False,
                     robot_locations=self.env.robot_locations,
-                    trajectory_buffer=self.trajectory_buffer
+                    trajectory_buffer=self.trajectory_buffer,
+                    remaining_budget=current_budget
                 )
 
                 next_location, next_node_index, _, next_heading_index = robot.select_next_waypoint(observation, greedy=self.greedy)

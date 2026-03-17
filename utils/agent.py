@@ -30,7 +30,7 @@ from utils.utils import *
 from parameter import *
 
 class Agent:
-    def __init__(self, id, policy_net, fov, heading, sensor_range, node_manager, ground_truth_node_manager, device='cpu', plot=False):
+    def __init__(self, id, policy_net, fov, heading, sensor_range, node_manager, ground_truth_node_manager, device='cpu', plot=False, base_location=None):
         self.id = id
         self.device = device
         self.plot = plot
@@ -40,6 +40,7 @@ class Agent:
         self.sensor_range = sensor_range
         self.num_angles_bin = NUM_ANGLES_BIN
         self.num_heading_candidates = NUM_HEADING_CANDIDATES
+        self.base_location = base_location
 
         # location and global map
         self.location = None
@@ -179,7 +180,7 @@ class Agent:
         self.node_coords, self.utility, self.guidepost, self.occupancy, self.adjacent_matrix, self.current_index, self.neighbor_indices, self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.visited_by_others, self.path_coords = \
             self.node_manager.get_all_node_graph(self.location)
 
-    def get_observation(self, pad=True, robot_locations=None, trajectory_buffer=None):
+    def get_observation(self, pad=True, robot_locations=None, trajectory_buffer=None, remaining_budget=None):
         node_coords = self.node_coords
         node_utility = self.utility.reshape(-1, 1)
         node_guidepost = self.guidepost.reshape(-1, 1)
@@ -201,7 +202,13 @@ class Agent:
         node_highest_utility_angles = node_highest_utility_angles / 360
         node_frontier_distribution = node_frontier_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
         # visited_by_others is already 0 or 1, no normalization needed
-        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others), axis=1)
+        # budget and RTB features
+        dist_to_base = np.linalg.norm(node_coords - self.base_location, axis=1).reshape(-1, 1) if self.base_location is not None else np.zeros((n_node, 1))
+        # Normalize distance and budget
+        node_dist_to_base = dist_to_base / (MAX_EPISODE_STEP * VELOCITY)
+        node_remaining_budget = (np.ones((n_node, 1)) * remaining_budget / BUDGET) if remaining_budget is not None else np.zeros((n_node, 1))
+
+        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_remaining_budget, node_dist_to_base), axis=1)
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
         all_node_frontier_distribution = torch.Tensor(node_frontier_distribution).unsqueeze(0).to(self.device)
         node_heading_visited = torch.Tensor(node_heading_visited).unsqueeze(0).to(self.device)

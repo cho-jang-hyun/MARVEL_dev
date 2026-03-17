@@ -80,7 +80,7 @@ GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5
 GRAD_CLIP_Q = 10.0      # Max gradient norm for Q networks (typical: 1.0 ~ 10.0)
 
 # network parameters
-NODE_INPUT_DIM = 7  # Changed from 6: added visited_by_others feature
+NODE_INPUT_DIM = 9  # Changed from 7: added budget and dist_to_base features
 EMBEDDING_DIM = 128
 
 # Trajectory tracking parameters
@@ -110,3 +110,9 @@ USE_COMMUNICATION = False  # True: MAAC with all agent communication (centralize
                            # False: Decentralized learning with only FOV-based trajectory observation
                            # When False, agents only use their own observation + detected trajectories in FOV
                            # This simulates no-communication scenario where agents rely on visual detection only
+
+# Budget and RTB parameters
+BUDGET = MAX_EPISODE_STEP
+RTB_REWARD_SCALE = 5.0
+CURRICULUM_STEP1 = 2000
+CURRICULUM_STEP2 = 4000

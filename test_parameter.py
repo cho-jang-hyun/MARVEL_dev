@@ -54,7 +54,7 @@ NUM_META_AGENT = 10
 INITIAL_EXPLORED_RATE = 0.90
 
 # Network parameters
-NODE_INPUT_DIM = 7 # add visited node feature
+NODE_INPUT_DIM = 9 # added budget and dist_to_base features
 EMBEDDING_DIM = 128
 USE_TRAJECTORY = True  # Enable trajectory encoder
 
