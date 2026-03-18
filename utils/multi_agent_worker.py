@@ -46,6 +46,14 @@ class MultiAgentWorker:
         self.fov = FOV
         self.sensor_range = SENSOR_RANGE
         self.sim_steps = NUM_SIM_STEPS
+        
+        # Determine curriculum phase
+        if global_step < CURRICULUM_STEP1:
+            self.curriculum_phase = 0
+        elif global_step < CURRICULUM_STEP2:
+            self.curriculum_phase = 1
+        else:
+            self.curriculum_phase = 2
 
         self.env = Env(global_step, self.fov, self.sensor_range, plot=self.save_image)
         self.n_agents = N_AGENTS
@@ -247,11 +255,10 @@ class MultiAgentWorker:
                 
                 rtb_reward = 0
                 # RTB logic kicks in more strongly in later curriculum phases and with lower budget
-                # PHASE logic is handled by CURRICULUM thresholds in driver, 
-                # here we just rely on budget and exploration multiplier
-                if current_budget < BUDGET * 0.75:
-                    # Give reward for moving towards base, weighted by how much we've explored
-                    rtb_reward = potential * RTB_REWARD_SCALE * exploration_multiplier * (1 - current_budget/BUDGET)
+                if self.curriculum_phase > 0 and current_budget < BUDGET * 0.75:
+                    # Scaling by curriculum phase (Phase 1: 0.5x, Phase 2: 1.0x)
+                    phase_multiplier = 0.5 if self.curriculum_phase == 1 else 1.0
+                    rtb_reward = potential * RTB_REWARD_SCALE * phase_multiplier * exploration_multiplier * (1 - current_budget/BUDGET)
                 
                 reward_list.append(utility_reward + trajectory_reward - overlap_penalty + rtb_reward)  
 
@@ -274,12 +281,22 @@ class MultiAgentWorker:
 
             curr_node_indices = np.array([robot.current_index for robot in self.robot_list])
             for robot, reward in zip(self.robot_list, reward_list):
-                # Add a success bonus if the robot is near base when episode ends successfully
                 total_reward = reward + team_reward
-                if done and self.env.explored_rate >= SUCCESS_THRESHOLD:
+                
+                # Success/Failure feedback based on return status in Phases 1 and 2
+                # Gated by exploration to prevent "lazy" behavior (loitering at base)
+                if done and self.curriculum_phase > 0:
                     dist_to_base = np.linalg.norm(robot.location - robot.base_location)
+                    exploration_coverage = self.env.explored_rate
+                    
                     if dist_to_base < 5.0:
-                        total_reward += 5.0 # Return Success Bonus
+                        # Bonus is proportional to how much was explored
+                        # If they return without exploring, they get near 0 bonus
+                        total_reward += 5.0 * exploration_coverage 
+                    elif exploration_coverage > 0.3:
+                        # Only penalize for not returning if they've actually started the mission (>30%)
+                        # This prevents them from being afraid to leave the 5m zone
+                        total_reward -= 5.0
                 
                 robot.save_reward(total_reward)
                 # Only save all agent indices when communication is enabled

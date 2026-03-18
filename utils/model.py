@@ -271,19 +271,11 @@ class EvidentialGraphBeliefDiffusion(nn.Module):
         
         # Pad edge mask if needed, but it should be [batch, 1, K_SIZE, K_SIZE], wait, we need adjacency for whole graph!
         # Actually edge_mask is the adjacency matrix [batch, 1, NODE_PADDING_SIZE, NODE_PADDING_SIZE]
-        adj = (~edge_mask.bool()).float().squeeze(1) # False means edge, wait... edge_mask=1 is padding
-        # In agent.py, padding sets edge_mask=1. Existing edges have edge_mask=0 originally? 
-        # No, agent.py: edge_mask = padding(edge_mask). Padding uses 1.
-        # Original adjacent_matrix has 1 for edge. So edge_mask == 1 could mean edge OR padding.
-        # Actually in model.py Encoder: mask = attn_mask. masked_fill(mask > 0, -1e8). So 1 means NO EDGE / PADDING.
-        # So edges are 0.
-        # adj corresponds to edge_mask which is 1 if it's padding or no edge. 
-        # Inside the graph, edge is 0. 
-        # But wait, edge_mask is typically 1 for padding, 0 for actual valid pairs? 
-        # Let's strictly convert 0 to edge, others to no edge.
-        adj = (edge_mask.squeeze(1) == 0).float()
+        adj = (edge_mask == 0).float()
+        if adj.dim() == 4:
+            adj = adj.squeeze(1)
         
-        I = torch.eye(self.num_nodes, device=device).unsqueeze(0)
+        I = torch.eye(self.num_nodes, device=device).unsqueeze(0).expand(batch_size, -1, -1)
         adj = adj + I
         
         deg = adj.sum(dim=-1, keepdim=True).clamp(min=1e-5)
