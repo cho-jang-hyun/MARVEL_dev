@@ -462,33 +462,14 @@ class QNet(nn.Module):
 
         # Trajectory encoder
         if use_trajectory:
-            from parameter import TRAJECTORY_FEATURE_DIM, TRAJECTORY_EMBEDDING_DIM, TRAJECTORY_HISTORY_LENGTH
-            self.trajectory_encoder = TrajectoryEncoder(
-                feature_dim=TRAJECTORY_FEATURE_DIM,
-                trajectory_embedding_dim=TRAJECTORY_EMBEDDING_DIM,
-                seq_len=TRAJECTORY_HISTORY_LENGTH,
-                n_head=4,
-                n_layer=2,
-                gated_attention=gated_attention
+            from parameter import NODE_PADDING_SIZE
+            self.trajectory_encoder = EvidentialGraphBeliefDiffusion(
+                num_nodes=NODE_PADDING_SIZE,
+                embedding_dim=embedding_dim,
             )
             # Fusion layer to combine current state with trajectory information
-            self.trajectory_fusion = nn.Linear(embedding_dim + TRAJECTORY_EMBEDDING_DIM, embedding_dim)
-
-            # Node-based trajectory encoder components
-            # FFN to project trajectory node embeddings
-            self.trajectory_node_ffn = nn.Sequential(
-                nn.Linear(embedding_dim, embedding_dim),
-                nn.ReLU(),
-                nn.Linear(embedding_dim, embedding_dim)
-            )
-            # Cross attention to fuse trajectory information with current state
-            self.trajectory_cross_attention = MultiHeadAttention(embedding_dim, n_heads=4)
-            # Gating mechanism for cross attention
-            if gated_attention:
-                self.trajectory_gate = nn.Sequential(
-                    nn.Linear(embedding_dim * 2, embedding_dim),
-                    nn.Sigmoid()
-                )
+            # EvidentialGraphBeliefDiffusion returns [batch, nodes, 1]
+            self.trajectory_fusion = nn.Linear(embedding_dim + 1, embedding_dim)
 
         # Decoder
         self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1, gated_attention=gated_attention)

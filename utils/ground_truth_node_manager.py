@@ -31,10 +31,11 @@ import matplotlib.pyplot as plt
 
 
 class GroundTruthNodeManager:
-    def __init__(self, node_manager, ground_truth_map_info, sensor_range, device='cpu', plot=False):
+    def __init__(self, node_manager, ground_truth_map_info, sensor_range, device='cpu', plot=False, base_location=None):
         self.nodes_dict = quads.QuadTree((0, 0), 1000, 1000)
         self.node_manager = node_manager
         self.ground_truth_map_info = ground_truth_map_info
+        self.base_location = base_location
         self.ground_truth_node_coords = None
         self.ground_truth_node_utility = None
         self.explored_sign = None
@@ -52,7 +53,7 @@ class GroundTruthNodeManager:
         exist = self.nodes_dict.find(key)
         return exist
 
-    def get_ground_truth_observation(self, robot_location):
+    def get_ground_truth_observation(self, robot_location, remaining_budget=None):
         self.update_graph()
 
         all_node_coords = []
@@ -157,9 +158,13 @@ class GroundTruthNodeManager:
 
         node_utility = node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
         node_frontiers_distribution = node_frontiers_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
-        node_highest_utility_angles = node_highest_utility_angles / 360
-        # visited_by_others is already 0 or 1, no normalization needed
-        node_inputs = np.concatenate((node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_explored_sign), axis=1)
+        # budget and RTB features
+        dist_to_base = np.linalg.norm(all_node_coords - self.base_location, axis=1).reshape(-1, 1) if self.base_location is not None else np.zeros((n_nodes, 1))
+        # Normalize distance and budget
+        node_dist_to_base = dist_to_base / (MAX_EPISODE_STEP * VELOCITY)
+        node_remaining_budget = (np.ones((n_nodes, 1)) * remaining_budget / BUDGET) if remaining_budget is not None else np.zeros((n_nodes, 1))
+
+        node_inputs = np.concatenate((node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_remaining_budget, node_dist_to_base, node_explored_sign), axis=1)
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
 
         assert node_coords.shape[0] < NODE_PADDING_SIZE, print(node_coords.shape[0], NODE_PADDING_SIZE)

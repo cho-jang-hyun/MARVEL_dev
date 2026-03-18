@@ -56,7 +56,7 @@ class MultiAgentWorker:
             # Each agent gets its own independent node_manager and ground_truth_node_manager
             individual_node_manager = NodeManager(self.fov, self.sensor_range, plot=self.save_image)
             individual_ground_truth_node_manager = GroundTruthNodeManager(individual_node_manager, self.env.ground_truth_info, self.sensor_range,
-                                                                          device=self.device, plot=self.save_image)
+                                                                          device=self.device, plot=self.save_image, base_location=self.env.robot_locations[i].copy())
 
             agent = Agent(i, policy_net, self.fov, self.env.angles[i], self.sensor_range,
                          individual_node_manager, individual_ground_truth_node_manager,
@@ -103,7 +103,7 @@ class MultiAgentWorker:
                     trajectory_buffer=self.trajectory_buffer,
                     remaining_budget=current_budget
                 )
-                ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
+                ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, remaining_budget=current_budget)
 
                 robot.save_observation(observation)
                 robot.save_ground_truth_observation(ground_truth_observation)
@@ -311,7 +311,7 @@ class MultiAgentWorker:
                 trajectory_buffer=self.trajectory_buffer,
                 remaining_budget=current_budget
             )
-            ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
+            ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, remaining_budget=current_budget)
             robot.save_next_observations(observation, next_node_index_list)
             robot.save_next_ground_truth_observations(ground_truth_observation)
             for i in range(len(self.episode_buffer)):
