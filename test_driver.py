@@ -49,7 +49,23 @@ def run_test():
     else:
         checkpoint = torch.load(f'{load_path}/checkpoint.pth', map_location=torch.device('cpu'))
 
-    global_network.load_state_dict(checkpoint['policy_model'])
+    def load_and_adapt_state_dict(model, state_dict):
+        model_dict = model.state_dict()
+        for name, param in state_dict.items():
+            if name in model_dict:
+                if param.shape != model_dict[name].shape:
+                    print(f"Adapting {name}: {param.shape} -> {model_dict[name].shape}")
+                    new_param = model_dict[name].clone()
+                    if param.dim() == 2:
+                        new_param[:, :param.shape[1]] = param
+                    elif param.dim() == 1:
+                        new_param[:param.shape[0]] = param
+                    model_dict[name] = new_param
+                else:
+                    model_dict[name] = param
+        model.load_state_dict(model_dict)
+
+    load_and_adapt_state_dict(global_network, checkpoint['policy_model'])
     
     meta_agents = [Runner.remote(i) for i in range(NUM_META_AGENT)]
     weights = global_network.state_dict()

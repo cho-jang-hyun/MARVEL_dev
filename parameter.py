@@ -18,8 +18,8 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = 'fixed_partial_map_visualization_for_test'
-LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
+FOLDER_NAME = 'budget_urgency_new_2'
+LOAD_FOLDER_NAME = 'budget_aware_reward_with_budget_urgency'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
 train_path = f'train/{FOLDER_NAME}' # save tensorboard
@@ -37,7 +37,7 @@ USE_CONTINUOUS_SIM = True
 NUM_SIM_STEPS = 6
 VELOCITY = 1
 YAW_RATE = 35 # in degrees
-SUCCESS_THRESHOLD = 0.99  # Episode ends when explored_rate >= this value
+SUCCESS_THRESHOLD = 0.95  # Episode ends when explored_rate >= this value
 
 # Heading parameters
 FOV = 120   # in degrees
@@ -69,18 +69,19 @@ UPDATING_MAP_SIZE = 4 * SENSOR_RANGE + 4 * NODE_RESOLUTION
 MAX_EPISODE_STEP = 128
 REPLAY_SIZE = 10000
 MINIMUM_BUFFER_SIZE = 2000
-BATCH_SIZE = 256
-LR = 1e-5
+LR = 1e-4
+BATCH_SIZE = 128
 GAMMA = 0.99
 TAU = 0.001  # Soft update coefficient for target network (0.001 ~ 0.01)
-NUM_META_AGENT = 18
+NUM_META_AGENT = 12
 
 # Gradient clipping parameters
 GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5.0)
 GRAD_CLIP_Q = 10.0      # Max gradient norm for Q networks (typical: 1.0 ~ 10.0)
 
 # network parameters
-NODE_INPUT_DIM = 9  # Changed from 7: added budget and dist_to_base features
+NODE_INPUT_DIM = 12  # Changed from 10: added initial_budget/BUDGET as mission scale context feature, plus [exploration_urgency, return_urgency] goal-vector
+
 EMBEDDING_DIM = 128
 
 # Trajectory tracking parameters
@@ -112,7 +113,15 @@ USE_COMMUNICATION = False  # True: MAAC with all agent communication (centralize
                            # This simulates no-communication scenario where agents rely on visual detection only
 
 # Budget and RTB parameters
-BUDGET = MAX_EPISODE_STEP
+BUDGET = MAX_EPISODE_STEP       # Max possible budget (used as normalization reference)
+BUDGET_MIN_P1 = int(BUDGET * 0.75)  # Phase 1: light randomization (75-100%)
+BUDGET_MIN_P2 = int(BUDGET * 0.50)  # Phase 2: full randomization  (50-100%)
+
+
 RTB_REWARD_SCALE = 5.0
+RTB_SUCCESS_BONUS = 20.0
+RTB_BUDGET_BONUS = 5.0
+RTB_EXHAUSTION_PENALTY = -10.0
+RTB_TEAM_SURVIVAL_BONUS = 15.0
 CURRICULUM_STEP1 = 2000
 CURRICULUM_STEP2 = 4000

@@ -53,7 +53,7 @@ class GroundTruthNodeManager:
         exist = self.nodes_dict.find(key)
         return exist
 
-    def get_ground_truth_observation(self, robot_location, remaining_budget=None):
+    def get_ground_truth_observation(self, robot_location, remaining_budget=None, initial_budget=None, explored_rate=0.0):
         self.update_graph()
 
         all_node_coords = []
@@ -159,12 +159,41 @@ class GroundTruthNodeManager:
         node_utility = node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
         node_frontiers_distribution = node_frontiers_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
         # budget and RTB features
-        dist_to_base = np.linalg.norm(all_node_coords - self.base_location, axis=1).reshape(-1, 1) if self.base_location is not None else np.zeros((n_nodes, 1))
-        # Normalize distance and budget
-        node_dist_to_base = dist_to_base / (MAX_EPISODE_STEP * VELOCITY)
-        node_remaining_budget = (np.ones((n_nodes, 1)) * remaining_budget / BUDGET) if remaining_budget is not None else np.zeros((n_nodes, 1))
+        # Feature 8: remaining budget fraction (scale-invariant within episode)
+        norm_denom = initial_budget if initial_budget is not None else BUDGET
+        node_remaining_budget = (np.ones((n_nodes, 1)) * remaining_budget / norm_denom) if remaining_budget is not None else np.zeros((n_nodes, 1))
+        # Feature 9: Budget urgency = steps_to_return / remaining_budget
+        if self.base_location is not None:
+            dist_to_base_graph, hop_to_base_graph = self.node_manager.get_distances_to_target(self.base_location)
+            steps_to_return_list = []
+            for coords in all_node_coords:
+                key = (coords[0], coords[1])
+                hops = hop_to_base_graph.get(key, 1e8)
+                if hops > 1e7:
+                    hops = np.linalg.norm(coords - self.base_location) / NODE_RESOLUTION
+                steps_to_return_list.append(hops)
+            steps_to_return = np.array(steps_to_return_list).reshape(-1, 1)
+        else:
+            steps_to_return = np.zeros((n_nodes, 1))
+            
+        safe_budget = max(remaining_budget, 1) if remaining_budget is not None else 1
+        node_budget_urgency = np.clip(steps_to_return / safe_budget, 0, 1)
+        # Feature 10: Log-scale mission length
+        LOG_CEILING = 10000
+        node_mission_scale = np.ones((n_nodes, 1)) * (np.log2(max(initial_budget, 1)) / np.log2(LOG_CEILING)) if initial_budget is not None else np.ones((n_nodes, 1)) * (np.log2(BUDGET) / np.log2(LOG_CEILING))
 
-        node_inputs = np.concatenate((node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_remaining_budget, node_dist_to_base, node_explored_sign), axis=1)
+        # Goal-conditioned vector: [exploration_urgency, return_urgency]
+        exploration_urgency = 1.0 if explored_rate < SUCCESS_THRESHOLD else 0.0
+        node_exploration_urgency = np.ones((n_nodes, 1)) * exploration_urgency
+        
+        # If mapping is complete, force return urgency to max. Otherwise scale by step urgency.
+        if exploration_urgency == 0.0:
+            node_return_urgency = np.ones((n_nodes, 1))
+        else:
+            node_return_urgency = node_budget_urgency
+
+        node_inputs = np.concatenate((node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_remaining_budget, node_budget_urgency, node_mission_scale, node_exploration_urgency, node_return_urgency, node_explored_sign), axis=1)
+
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
 
         assert node_coords.shape[0] < NODE_PADDING_SIZE, print(node_coords.shape[0], NODE_PADDING_SIZE)

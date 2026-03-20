@@ -41,6 +41,9 @@ class Agent:
         self.num_angles_bin = NUM_ANGLES_BIN
         self.num_heading_candidates = NUM_HEADING_CANDIDATES
         self.base_location = base_location
+        self.done = False
+        self.has_left_base = False
+
 
         # location and global map
         self.location = None
@@ -179,9 +182,17 @@ class Agent:
     def update_planning_state(self):
         self.node_coords, self.utility, self.guidepost, self.occupancy, self.adjacent_matrix, self.current_index, self.neighbor_indices, self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.visited_by_others, self.path_coords = \
             self.node_manager.get_all_node_graph(self.location)
+        
+        # Precompute graph-based distances to base for Feature 9
+        if self.base_location is not None:
+            self.dist_to_base_graph, self.hop_to_base_graph = self.node_manager.get_distances_to_target(self.base_location)
+        else:
+            self.dist_to_base_graph = {}
+            self.hop_to_base_graph = {}
 
-    def get_observation(self, pad=True, robot_locations=None, trajectory_buffer=None, remaining_budget=None):
+    def get_observation(self, pad=True, robot_locations=None, trajectory_buffer=None, remaining_budget=None, initial_budget=None, explored_rate=0.0):
         node_coords = self.node_coords
+
         node_utility = self.utility.reshape(-1, 1)
         node_guidepost = self.guidepost.reshape(-1, 1)
         node_occupancy = self.occupancy.reshape(-1, 1)
@@ -203,12 +214,45 @@ class Agent:
         node_frontier_distribution = node_frontier_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
         # visited_by_others is already 0 or 1, no normalization needed
         # budget and RTB features
-        dist_to_base = np.linalg.norm(node_coords - self.base_location, axis=1).reshape(-1, 1) if self.base_location is not None else np.zeros((n_node, 1))
-        # Normalize distance and budget
-        node_dist_to_base = dist_to_base / (MAX_EPISODE_STEP * VELOCITY)
-        node_remaining_budget = (np.ones((n_node, 1)) * remaining_budget / BUDGET) if remaining_budget is not None else np.zeros((n_node, 1))
+        # Feature 8: remaining budget fraction (scale-invariant within episode)
+        norm_denom = initial_budget if initial_budget is not None else BUDGET
+        node_remaining_budget = (np.ones((n_node, 1)) * remaining_budget / norm_denom) if remaining_budget is not None else np.zeros((n_node, 1))
+        # Feature 9: Budget urgency = steps_to_return / remaining_budget
+        # Answers: "What fraction of my remaining budget do I need just to get home?"
+        # urgency > 1.0 means stranded (clipped to 1.0), urgency ~ 0 means plenty of time
+        # Feature 9: Budget urgency = graph_steps_to_return / remaining_budget
+        if self.base_location is not None:
+            steps_to_return_list = []
+            for coords in node_coords:
+                key = (coords[0], coords[1])
+                # Use Graph hops if available, fallback to Euclidean/NODE_RESOLUTION if path not yet found
+                hops = self.hop_to_base_graph.get(key, 1e8)
+                if hops > 1e7: # unreachable node in current graph
+                    hops = np.linalg.norm(coords - self.base_location) / NODE_RESOLUTION
+                steps_to_return_list.append(hops)
+            steps_to_return = np.array(steps_to_return_list).reshape(-1, 1)
+        else:
+            steps_to_return = np.zeros((n_node, 1))
 
-        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_remaining_budget, node_dist_to_base), axis=1)
+        safe_budget = max(remaining_budget, 1) if remaining_budget is not None else 1
+        node_budget_urgency = np.clip(steps_to_return / safe_budget, 0, 1)
+        # Feature 10: Log-scale mission length — generalizes to ANY budget, no hardcoded training range
+        # log2(64)/log2(10000) ≈ 0.45, log2(128)/log2(10000) ≈ 0.53, log2(1000)/log2(10000) ≈ 0.75
+        LOG_CEILING = 10000
+        node_mission_scale = np.ones((n_node, 1)) * (np.log2(max(initial_budget, 1)) / np.log2(LOG_CEILING)) if initial_budget is not None else np.ones((n_node, 1)) * (np.log2(BUDGET) / np.log2(LOG_CEILING))
+
+        # Goal-conditioned vector: [exploration_urgency, return_urgency]
+        exploration_urgency = 1.0 if explored_rate < SUCCESS_THRESHOLD else 0.0
+        node_exploration_urgency = np.ones((n_node, 1)) * exploration_urgency
+        
+        # If mapping is complete, force return urgency to max. Otherwise scale by step urgency.
+        if exploration_urgency == 0.0:
+            node_return_urgency = np.ones((n_node, 1))
+        else:
+            node_return_urgency = node_budget_urgency ** 4
+            
+        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_remaining_budget, node_budget_urgency, node_mission_scale, node_exploration_urgency, node_return_urgency), axis=1)
+
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
         all_node_frontier_distribution = torch.Tensor(node_frontier_distribution).unsqueeze(0).to(self.device)
         node_heading_visited = torch.Tensor(node_heading_visited).unsqueeze(0).to(self.device)

@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 from copy import deepcopy
 from matplotlib.patches import Wedge, FancyArrowPatch
 from collections import deque
+import random
 
 from utils.env import Env
 from utils.agent import Agent
@@ -38,7 +39,7 @@ if not os.path.exists(gifs_path):
     os.makedirs(gifs_path)
 
 class MultiAgentWorker:
-    def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', save_image=False):
+    def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', save_image=False, curriculum_phase=0):
         self.meta_agent_id = meta_agent_id
         self.global_step = global_step
         self.save_image = save_image
@@ -47,22 +48,18 @@ class MultiAgentWorker:
         self.sensor_range = SENSOR_RANGE
         self.sim_steps = NUM_SIM_STEPS
         
-        # Determine curriculum phase
-        if global_step < CURRICULUM_STEP1:
-            self.curriculum_phase = 0
-        elif global_step < CURRICULUM_STEP2:
-            self.curriculum_phase = 1
-        else:
-            self.curriculum_phase = 2
+        # Curriculum phase is now explicitly passed from the driver
+        self.curriculum_phase = curriculum_phase
 
         self.env = Env(global_step, self.fov, self.sensor_range, plot=self.save_image)
         self.n_agents = N_AGENTS
 
         # Create independent node managers for each agent to ensure decentralized learning
         self.robot_list = []
+        self.mapping_done_notified = False # Track if we already gave the completion bonus
         for i in range(self.n_agents):
             # Each agent gets its own independent node_manager and ground_truth_node_manager
-            individual_node_manager = NodeManager(self.fov, self.sensor_range, plot=self.save_image)
+            individual_node_manager = NodeManager(self.fov, self.sensor_range, plot=self.save_image, base_location=self.env.robot_locations[i].copy())
             individual_ground_truth_node_manager = GroundTruthNodeManager(individual_node_manager, self.env.ground_truth_info, self.sensor_range,
                                                                           device=self.device, plot=self.save_image, base_location=self.env.robot_locations[i].copy())
 
@@ -92,13 +89,25 @@ class MultiAgentWorker:
     def run_episode(self):
         done = False
         initial_coverage = self.env.explored_rate
+
+        # Curriculum-gated budget randomization
+        # Phase 0: Fixed budget (stabilizes early exploration habits)
+        # Phase 1: Light randomization 75-100% (introduces uncertainty)
+        # Phase 2: Full randomization 50-100% (forces true budget adaptation)
+        if self.curriculum_phase == 0:
+            initial_budget = BUDGET
+        elif self.curriculum_phase == 1:
+            initial_budget = random.randint(BUDGET_MIN_P1, BUDGET)
+        else:
+            initial_budget = random.randint(BUDGET_MIN_P2, BUDGET)
+
         for robot in self.robot_list:
             robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
         for robot in self.robot_list:
             robot.update_planning_state()
 
-        current_budget = BUDGET
-        for i in range(MAX_EPISODE_STEP):
+        current_budget = initial_budget
+        for i in range(initial_budget):
             current_budget -= 1
 
             selected_locations = []
@@ -106,12 +115,21 @@ class MultiAgentWorker:
             next_node_index_list = []
             next_heading_index_list = []
             for robot in self.robot_list:
+                if robot.done:
+                    selected_locations.append(robot.location)
+                    dist_list.append(0.0)
+                    next_node_index_list.append(robot.current_index)
+                    next_heading_index_list.append(int(robot.heading / (360/NUM_ANGLES_BIN)))
+                    continue
+
                 observation = robot.get_observation(
                     robot_locations=self.env.robot_locations,
                     trajectory_buffer=self.trajectory_buffer,
-                    remaining_budget=current_budget
+                    remaining_budget=current_budget,
+                    initial_budget=initial_budget,
+                    explored_rate=self.env.explored_rate
                 )
-                ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, remaining_budget=current_budget)
+                ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, remaining_budget=current_budget, initial_budget=initial_budget, explored_rate=self.env.explored_rate)
 
                 robot.save_observation(observation)
                 robot.save_ground_truth_observation(ground_truth_observation)
@@ -192,6 +210,10 @@ class MultiAgentWorker:
             robot_headings_list = [robot.heading for robot in self.robot_list]
 
             for robot, next_location, next_node_index in zip(self.robot_list, selected_locations, next_node_index_list):
+                if robot.done:
+                    reward_list.append(0.0)
+                    continue
+
                 # Update trajectory buffer
                 prev_trajectory = self.trajectory_buffer[robot.id][-1] if len(self.trajectory_buffer[robot.id]) > 0 else None
                 if prev_trajectory is not None:
@@ -206,6 +228,10 @@ class MultiAgentWorker:
                     robot.heading,
                     velocity
                 ))
+
+                # Track if the robot has ventured out of the base
+                if not robot.has_left_base and np.linalg.norm(next_location - robot.base_location) > 25.0:
+                    robot.has_left_base = True
 
                 node = robot.node_manager.nodes_dict.find((next_location[0], next_location[1])).data
                 observable_frontiers = node.observable_frontiers
@@ -242,93 +268,146 @@ class MultiAgentWorker:
                     robot_headings_list
                 )
 
-                # RTB reward (Refined: Potential-based and exploration-gated)
+                # RTB reward (Refined: Urgency-weighted positive potential)
                 dist_to_base_before = np.linalg.norm(robot.location - robot.base_location)
                 dist_to_base_after = np.linalg.norm(next_location - robot.base_location)
-                
-                # Potential is positive if moving closer to base
                 potential = dist_to_base_before - dist_to_base_after
+
+                # Goal-conditioned urgency tracking matching Agent observation
+                node_item = robot.node_manager.nodes_dict.find((next_location[0], next_location[1]))
+                if node_item is not None:
+                    node_coords = node_item.data.coords
+                    steps_to_return = robot.hop_to_base_graph.get((node_coords[0], node_coords[1]), 1e8)
+                    if steps_to_return > 1e7:
+                        steps_to_return = dist_to_base_after / NODE_RESOLUTION
+                else:
+                    steps_to_return = dist_to_base_after / NODE_RESOLUTION
+
+                safe_budget = max(current_budget, 1)
+                budget_urgency = np.clip(steps_to_return / safe_budget, 0, 1)
                 
-                # Exploration coverage gating (0.0 to 1.0)
-                # This ensures they only care about RTB if they have actually explored something
-                exploration_multiplier = max(0, (self.env.explored_rate - initial_coverage) / (SUCCESS_THRESHOLD - initial_coverage + 1e-6))
+                mapping_complete = self.env.explored_rate >= SUCCESS_THRESHOLD
+                return_urgency = 1.0 if mapping_complete else (budget_urgency ** 4)
                 
                 rtb_reward = 0
-                # RTB logic kicks in more strongly in later curriculum phases and with lower budget
-                if self.curriculum_phase > 0 and current_budget < BUDGET * 0.75:
-                    # Scaling by curriculum phase (Phase 1: 0.5x, Phase 2: 1.0x)
+                if self.curriculum_phase > 0:
                     phase_multiplier = 0.5 if self.curriculum_phase == 1 else 1.0
-                    rtb_reward = potential * RTB_REWARD_SCALE * phase_multiplier * exploration_multiplier * (1 - current_budget/BUDGET)
+                    # Dense reward scaled by urgency and RTB_REWARD_SCALE
+                    # Anti-exploitation: 0 reward if return_urgency is 0
+                    rtb_reward = potential * RTB_REWARD_SCALE * phase_multiplier * return_urgency
                 
-                reward_list.append(utility_reward + trajectory_reward - overlap_penalty + rtb_reward)  
+                if return_urgency < 1.0:
+                    exploration_multiplier = max(0.0, 1.0 - return_urgency)
+                else:
+                    exploration_multiplier = 0.0
+
+                modified_utility = utility_reward * exploration_multiplier
+                reward_list.append(modified_utility + trajectory_reward - overlap_penalty + rtb_reward)
 
                 robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
                 # Mark nodes visited by other agents based on FoV detection
                 robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
 
-            # Check termination conditions
-            # 1. All utility exhausted (sum of all robots' utility)
-            # 2. Explored rate reaches SUCCESS_THRESHOLD
-            total_utility = sum(robot.utility.sum() for robot in self.robot_list)
-            if total_utility == 0 or current_budget <= 0:
-                done = True
-            if self.env.explored_rate >= SUCCESS_THRESHOLD:
-                done = True
+            # Check for one-time mapping completion bonus
+            mapping_complete = self.env.explored_rate >= SUCCESS_THRESHOLD
+            mapping_bonus = 0
+            if mapping_complete and not self.mapping_done_notified:
+                mapping_bonus = 10.0 # Significant one-time boost
+                self.mapping_done_notified = True
 
-            team_reward = self.env.calculate_team_reward() - 0.5
-            if done:
-                team_reward += 10
-
+            # Team reward (Collective progress)
+            team_reward = self.env.calculate_team_reward() - 0.5 + mapping_bonus
+            
+            # Sub-episode logic: mark individual done, check global done
             curr_node_indices = np.array([robot.current_index for robot in self.robot_list])
+            
+            # Determine global done
+            all_done = all(robot.done or np.linalg.norm(robot.location - robot.base_location) < 5.0 for robot in self.robot_list)
+            
+            global_done = False
+            if current_budget <= 0:
+                global_done = True
+            elif self.curriculum_phase == 0:
+                if mapping_complete: global_done = True
+            elif self.curriculum_phase == 1:
+                # Phase 1: Easier transition
+                if mapping_complete or (self.env.explored_rate > 0.8 and any(r.done for r in self.robot_list)):
+                    global_done = True
+            else:
+                # Phase 2: All must return
+                if mapping_complete and all_done:
+                    global_done = True
+
+            # If all agents returned successfully with budget, grant team survival bonus
+            if global_done and mapping_complete and all_done and current_budget > 0:
+                team_reward += RTB_TEAM_SURVIVAL_BONUS
+
             for robot, reward in zip(self.robot_list, reward_list):
+                if robot.done:
+                    continue # Skip reward accumulation for already done robots
+                
+                dist_to_base_after = np.linalg.norm(robot.location - robot.base_location)
+                just_reached_base = dist_to_base_after < 5.0
+                
                 total_reward = reward + team_reward
                 
-                # Success/Failure feedback based on return status in Phases 1 and 2
-                # Gated by exploration to prevent "lazy" behavior (loitering at base)
-                if done and self.curriculum_phase > 0:
-                    dist_to_base = np.linalg.norm(robot.location - robot.base_location)
-                    exploration_coverage = self.env.explored_rate
-                    
-                    if dist_to_base < 5.0:
-                        # Bonus is proportional to how much was explored
-                        # If they return without exploring, they get near 0 bonus
-                        total_reward += 5.0 * exploration_coverage 
-                    elif exploration_coverage > 0.3:
-                        # Only penalize for not returning if they've actually started the mission (>30%)
-                        # This prevents them from being afraid to leave the 5m zone
-                        total_reward -= 5.0
+                # End-of-sub-episode logic for returning agents
+                is_robot_done_now = False
+                if self.curriculum_phase > 0:
+                    if just_reached_base and robot.has_left_base:
+                        # Individual Completion Bonus
+                        total_reward += RTB_SUCCESS_BONUS
+                        total_reward += RTB_BUDGET_BONUS * (current_budget / initial_budget)
+                        is_robot_done_now = True
+                        robot.done = True
+                    elif current_budget <= 0:
+                        # Penalty for dying before base
+                        total_reward += RTB_EXHAUSTION_PENALTY
+                        is_robot_done_now = True
+                else:
+                    is_robot_done_now = global_done
                 
                 robot.save_reward(total_reward)
+
                 # Only save all agent indices when communication is enabled
-                # When USE_COMMUNICATION=False, agents rely solely on FOV-detected trajectories
                 if USE_COMMUNICATION:
                     robot.save_all_indices(curr_node_indices)
                 robot.update_planning_state()
-                robot.save_done(done)
+                
+                # The episode step is "done" for this agent if it reached home, or global is done
+                robot.save_done(is_robot_done_now or global_done)
 
-            if done:
+            if global_done or all(r.done for r in self.robot_list):
                 break
 
         # save metrics
         self.perf_metrics['travel_dist'] = max([robot.travel_dist for robot in self.robot_list])
         self.perf_metrics['explored_rate'] = self.env.explored_rate
-        self.perf_metrics['success_rate'] = done
         
-        # Calculate Return Success Rate
+        # Calculate return status
         at_base_count = 0
         for robot in self.robot_list:
-            if np.linalg.norm(robot.location - robot.base_location) < 5.0: # within 5m of base
+            if np.linalg.norm(robot.location - robot.base_location) < 5.0:
                 at_base_count += 1
         self.perf_metrics['return_success_proportion'] = at_base_count / self.n_agents
+        
+        # Success = mapped 99% AND all agents returned to base
+        mapping_complete = self.env.explored_rate >= SUCCESS_THRESHOLD
+        all_returned = (at_base_count == self.n_agents)
+        self.perf_metrics['success_rate'] = mapping_complete and all_returned
+
 
         # save episode buffer
         for robot in self.robot_list:
             observation = robot.get_observation(
                 robot_locations=self.env.robot_locations,
                 trajectory_buffer=self.trajectory_buffer,
-                remaining_budget=current_budget
+                remaining_budget=current_budget,
+                initial_budget=initial_budget,
+                explored_rate=self.env.explored_rate
             )
-            ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, remaining_budget=current_budget)
+            ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, remaining_budget=current_budget, initial_budget=initial_budget, explored_rate=self.env.explored_rate)
+
             robot.save_next_observations(observation, next_node_index_list)
             robot.save_next_ground_truth_observations(ground_truth_observation)
             for i in range(len(self.episode_buffer)):
@@ -448,9 +527,11 @@ class MultiAgentWorker:
 
         plt.axis('off')
         robot_headings = [f"{color_name[robot.id]}- {robot.heading:.0f}°" for robot in self.robot_list]
-        plt.suptitle('Explored ratio: {:.4g}  Travel distance: {:.4g}\nRobot Headings: {}'.format(
+        budget_str = f"Budget: {max(0, self.robot_list[0].initial_budget - self.robot_list[0].trajectory_length)}/{self.robot_list[0].initial_budget}"
+        plt.suptitle('Explored ratio: {:.4g}  Travel distance: {:.4g}  {}\nRobot Headings: {}'.format(
             self.env.explored_rate,
             max([robot.travel_dist for robot in self.robot_list]),
+            budget_str,
             ', '.join(robot_headings)
         ), fontweight='bold', fontsize=10)
         plt.tight_layout()

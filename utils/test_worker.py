@@ -102,10 +102,19 @@ class TestWorker:
             next_node_index_list = []
             next_heading_index_list = []
             for robot in self.robot_list:
+                if robot.done:
+                    selected_locations.append(robot.location)
+                    dist_list.append(0.0)
+                    next_node_index_list.append(robot.current_index)
+                    next_heading_index_list.append(int(robot.heading / (360/NUM_ANGLES_BIN)))
+                    continue
+
                 observation = robot.get_observation(
                     robot_locations=self.env.robot_locations,
                     trajectory_buffer=self.trajectory_buffer,
-                    remaining_budget=current_budget
+                    remaining_budget=current_budget,
+                    initial_budget=MAX_EPISODE_STEP,
+                    explored_rate=self.env.explored_rate
                 )
 
                 next_location, next_node_index, _, next_heading_index = robot.select_next_waypoint(observation, greedy=self.greedy)
@@ -188,6 +197,9 @@ class TestWorker:
             for robot, next_location, next_node_index in zip(self.robot_list, selected_locations, next_node_index_list):
                 self.env.final_sim_step(next_location, robot.id)
 
+                if robot.done:
+                    continue
+
                 # Update trajectory buffer
                 prev_trajectory = self.trajectory_buffer[robot.id][-1] if len(self.trajectory_buffer[robot.id]) > 0 else None
                 if prev_trajectory is not None:
@@ -203,11 +215,24 @@ class TestWorker:
                     velocity
                 ))
 
+                # Track if the robot has ventured out of the base
+                if not robot.has_left_base and np.linalg.norm(next_location - robot.base_location) > 25.0:
+                    robot.has_left_base = True
+
                 robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
 
             overlap_rate = self.compute_overlap_rate(selected_locations, all_robots_heading_list)
 
-            for robot in self.robot_list:
+            mapping_complete = self.env.explored_rate >= SUCCESS_THRESHOLD
+            all_done = all(robot.done or np.linalg.norm(robot.location - robot.base_location) < 5.0 for robot in self.robot_list)
+            
+            for robot_idx, robot in enumerate(self.robot_list):
+                if not robot.done:
+                    dist_to_base_after = np.linalg.norm(robot.location - robot.base_location)
+                    if mapping_complete and dist_to_base_after < 5.0 and robot.has_left_base:
+                        robot.done = True
+                
+
                 robot.update_planning_state()
 
             max_travel_dist += np.max(dist_list)
@@ -218,16 +243,18 @@ class TestWorker:
                 trajectory_length = max([robot.travel_dist for robot in self.robot_list])
                 reach_checkpoint = True
 
-            if self.env.explored_rate > SUCCESS_THRESHOLD: # changed from 0.99 to 0.95
+            if mapping_complete and all_done:
                 done = True
 
-            if done:
+            if done or current_budget <= 0:
                 break
 
         # Save metrics
+        at_base_count = sum(1 for robot in self.robot_list if np.linalg.norm(robot.location - robot.base_location) < 5.0)
         self.perf_metrics['travel_dist'] = max([robot.travel_dist for robot in self.robot_list])
         self.perf_metrics['explored_rate'] = self.env.explored_rate
         self.perf_metrics['success_rate'] = done
+        self.perf_metrics['return_success_proportion'] = at_base_count / self.n_agents
         if trajectory_length > 0:
             self.perf_metrics['dist_to_0_90'] = trajectory_length
         else:
@@ -711,9 +738,11 @@ class TestWorker:
         detection_text = ' | '.join(detection_summary) if detection_summary else 'No detections'
 
         robot_headings_text = [f"{color_name[robot.id % len(color_list)]}: {robot.heading:.0f}°" for robot in self.robot_list]
-        plt.suptitle('Explored: {:.4g}  Distance: {:.4g}\nHeadings: {}\nFOV Detections: {}'.format(
+        budget_str = f"Budget: {max(0, self.robot_list[0].initial_budget - self.robot_list[0].trajectory_length)}/{self.robot_list[0].initial_budget}"
+        plt.suptitle('Explored: {:.4g}  Distance: {:.4g}  {}\nHeadings: {}\nFOV Detections: {}'.format(
             self.env.explored_rate,
             max([robot.travel_dist for robot in self.robot_list]),
+            budget_str,
             ', '.join(robot_headings_text),
             detection_text
         ), fontweight='bold', fontsize=10, y=0.99)

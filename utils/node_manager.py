@@ -21,11 +21,12 @@ import utils.quads as quads
 
 
 class NodeManager:
-    def __init__(self, fov, sensor_range, utility_range=None, plot=False):
+    def __init__(self, fov, sensor_range, utility_range=None, plot=False, base_location=None):
         self.nodes_dict = quads.QuadTree((0, 0), 1000, 1000)
         self.plot = plot
         self.fov = fov
         self.sensor_range = sensor_range
+        self.base_location = base_location if base_location is not None else np.array([0,0])
         if utility_range is None:
             self.utility_range = UTILITY_RANGE
         else:
@@ -103,18 +104,27 @@ class NodeManager:
         heading_visited = np.array(heading_visited)
         visited_by_others = np.array(visited_by_others)
 
+        # Calculate Guidepost
+        # Logic: If frontiers exist, guide toward nearest utility.
+        # If mapping is done (Utility=0), guide toward Base.
         indices = np.argwhere(utility > 0).reshape(-1)
         utility_node_coords = all_node_coords[indices]
-        dist_dict, prev_dict = self.Dijkstra(robot_location)
-        nearest_utility_coords = robot_location
-        nearest_dist = 1e8
-        for coords in utility_node_coords:
-            dist = dist_dict[(coords[0], coords[1])]
-            if 0 < dist < nearest_dist:
-                nearest_dist = dist
-                nearest_utility_coords = coords
-
-        path_coords, dist = self.a_star(robot_location, nearest_utility_coords)
+        dist_dict, prev_dict, hop_dict = self.Dijkstra(robot_location)
+        
+        if len(utility_node_coords) > 0:
+            # Mode A: Exploration Guidance
+            nearest_target_coords = robot_location
+            nearest_dist = 1e8
+            for coords in utility_node_coords:
+                dist = dist_dict.get((coords[0], coords[1]), 1e8)
+                if 0 < dist < nearest_dist:
+                    nearest_dist = dist
+                    nearest_target_coords = coords
+            path_coords, _ = self.a_star(robot_location, nearest_target_coords)
+        else:
+            # Mode B: Return Guidance (Mapping is done)
+            base_node = self.nodes_dict.nearest_neighbors(self.base_location.tolist(), 1)[0].data.coords
+            path_coords, _ = self.a_star(robot_location, base_node)
         guidepost = np.zeros_like(utility)
         for coords in path_coords:
             index = np.argwhere(all_node_coords[:, 0] + all_node_coords[:, 1] * 1j == coords[0] + coords[1] * 1j)[0]
@@ -134,16 +144,19 @@ class NodeManager:
         q = set()
         dist_dict = {}
         prev_dict = {}
+        hop_dict = {}
 
         for node in self.nodes_dict.__iter__():
             coords = node.data.coords
             key = (coords[0], coords[1])
             dist_dict[key] = 1e8
             prev_dict[key] = None
+            hop_dict[key] = 1e8
             q.add(key)
 
         assert (start[0], start[1]) in dist_dict.keys()
         dist_dict[(start[0], start[1])] = 0
+        hop_dict[(start[0], start[1])] = 0
 
         while len(q) > 0:
             u = None
@@ -170,9 +183,10 @@ class NodeManager:
                     alt = dist_dict[u] + cost
                     if alt < dist_dict[v]:
                         dist_dict[v] = alt
+                        hop_dict[v] = hop_dict[u] + 1
                         prev_dict[v] = u
 
-        return dist_dict, prev_dict
+        return dist_dict, prev_dict, hop_dict
 
     def get_Dijkstra_path_and_dist(self, dist_dict, prev_dict, end):
         if (end[0], end[1]) not in dist_dict:
@@ -189,6 +203,19 @@ class NodeManager:
 
         path.reverse()
         return path[1:], np.round(dist, 2)
+
+    def get_distances_to_target(self, target_coords):
+        # Find nearest node to the target in our graph
+        target_in_graph = self.nodes_dict.nearest_neighbors(target_coords.tolist(), 1)[0].data.coords
+        
+        # Run Dijkstra from that target node to all other nodes
+        dist_dict, prev_dict, hop_dict = self.Dijkstra(target_in_graph)
+        
+        # Add the euclidean distance from target to the nearest graph node to all paths
+        offset = np.linalg.norm(target_coords - target_in_graph)
+        graph_dist_dict = {key: (val + offset) for key, val in dist_dict.items()}
+        
+        return graph_dist_dict, hop_dict
 
     def h(self, coords_1, coords_2):
         h = ((coords_1[0] - coords_2[0]) ** 2 + (coords_1[1] - coords_2[1]) ** 2) ** (1 / 2)

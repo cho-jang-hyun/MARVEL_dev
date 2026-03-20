@@ -36,20 +36,20 @@ class Runner(object):
     def set_policy_net_weights(self, weights):
         self.network.load_state_dict(weights)
 
-    def do_job(self, episode_number):
+    def do_job(self, episode_number, curriculum_phase=0):
         save_img = True if episode_number % SAVE_IMG_GAP == 0 else False
-        worker = MultiAgentWorker(self.meta_agent_id, self.network, episode_number, device=self.device, save_image=save_img)
+        worker = MultiAgentWorker(self.meta_agent_id, self.network, episode_number, device=self.device, save_image=save_img, curriculum_phase=curriculum_phase)
         worker.run_episode()
 
         job_results = worker.episode_buffer
         perf_metrics = worker.perf_metrics
         return job_results, perf_metrics
 
-    def job(self, weights_set, episode_number):
-        print("Starting episode {} on metaAgent {}".format(episode_number, self.meta_agent_id))
+    def job(self, weights_set, episode_number, curriculum_phase=0):
+        print("Starting episode {} on metaAgent {} [Phase {}]".format(episode_number, self.meta_agent_id, curriculum_phase))
         self.set_policy_net_weights(weights_set[0])
 
-        job_results, metrics = self.do_job(episode_number)
+        job_results, metrics = self.do_job(episode_number, curriculum_phase=curriculum_phase)
 
         info = {"id": self.meta_agent_id, "episode_number": episode_number}
 

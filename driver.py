@@ -27,6 +27,7 @@ import os
 import numpy as np
 import random
 import wandb
+from collections import deque
 
 from utils.model import PolicyNet, QNet
 from utils.runner import RLRunner
@@ -112,28 +113,63 @@ def main():
         wandb.watch([global_policy_net, global_q_net1], log='all', log_freq=1000, log_graph=False)
 
 
+    def load_and_adapt_state_dict(model, state_dict):
+        model_dict = model.state_dict()
+        for name, param in state_dict.items():
+            if name in model_dict:
+                if param.shape != model_dict[name].shape:
+                    print(f"Adapting {name}: {param.shape} -> {model_dict[name].shape}")
+                    new_param = model_dict[name].clone()
+                    if param.dim() == 2:
+                        new_param[:, :param.shape[1]] = param
+                    elif param.dim() == 1:
+                        new_param[:param.shape[0]] = param
+                    model_dict[name] = new_param
+                else:
+                    model_dict[name] = param
+        model.load_state_dict(model_dict)
+
     # load model and optimizer trained before
     if LOAD_MODEL:
         print('Loading Model...')
         checkpoint = torch.load(model_path + '/latest.pth', map_location=device)
-        global_policy_net.load_state_dict(checkpoint['policy_model'])
-        global_q_net1.load_state_dict(checkpoint['q_net1_model'])
-        global_q_net2.load_state_dict(checkpoint['q_net2_model'])
+        load_and_adapt_state_dict(global_policy_net, checkpoint['policy_model'])
+        load_and_adapt_state_dict(global_q_net1, checkpoint['q_net1_model'])
+        load_and_adapt_state_dict(global_q_net2, checkpoint['q_net2_model'])
         log_alpha = checkpoint['log_alpha'].to(device)
         log_alpha.requires_grad_(True)
         log_alpha_optimizer = optim.Adam([log_alpha], lr=1e-4)
 
-        global_policy_optimizer.load_state_dict(checkpoint['policy_optimizer'])
-        global_q_net1_optimizer.load_state_dict(checkpoint['q_net1_optimizer'])
-        global_q_net2_optimizer.load_state_dict(checkpoint['q_net2_optimizer'])
-        log_alpha_optimizer.load_state_dict(checkpoint['log_alpha_optimizer'])
+        # Skip loading optimizer state to avoid dimension mismatch on modified architectures
+        # The Adam momentum states will be rebuilt naturally over the next few batches.
+        print("Skipping optimizer state loading due to architecture dimension changes.")
         curr_episode = checkpoint['episode']
         best_success_rate = checkpoint.get('best_success_rate', -float('inf'))
+
+        # Restore curriculum phase based on loaded episode
+        if curr_episode > CURRICULUM_STEP2:
+            curriculum_phase = 2
+        elif curr_episode > CURRICULUM_STEP1:
+            curriculum_phase = 1
+
+    # Keep track of recent performance for phase progression
+    recent_coverage = deque(maxlen=100)
 
     global_target_q_net1.load_state_dict(global_q_net1.state_dict())
     global_target_q_net2.load_state_dict(global_q_net2.state_dict())
     global_target_q_net1.eval()
     global_target_q_net2.eval()
+
+    if not LOAD_MODEL:
+        curriculum_phase = 0
+        current_budget_min = BUDGET  # Phase 0 constraint
+    else:
+        if curriculum_phase == 0:
+            current_budget_min = BUDGET
+        elif curriculum_phase == 1:
+            current_budget_min = BUDGET_MIN_P1
+        else:
+            current_budget_min = BUDGET_MIN_P2
 
     # launch meta agents
     meta_agents = [RLRunner.remote(i) for i in range(NUM_META_AGENT)]
@@ -167,7 +203,7 @@ def main():
     job_list = []
     for i, meta_agent in enumerate(meta_agents):
         curr_episode += 1
-        job_list.append(meta_agent.job.remote(weights_set, curr_episode))
+        job_list.append(meta_agent.job.remote(weights_set, curr_episode, curriculum_phase=curriculum_phase))
 
     # initialize metric collector
     metric_name = ['travel_dist', 'success_rate', 'explored_rate', 'return_success_proportion']
@@ -175,6 +211,9 @@ def main():
     perf_metrics = {}
     for n in metric_name:
         perf_metrics[n] = []
+    
+    # initialize persistent rolling buffers for curriculum evaluation (100 episode window)
+    curriculum_eval_metrics = {n: deque(maxlen=100) for n in metric_name}
 
     # initialize training replay buffer
     experience_buffer = []
@@ -196,10 +235,23 @@ def main():
                     experience_buffer[i] += job_results[i]
                 for n in metric_name:
                     perf_metrics[n].append(metrics[n])
+                    curriculum_eval_metrics[n].append(metrics[n])
 
-            # launch new task
+            # performance-based curriculum switching (updates the state for new jobs)
+            if len(curriculum_eval_metrics['explored_rate']) >= 100:
+                avg_coverage = np.nanmean(curriculum_eval_metrics['explored_rate'])
+                avg_return = np.nanmean(curriculum_eval_metrics['return_success_proportion'])
+                
+                if curriculum_phase == 0 and avg_coverage > 0.98 and curr_episode > 500:
+                    curriculum_phase = 1
+                    print(f"--- CURRICULUM: mastery achieved (avg coverage {avg_coverage:.3f}). Moving to PHASE 1 ---")
+                elif curriculum_phase == 1 and avg_return > 0.5 and curr_episode > 1000:
+                    curriculum_phase = 2
+                    print(f"--- CURRICULUM: mastery achieved (avg return {avg_return:.3f}). Moving to PHASE 2 ---")
+
+            # launch new task with current phase
             curr_episode += 1
-            job_list.append(meta_agents[info['id']].job.remote(weights_set, curr_episode))
+            job_list.append(meta_agents[info['id']].job.remote(weights_set, curr_episode, curriculum_phase=curriculum_phase))
 
             # start training
             if curr_episode % 1 == 0 and len(experience_buffer[0]) >= MINIMUM_BUFFER_SIZE:
@@ -214,6 +266,23 @@ def main():
 
                 # training for n times each step
                 for j in range(4):
+                    # Adjust learning rate based on current curriculum phase
+                    if curriculum_phase == 0:
+                        new_lr = LR # 1e-4
+                    elif curriculum_phase == 1:
+                        new_lr = LR * 0.5 # 5e-5
+                    else: 
+                        new_lr = LR * 0.2 # 2e-5
+
+                    for param_group in global_policy_optimizer.param_groups:
+                        param_group['lr'] = new_lr
+                    for param_group in global_q_net1_optimizer.param_groups:
+                        param_group['lr'] = new_lr
+                    for param_group in global_q_net2_optimizer.param_groups:
+                        param_group['lr'] = new_lr
+                    for param_group in log_alpha_optimizer.param_groups:
+                        param_group['lr'] = new_lr
+
                     # randomly sample a batch data
                     # Change sampling to maintain alignment across buffers
                     sample_indices = random.sample(indices, BATCH_SIZE)
@@ -442,13 +511,7 @@ def main():
                 traj_embedding_norm = float(trajectory_debug.get('embedding_norm', torch.tensor(0.0)).item())
                 traj_attention_entropy = float(trajectory_debug.get('agent_attention_entropy', torch.tensor(0.0)).item())
 
-                # Calculate curriculum phase
-                if curr_episode < CURRICULUM_STEP1:
-                    curriculum_phase = 0
-                elif curr_episode < CURRICULUM_STEP2:
-                    curriculum_phase = 1
-                else:
-                    curriculum_phase = 2
+                # Current phase is maintained by the performance-gate above
 
                 data = [reward.mean().item(), value_prime.mean().item(), policy_loss.item(), q1_loss.item(),
                         entropy.mean().item(), policy_grad_norm.item(), q_grad_norm.item(), log_alpha.item(),
