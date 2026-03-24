@@ -554,13 +554,13 @@ class Agent:
 
     def mark_nodes_visited_by_others(self, robot_locations, trajectory_buffer):
         """
-        Mark nodes as visited by other agents based on observed trajectories in FoV.
+        Update the visited_by_others signal for all nodes in the local graph.
 
-        This method:
-        1. Detects other robots in FoV using get_robots_in_fov()
-        2. For each detected robot, retrieves its trajectory history
-        3. Identifies which nodes the detected robots have visited
-        4. Marks those nodes with visited_by_others = 1
+        Each planning step:
+        1. All existing marks decay by VISITED_DECAY; previously-visited nodes are
+           held at VISITED_MIN_FLOOR so the "was visited" signal is never lost.
+        2. Nodes corresponding to currently-tracked teammate positions are refreshed
+           to 1.0.
 
         Args:
             robot_locations (np.ndarray): Array of all robot locations, shape (n_agents, 2)
@@ -571,11 +571,17 @@ class Agent:
         """
         if not hasattr(self, 'observed_trajectory_buffer'):
             return
-            
-        for robot_id, trajectory_queue in self.observed_trajectory_buffer.items():
-            trajectory = list(trajectory_queue)
 
-            for step in trajectory:
+        # Step 1: Decay all existing marks; hold previously-visited nodes at floor
+        for quad_node in self.node_manager.nodes_dict:
+            v = quad_node.data.visited_by_others * VISITED_DECAY
+            if v > 0:
+                v = max(VISITED_MIN_FLOOR, v)
+            quad_node.data.visited_by_others = v
+
+        # Step 2: Refresh detected-teammate positions to 1.0
+        for robot_id, trajectory_queue in self.observed_trajectory_buffer.items():
+            for step in list(trajectory_queue):
                 x, y, heading, velocity = step
 
                 # Skip zero-padded entries
@@ -589,9 +595,8 @@ class Agent:
 
                 if len(nodes_nearby) > 0:
                     nearest_node = nodes_nearby[0]
-                    # Check distance threshold to ensure it's actually at this node
                     if np.linalg.norm(nearest_node.data.coords - position) < NODE_RESOLUTION:
-                        nearest_node.data.visited_by_others = 1
+                        nearest_node.data.visited_by_others = 1.0
 
     def calculate_overlap_reward(self, current_robot_location, all_robots_locations, robot_headings_list):
         ## Robot heading list in degrees

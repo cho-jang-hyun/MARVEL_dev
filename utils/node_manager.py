@@ -282,7 +282,7 @@ class Node:
         self.heading_visited = np.zeros(self.num_angles_bin)
         self.observable_frontiers = self.initialize_observable_frontiers(frontiers, updating_map_info)
         self.visited = 0
-        self.visited_by_others = 0  # Binary: marked when other agents visit this node
+        self.visited_by_others = 0.0  # Decaying float: 1.0 = just visited, fades to VISITED_MIN_FLOOR
 
         self.neighbor_matrix = -np.ones((NUM_NODE_NEIGHBORS, NUM_NODE_NEIGHBORS))
         self.neighbor_list = []

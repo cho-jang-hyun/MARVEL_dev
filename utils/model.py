@@ -469,38 +469,29 @@ class PolicyNet(nn.Module):
         batch_size, num_nodes, embedding_dim = enhanced_node_feature.shape
         _, max_agents, seq_len = trajectory_node_indices.shape
 
-        # Initialize output tensor
-        trajectory_node_features = torch.zeros(
-            batch_size, max_agents, seq_len, embedding_dim,
-            dtype=enhanced_node_feature.dtype,
-            device=enhanced_node_feature.device
-        )
+        # Build validity mask: True where index is valid and agent is not padded
+        valid_mask = (trajectory_node_indices >= 0) & (~trajectory_mask.unsqueeze(-1))
+        # [batch, max_agents, seq_len]
 
-        # Process each batch
-        for b in range(batch_size):
-            for a in range(max_agents):
-                # Skip if this agent is padded
-                if trajectory_mask[b, a]:
-                    continue
+        # Clamp invalid indices to 0 so gather never goes out of bounds;
+        # invalid positions will be zeroed out by valid_mask afterward.
+        clamped_indices = trajectory_node_indices.clamp(min=0)  # [B, A, T]
 
-                for t in range(seq_len):
-                    node_idx = trajectory_node_indices[b, a, t].item()
+        # Flatten agent and time dims for a single gather call
+        flat_indices = clamped_indices.view(batch_size, max_agents * seq_len, 1)
+        flat_indices = flat_indices.expand(-1, -1, embedding_dim)  # [B, A*T, D]
 
-                    # Skip if invalid node index
-                    if node_idx < 0 or node_idx >= num_nodes:
-                        continue
+        # Gather all node embeddings at once — fully on-device, no Python loops
+        traj_flat = torch.gather(enhanced_node_feature, 1, flat_indices)  # [B, A*T, D]
+        traj_flat = traj_flat.view(batch_size, max_agents, seq_len, embedding_dim)
 
-                    # Extract node embedding
-                    trajectory_node_features[b, a, t] = enhanced_node_feature[b, node_idx]
+        # Zero out positions that correspond to invalid indices or padded agents
+        traj_flat = traj_flat * valid_mask.unsqueeze(-1).float()
 
         # Apply FFN projection
-        # Reshape to [batch * max_agents * seq_len, embedding_dim]
-        traj_flat = trajectory_node_features.reshape(-1, embedding_dim)
         traj_projected = self.trajectory_node_ffn(traj_flat)
-        # Reshape back to [batch, max_agents, seq_len, embedding_dim]
-        trajectory_node_features = traj_projected.reshape(batch_size, max_agents, seq_len, embedding_dim)
 
-        return trajectory_node_features
+        return traj_projected
 
     def decode_state(self, enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding=None,
                      trajectory_node_features=None, trajectory_mask=None, trajectory_node_indices=None):
@@ -712,38 +703,29 @@ class QNet(nn.Module):
         batch_size, num_nodes, embedding_dim = enhanced_node_feature.shape
         _, max_agents, seq_len = trajectory_node_indices.shape
 
-        # Initialize output tensor
-        trajectory_node_features = torch.zeros(
-            batch_size, max_agents, seq_len, embedding_dim,
-            dtype=enhanced_node_feature.dtype,
-            device=enhanced_node_feature.device
-        )
+        # Build validity mask: True where index is valid and agent is not padded
+        valid_mask = (trajectory_node_indices >= 0) & (~trajectory_mask.unsqueeze(-1))
+        # [batch, max_agents, seq_len]
 
-        # Process each batch
-        for b in range(batch_size):
-            for a in range(max_agents):
-                # Skip if this agent is padded
-                if trajectory_mask[b, a]:
-                    continue
+        # Clamp invalid indices to 0 so gather never goes out of bounds;
+        # invalid positions will be zeroed out by valid_mask afterward.
+        clamped_indices = trajectory_node_indices.clamp(min=0)  # [B, A, T]
 
-                for t in range(seq_len):
-                    node_idx = trajectory_node_indices[b, a, t].item()
+        # Flatten agent and time dims for a single gather call
+        flat_indices = clamped_indices.view(batch_size, max_agents * seq_len, 1)
+        flat_indices = flat_indices.expand(-1, -1, embedding_dim)  # [B, A*T, D]
 
-                    # Skip if invalid node index
-                    if node_idx < 0 or node_idx >= num_nodes:
-                        continue
+        # Gather all node embeddings at once — fully on-device, no Python loops
+        traj_flat = torch.gather(enhanced_node_feature, 1, flat_indices)  # [B, A*T, D]
+        traj_flat = traj_flat.view(batch_size, max_agents, seq_len, embedding_dim)
 
-                    # Extract node embedding
-                    trajectory_node_features[b, a, t] = enhanced_node_feature[b, node_idx]
+        # Zero out positions that correspond to invalid indices or padded agents
+        traj_flat = traj_flat * valid_mask.unsqueeze(-1).float()
 
         # Apply FFN projection
-        # Reshape to [batch * max_agents * seq_len, embedding_dim]
-        traj_flat = trajectory_node_features.reshape(-1, embedding_dim)
         traj_projected = self.trajectory_node_ffn(traj_flat)
-        # Reshape back to [batch, max_agents, seq_len, embedding_dim]
-        trajectory_node_features = traj_projected.reshape(batch_size, max_agents, seq_len, embedding_dim)
 
-        return trajectory_node_features
+        return traj_projected
 
     def decode_state(self, enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding=None,
                      trajectory_node_features=None, trajectory_mask=None, trajectory_node_indices=None):

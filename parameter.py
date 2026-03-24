@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = 'fixed_partial_map_visualization_for_test'
+FOLDER_NAME = '3_24'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -69,10 +69,10 @@ UPDATING_MAP_SIZE = 4 * SENSOR_RANGE + 4 * NODE_RESOLUTION
 MAX_EPISODE_STEP = 128
 REPLAY_SIZE = 10000
 MINIMUM_BUFFER_SIZE = 2000
-BATCH_SIZE = 256
-LR = 1e-5
+BATCH_SIZE = 128
+LR = 3e-4
 GAMMA = 0.99
-TAU = 0.001  # Soft update coefficient for target network (0.001 ~ 0.01)
+TAU = 0.005  # Soft update coefficient for target network (0.001 ~ 0.01)
 NUM_META_AGENT = 18
 
 # Gradient clipping parameters
@@ -100,6 +100,9 @@ USE_GPU = False  # Workers use CPU to avoid GPU memory conflict with Ray
 USE_GPU_GLOBAL = True  # Main training process uses GPU
 NUM_GPU = 1  # Number of GPUs for DataParallel in main process
 GPU_ID = 0  # Which GPU to use (0 or 1). Set to None to use all available GPUs
+
+VISITED_DECAY = 0.9       # per-planning-step decay factor for visited_by_others
+VISITED_MIN_FLOOR = 0.1   # minimum non-zero value once a node has been visited
 
 USE_WANDB = False
 TRAIN_ALGO = 3
