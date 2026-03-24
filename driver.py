@@ -72,7 +72,7 @@ def main():
 
     # target entropy for SAC (discrete action space)
     action_dim = K_SIZE * NUM_HEADING_CANDIDATES
-    entropy_target = 0.5 * np.log(action_dim)
+    entropy_target = 0.3 * np.log(action_dim)
     log_alpha_min = -8.0
     log_alpha_max = 2.0
 

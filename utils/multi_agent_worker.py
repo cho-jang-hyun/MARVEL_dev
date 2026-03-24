@@ -102,8 +102,6 @@ class MultiAgentWorker:
         for robot in self.robot_list:
             robot.update_planning_state()
 
-        cumulative_trajectory_reward = {robot.id: 0.0 for robot in self.robot_list}
-
         for i in range(MAX_EPISODE_STEP):
 
             selected_locations = []
@@ -285,18 +283,15 @@ class MultiAgentWorker:
                 else:
                     angle_reward = np.cos(np.radians(robot.heading - preferred_angle))
 
-                trajectory_angle = np.degrees(np.arctan2(next_location[1] - robot.location[1],
-                                               next_location[0] - robot.location[0]) % (2 * np.pi))
-                trajectory_reward = np.cos(np.radians(robot.heading - trajectory_angle))
-
-                # Calculate overlap penalty for this agent
+                # Calculate overlap penalty for this agent; anneal by explored_rate so
+                # agents are not penalised for sharing corridors early in the episode.
                 overlap_penalty = robot.calculate_overlap_reward(
                     next_location,
                     selected_locations,
                     robot_headings_list
                 )
+                overlap_penalty *= min(1.0, self.env.explored_rate * 2.0)
 
-                cumulative_trajectory_reward[robot.id] += trajectory_reward
                 reward_list.append(utility_reward + angle_reward - overlap_penalty)
 
                 robot.update_graph(self.agent_belief_infos[robot.id], self.env.robot_locations[robot.id].copy())
@@ -313,7 +308,6 @@ class MultiAgentWorker:
                 done = True
 
             # Per-agent exploration credit: normalised by the expected FOV sensing area.
-            # Subtract 0.5 as a per-step cost baseline (equivalent to the old -0.5 term).
             cell_norm = max(np.pi * (self.sensor_range / CELL_SIZE) ** 2 * (self.fov / 360), 1.0)
 
             curr_node_indices = np.array([robot.current_index for robot in self.robot_list])
@@ -323,11 +317,10 @@ class MultiAgentWorker:
                 if robot.id in redirected:
                     robot.update_planning_state()
                     continue
-                exploration_credit = per_agent_new_cells[robot.id] / cell_norm - 0.5
+                exploration_credit = per_agent_new_cells[robot.id] / cell_norm
                 terminal_bonus = 0.0
                 if done:
-                    # Trajectory penalty paid at episode end + shared completion bonus
-                    terminal_bonus = cumulative_trajectory_reward[robot.id] + 10.0
+                    terminal_bonus = 10.0 * self.env.explored_rate
                 robot.save_reward(reward + exploration_credit + terminal_bonus)
                 # Only save all agent indices when communication is enabled
                 # When USE_COMMUNICATION=False, agents rely solely on FOV-detected trajectories

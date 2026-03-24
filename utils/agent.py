@@ -184,7 +184,6 @@ class Agent:
         node_utility = self.utility.reshape(-1, 1)
         node_guidepost = self.guidepost.reshape(-1, 1)
         node_occupancy = self.occupancy.reshape(-1, 1)
-        node_highest_utility_angles = self.highest_utility_angles.reshape(-1, 1)
         node_frontier_distribution = self.frontier_distribution.reshape(-1, self.num_angles_bin)
         node_heading_visited = self.heading_visited.reshape(-1, self.num_angles_bin)
         node_visited_by_others = self.visited_by_others.reshape(-1, 1)
@@ -198,10 +197,8 @@ class Agent:
                                              node_coords[:, 1].reshape(-1, 1) - current_node_coords[1]),
                                            axis=-1) / UPDATING_MAP_SIZE / 2
         node_utility = node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
-        node_highest_utility_angles = node_highest_utility_angles / 360
         node_frontier_distribution = node_frontier_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
-        # visited_by_others is already 0 or 1, no normalization needed
-        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others), axis=1)
+        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_visited_by_others), axis=1)
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
         all_node_frontier_distribution = torch.Tensor(node_frontier_distribution).unsqueeze(0).to(self.device)
         node_heading_visited = torch.Tensor(node_heading_visited).unsqueeze(0).to(self.device)
@@ -529,9 +526,10 @@ class Agent:
             dx = x - self.location[0]
             dy = y - self.location[1]
 
-            # Normalize coordinates to roughly [-1, 1]
-            dx_norm = np.clip(dx / (UPDATING_MAP_SIZE / 2), -1.0, 1.0)
-            dy_norm = np.clip(dy / (UPDATING_MAP_SIZE / 2), -1.0, 1.0)
+            # Normalize by sensor range: detected agents are always within SENSOR_RANGE,
+            # so this maps them to [-1, 1] and is more informative than the map-scale norm.
+            dx_norm = np.clip(dx / self.sensor_range, -1.0, 1.0)
+            dy_norm = np.clip(dy / self.sensor_range, -1.0, 1.0)
 
             # Encode heading as periodic features to avoid 0/360 discontinuity
             heading_rad = np.radians(heading)

@@ -222,6 +222,32 @@ class Decoder(nn.Module):
         return tgt, w
 
 
+class SpatialPositionalEncoding(nn.Module):
+    """
+    2D Fourier spatial positional encoding for graph nodes.
+
+    Takes the (dx, dy) normalized coordinates from node_inputs and encodes them
+    with multi-frequency sinusoids, giving the transformer explicit geometric
+    priors beyond what a single linear layer can capture.
+    """
+    def __init__(self, d_model, num_freq_bands=4):
+        super(SpatialPositionalEncoding, self).__init__()
+        freqs = (2.0 ** torch.arange(num_freq_bands).float()) * math.pi
+        self.register_buffer('freqs', freqs)
+        # sin + cos for x and y = num_freq_bands * 4 raw features → d_model
+        self.projection = nn.Linear(num_freq_bands * 4, d_model)
+
+    def forward(self, xy_coords):
+        # xy_coords: [batch, n_nodes, 2]
+        x = xy_coords[..., 0:1]  # [batch, n_nodes, 1]
+        y = xy_coords[..., 1:2]
+        x_scaled = x * self.freqs   # [batch, n_nodes, num_freq_bands]
+        y_scaled = y * self.freqs
+        pe = torch.cat([torch.sin(x_scaled), torch.cos(x_scaled),
+                        torch.sin(y_scaled), torch.cos(y_scaled)], dim=-1)
+        return self.projection(pe)  # [batch, n_nodes, d_model]
+
+
 class PositionalEncoding(nn.Module):
     """Positional encoding for temporal sequences."""
     def __init__(self, d_model, max_len=100):
@@ -392,6 +418,7 @@ class PolicyNet(nn.Module):
 
         # Graph Encoder
         self.initial_embedding = nn.Linear(node_dim, embedding_dim)
+        self.spatial_pe = SpatialPositionalEncoding(embedding_dim)
         self.encoder = Encoder(embedding_dim=embedding_dim, n_head=4, n_layer=6, gated_attention=gated_attention)
 
         # Local frontiers distribution encoder
@@ -442,6 +469,7 @@ class PolicyNet(nn.Module):
 
     def encode_graph(self, node_inputs, node_padding_mask, edge_mask, frontier_distribution):
         node_feature = self.initial_embedding(node_inputs)
+        node_feature = node_feature + self.spatial_pe(node_inputs[:, :, :2])
         enhanced_node_feature = self.encoder(src=node_feature,
                                                          key_padding_mask=node_padding_mask,
                                                          attn_mask=edge_mask)
@@ -664,6 +692,7 @@ class QNet(nn.Module):
         else:
             # Graph embedding
             self.initial_embedding = nn.Linear(node_dim, embedding_dim)
+        self.spatial_pe = SpatialPositionalEncoding(embedding_dim)
 
         if train_algo in (1, 3):
             self.agent_decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1, gated_attention=gated_attention)
@@ -676,10 +705,11 @@ class QNet(nn.Module):
 
     def encode_graph(self, node_inputs, node_padding_mask, edge_mask, frontier_distribution):
         node_feature = self.initial_embedding(node_inputs)
+        node_feature = node_feature + self.spatial_pe(node_inputs[:, :, :2])
         enhanced_node_feature = self.encoder(src=node_feature,
                                                          key_padding_mask=node_padding_mask,
                                                          attn_mask=edge_mask)
-        
+
         frontier_distribution = frontier_distribution.permute(0, 2, 1)
         frontiers_feature = self.frontiers_embedding(frontier_distribution)
         frontiers_feature = frontiers_feature.permute(0, 2, 1)

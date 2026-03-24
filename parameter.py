@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '3_24'
+FOLDER_NAME = '3_25'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -67,20 +67,20 @@ UPDATING_MAP_SIZE = 4 * SENSOR_RANGE + 4 * NODE_RESOLUTION
 
 # training parameters
 MAX_EPISODE_STEP = 128
-REPLAY_SIZE = 10000
-MINIMUM_BUFFER_SIZE = 2000
+REPLAY_SIZE = 20000
+MINIMUM_BUFFER_SIZE = 10000
 BATCH_SIZE = 128
 LR = 3e-4
 GAMMA = 0.99
 TAU = 0.005  # Soft update coefficient for target network (0.001 ~ 0.01)
-NUM_META_AGENT = 18
+NUM_META_AGENT = 15
 
 # Gradient clipping parameters
 GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5.0)
 GRAD_CLIP_Q = 10.0      # Max gradient norm for Q networks (typical: 1.0 ~ 10.0)
 
 # network parameters
-NODE_INPUT_DIM = 7  # Changed from 6: added visited_by_others feature
+NODE_INPUT_DIM = 6  # removed highest_utility_angle (redundant with frontier_distribution)
 EMBEDDING_DIM = 128
 
 # Trajectory tracking parameters
@@ -101,8 +101,8 @@ USE_GPU_GLOBAL = True  # Main training process uses GPU
 NUM_GPU = 1  # Number of GPUs for DataParallel in main process
 GPU_ID = 0  # Which GPU to use (0 or 1). Set to None to use all available GPUs
 
-VISITED_DECAY = 0.9       # per-planning-step decay factor for visited_by_others
-VISITED_MIN_FLOOR = 0.1   # minimum non-zero value once a node has been visited
+VISITED_DECAY = 0.97      # per-planning-step decay factor for visited_by_others
+VISITED_MIN_FLOOR = 0.05  # minimum non-zero value once a node has been visited
 
 USE_WANDB = False
 TRAIN_ALGO = 3
