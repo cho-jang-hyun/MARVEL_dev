@@ -98,7 +98,7 @@ class MultiAgentWorker:
     def run_episode(self):
         done = False
         for robot in self.robot_list:
-            robot.update_graph(self.agent_belief_infos[robot.id], self.env.robot_locations[robot.id].copy())
+            robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
         for robot in self.robot_list:
             robot.update_planning_state()
 
@@ -201,39 +201,13 @@ class MultiAgentWorker:
                 robot_location_sim_step = []
                 robot_heading_sim_step = []
                 for q in range(self.n_agents):
-                    robot_id = self.robot_list[q].id
-                    sensor_work_heading(
-                        robot_locations_sim[q][l],
-                        round(self.sensor_range / CELL_SIZE),
-                        self.agent_beliefs[robot_id],
-                        self.env.ground_truth,
-                        robot_headings_sim[q][l],
-                        self.fov
-                    )
+                    self.env.update_robot_belief(q, robot_locations_sim[q][l], robot_headings_sim[q][l])
                     robot_location_sim_step.append(robot_locations_sim[q][l])
                     robot_heading_sim_step.append(robot_headings_sim[q][l])
 
                 if self.save_image:
                     num_frame = i * self.sim_steps + l
-                    self.plot_local_env_sim(
-                        num_frame,
-                        robot_location_sim_step,
-                        robot_heading_sim_step,
-                        locations_are_cells=True,
-                    )
-
-            # Count UNKNOWN→FREE cells newly discovered by each agent this step
-            per_agent_new_cells = {
-                robot.id: int(np.sum(
-                    (self.agent_beliefs[robot.id] == FREE) & (belief_before[robot.id] == UNKNOWN)
-                ))
-                for robot in self.robot_list
-            }
-
-            # Update shared env.robot_belief with a semantic merge of all per-agent beliefs.
-            # Cell-value ordering is not ordinal here: OCCUPIED=1, UNKNOWN=127, FREE=255.
-            # A numeric max would wrongly let UNKNOWN/FREE overwrite a discovered wall.
-            np.copyto(self.env.robot_belief, self.merge_agent_beliefs())
+                    self.plot_local_env_sim(num_frame, robot_location_sim_step, robot_heading_sim_step, locations_are_cells=True)
 
             # Apply all final positions before reward computation to avoid order-dependent rewards.
             for robot, next_location in zip(self.robot_list, selected_locations):
@@ -294,7 +268,7 @@ class MultiAgentWorker:
 
                 reward_list.append(utility_reward + angle_reward - overlap_penalty)
 
-                robot.update_graph(self.agent_belief_infos[robot.id], self.env.robot_locations[robot.id].copy())
+                robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
                 # Mark nodes visited by other agents based on FoV detection
                 robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
 
@@ -382,18 +356,6 @@ class MultiAgentWorker:
         heading_rad = np.radians(heading)
         return np.cos(heading_rad) * length, np.sin(heading_rad) * length
 
-    def merge_agent_beliefs(self):
-        """Merge per-agent belief maps while preserving occupied cells."""
-        stacked_beliefs = np.stack([self.agent_beliefs[j] for j in range(self.n_agents)], axis=0)
-        merged_belief = np.full_like(stacked_beliefs[0], UNKNOWN)
-
-        free_seen = np.any(stacked_beliefs == FREE, axis=0)
-        occupied_seen = np.any(stacked_beliefs == OCCUPIED, axis=0)
-
-        merged_belief[free_seen] = FREE
-        merged_belief[occupied_seen] = OCCUPIED
-        return merged_belief
-
     def _draw_robot_overlay(self, ax, location, heading, color, sensing_range, draw_fov=False, linewidth=1.5):
         dx, dy = self.heading_to_vector(heading, length=sensing_range)
         arrow = FancyArrowPatch(
@@ -436,7 +398,6 @@ class MultiAgentWorker:
         color_list = ['tab:red', 'tab:blue', 'tab:green', 'goldenrod', 'tab:purple', 'tab:brown']
         color_name = ['Red', 'Blue', 'Green', 'Yellow']
         sensing_range = self.sensor_range / CELL_SIZE
-        total_free = max(np.sum(self.env.ground_truth == FREE), 1)
         plot_robot_locations = self._locations_to_plot_cells(robot_locations, self.env.belief_info, locations_are_cells)
 
         merged_ax = fig.add_subplot(gs[0, 0])
@@ -572,9 +533,10 @@ class MultiAgentWorker:
         summary_ax.text(0.86, 0.24, 'Nodes', fontsize=8.6, fontweight='bold', color='#6a6a6a', va='center', ha='right')
         row_y = 0.185
         for robot in self.robot_list:
-            agent_map = self.agent_beliefs[robot.id]
-            agent_explored_rate = np.sum(agent_map == FREE) / total_free
             num_nodes = 0 if robot.node_coords is None else len(robot.node_coords)
+            agent_map = self.env.agent_beliefs[robot.id]
+            total_free = np.sum(self.env.ground_truth == FREE)
+            agent_explored_rate = np.sum(agent_map == FREE) / total_free if total_free > 0 else 0
             summary_ax.plot([0.08, 0.13], [row_y, row_y], color=color_list[robot.id], linewidth=3.5, solid_capstyle='round')
             summary_ax.text(
                 0.17,
@@ -610,8 +572,8 @@ class MultiAgentWorker:
         for robot in self.robot_list:
             agent_ax = fig.add_subplot(gs[1, robot.id])
             c = color_list[robot.id]
-            agent_map = self.agent_beliefs[robot.id]
-            agent_map_info = self.agent_belief_infos[robot.id]
+            agent_map_info = self.env.get_agent_map_info(robot.id)
+            agent_map = agent_map_info.map
             agent_ax.imshow(agent_map, cmap='gray', interpolation='nearest', vmin=OCCUPIED, vmax=FREE)
             agent_ax.axis('off')
             agent_ax.set_xlim(xlim[0], xlim[1])
@@ -623,8 +585,8 @@ class MultiAgentWorker:
             trajectory_x.append(robot_location[0])
             trajectory_y.append(robot_location[1])
             agent_ax.plot(
-                (np.array(trajectory_x) - agent_map_info.map_origin_x) / agent_map_info.cell_size,
-                (np.array(trajectory_y) - agent_map_info.map_origin_y) / agent_map_info.cell_size,
+                (np.array(trajectory_x) - self.env.belief_info.map_origin_x) / self.env.belief_info.cell_size,
+                (np.array(trajectory_y) - self.env.belief_info.map_origin_y) / self.env.belief_info.cell_size,
                 c,
                 linewidth=1.5,
                 alpha=0.9,
@@ -656,8 +618,9 @@ class MultiAgentWorker:
             heading = robot_headings[robot.id]
             self._draw_robot_overlay(agent_ax, location, heading, c, sensing_range, draw_fov=True, linewidth=1.2)
 
-            agent_explored_rate = np.sum(agent_map == FREE) / total_free
             num_nodes = 0 if robot.node_coords is None else len(robot.node_coords)
+            total_free = np.sum(self.env.ground_truth == FREE)
+            agent_explored_rate = np.sum(agent_map == FREE) / total_free if total_free > 0 else 0
             agent_ax.set_title(
                 f'{color_name[robot.id]} Belief\nExplored: {agent_explored_rate:.1%}  Nodes: {num_nodes}',
                 fontsize=9,
@@ -669,11 +632,11 @@ class MultiAgentWorker:
             empty_ax = fig.add_subplot(gs[1, empty_col])
             empty_ax.axis('off')
 
-        robot_headings = [f"{color_name[robot.id]} {robot.heading:.0f} deg" for robot in self.robot_list]
+        robot_headings_str = [f"{color_name[robot.id]} {robot.heading:.0f} deg" for robot in self.robot_list]
         fig.suptitle(
             'Experiment ID: {}\nRobot headings: {}'.format(
                 FOLDER_NAME,
-                ', '.join(robot_headings)
+                ', '.join(robot_headings_str)
             ),
             fontweight='bold',
             fontsize=11,
