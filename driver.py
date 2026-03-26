@@ -72,7 +72,7 @@ def main():
 
     # target entropy for SAC (discrete action space)
     action_dim = K_SIZE * NUM_HEADING_CANDIDATES
-    entropy_target = 0.3 * np.log(action_dim)
+    entropy_target = 0.5 * np.log(action_dim)
     log_alpha_min = -8.0
     log_alpha_max = 2.0
 
@@ -213,7 +213,7 @@ def main():
                 indices = range(len(experience_buffer[0]))
 
                 # training for n times each step
-                for j in range(16):
+                for j in range(4):
                     # randomly sample a batch data
                     sample_indices = random.sample(indices, BATCH_SIZE)
                     rollouts = []
@@ -412,7 +412,7 @@ def main():
                                                                  norm_type=2)
                     global_q_net2_optimizer.step()
 
-                    entropy = -(logp.exp() * logp).sum(dim=-1)
+                    entropy = (logp.exp() * logp).sum(dim=-1)
                     alpha_loss = -(log_alpha * (entropy.detach() - entropy_target)).mean()
 
                     log_alpha_optimizer.zero_grad()

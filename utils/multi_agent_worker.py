@@ -32,8 +32,7 @@ from utils.utils import *
 from utils.node_manager import NodeManager
 from utils.ground_truth_node_manager import GroundTruthNodeManager
 from utils.model import PolicyNet
-from utils.motion_model import compute_allowable_heading
-from utils.sensor import sensor_work_heading
+from utils.motion_model import compute_allowable_heading  
 
 if not os.path.exists(gifs_path):
     os.makedirs(gifs_path)
@@ -82,19 +81,6 @@ class MultiAgentWorker:
                 0.0
             ))
 
-        # Per-agent belief maps: each agent maintains its own independent partial map.
-        # Seeded from env.robot_belief (which has the initial sensor scan already applied).
-        self.agent_beliefs = {}
-        self.agent_belief_infos = {}
-        for i in range(self.n_agents):
-            self.agent_beliefs[i] = self.env.robot_belief.copy()
-            self.agent_belief_infos[i] = MapInfo(
-                self.agent_beliefs[i],
-                self.env.belief_info.map_origin_x,
-                self.env.belief_info.map_origin_y,
-                self.env.belief_info.cell_size
-            )
-
     def run_episode(self):
         done = False
         for robot in self.robot_list:
@@ -108,12 +94,6 @@ class MultiAgentWorker:
             dist_list = []
             next_node_index_list = []
             next_heading_index_list = []
-            # Collect observations and actions into temp dicts — do NOT save to
-            # episode_buffer yet, because collision resolution may redirect a robot
-            # to a different node after the policy has already selected its action.
-            temp_observations = {}
-            temp_gt_observations = {}
-            temp_action_indices = {}
             for robot in self.robot_list:
                 observation = robot.get_observation(
                     robot_locations=self.env.robot_locations,
@@ -121,11 +101,12 @@ class MultiAgentWorker:
                 )
                 ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
 
+                robot.save_observation(observation)
+                robot.save_ground_truth_observation(ground_truth_observation)
+
                 next_location, next_node_index, action_index, next_heading_index = robot.select_next_waypoint(observation)
 
-                temp_observations[robot.id] = observation
-                temp_gt_observations[robot.id] = ground_truth_observation
-                temp_action_indices[robot.id] = action_index
+                robot.save_action(action_index)
 
                 selected_locations.append(next_location)
                 dist_list.append(np.linalg.norm(next_location - robot.location))
@@ -133,9 +114,6 @@ class MultiAgentWorker:
                 next_heading_index_list.append(next_heading_index)
 
             selected_locations = np.array(selected_locations).reshape(-1, 2)
-            # Snapshot original (policy-selected) locations before collision resolution
-            original_locations = selected_locations.copy()
-
             arriving_sequence = np.argsort(np.array(dist_list))
             selected_locations_in_arriving_sequence = np.array(selected_locations)[arriving_sequence]
 
@@ -155,19 +133,6 @@ class MultiAgentWorker:
 
                     selected_locations_in_arriving_sequence[j] = selected_location
                     selected_locations[id] = selected_location
-
-            # After collision resolution: robots whose location changed have an
-            # action/executed-location mismatch. Skip storing those transitions.
-            redirected = {
-                robot.id
-                for robot in self.robot_list
-                if not np.allclose(original_locations[robot.id], selected_locations[robot.id])
-            }
-            for robot in self.robot_list:
-                if robot.id not in redirected:
-                    robot.save_observation(temp_observations[robot.id])
-                    robot.save_ground_truth_observation(temp_gt_observations[robot.id])
-                    robot.save_action(temp_action_indices[robot.id])
 
 
             # Compute simulation data
@@ -194,9 +159,6 @@ class MultiAgentWorker:
 
                 robot.update_heading(final_heading)
 
-            # Snapshot per-agent beliefs before this planning step (for per-agent credit)
-            belief_before = {robot.id: self.agent_beliefs[robot.id].copy() for robot in self.robot_list}
-
             for l in range(self.sim_steps):
                 robot_location_sim_step = []
                 robot_heading_sim_step = []
@@ -204,7 +166,7 @@ class MultiAgentWorker:
                     self.env.update_robot_belief(q, robot_locations_sim[q][l], robot_headings_sim[q][l])
                     robot_location_sim_step.append(robot_locations_sim[q][l])
                     robot_heading_sim_step.append(robot_headings_sim[q][l])
-
+                
                 if self.save_image:
                     num_frame = i * self.sim_steps + l
                     self.plot_local_env_sim(num_frame, robot_location_sim_step, robot_heading_sim_step, locations_are_cells=True)
@@ -257,16 +219,18 @@ class MultiAgentWorker:
                 else:
                     angle_reward = np.cos(np.radians(robot.heading - preferred_angle))
 
-                # Calculate overlap penalty for this agent; anneal by explored_rate so
-                # agents are not penalised for sharing corridors early in the episode.
+                trajectory_angle = np.degrees(np.arctan2(next_location[1] - robot.location[1],
+                                               next_location[0] - robot.location[0]) % (2 * np.pi))
+                trajectory_reward = np.cos(np.radians(robot.heading - trajectory_angle))
+
+                # Calculate overlap penalty for this agent
                 overlap_penalty = robot.calculate_overlap_reward(
                     next_location,
                     selected_locations,
                     robot_headings_list
                 )
-                overlap_penalty *= min(1.0, self.env.explored_rate * 2.0)
 
-                reward_list.append(utility_reward + angle_reward - overlap_penalty)
+                reward_list.append(utility_reward + trajectory_reward - overlap_penalty)  
 
                 robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
                 # Mark nodes visited by other agents based on FoV detection
@@ -281,21 +245,13 @@ class MultiAgentWorker:
             if self.env.explored_rate >= SUCCESS_THRESHOLD:
                 done = True
 
-            # Per-agent exploration credit: normalised by the expected FOV sensing area.
-            cell_norm = max(np.pi * (self.sensor_range / CELL_SIZE) ** 2 * (self.fov / 360), 1.0)
+            team_reward = self.env.calculate_team_reward() - 0.5
+            if done:
+                team_reward += 10
 
             curr_node_indices = np.array([robot.current_index for robot in self.robot_list])
             for robot, reward in zip(self.robot_list, reward_list):
-                # Skip reward/done saves for robots whose action was overridden by
-                # collision resolution — their episode_buffer has no matching obs entry.
-                if robot.id in redirected:
-                    robot.update_planning_state()
-                    continue
-                exploration_credit = per_agent_new_cells[robot.id] / cell_norm
-                terminal_bonus = 0.0
-                if done:
-                    terminal_bonus = 10.0 * self.env.explored_rate
-                robot.save_reward(reward + exploration_credit + terminal_bonus)
+                robot.save_reward(reward + team_reward)
                 # Only save all agent indices when communication is enabled
                 # When USE_COMMUNICATION=False, agents rely solely on FOV-detected trajectories
                 if USE_COMMUNICATION:

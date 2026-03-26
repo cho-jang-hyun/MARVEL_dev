@@ -184,6 +184,7 @@ class Agent:
         node_utility = self.utility.reshape(-1, 1)
         node_guidepost = self.guidepost.reshape(-1, 1)
         node_occupancy = self.occupancy.reshape(-1, 1)
+        node_highest_utility_angles = self.highest_utility_angles.reshape(-1, 1)
         node_frontier_distribution = self.frontier_distribution.reshape(-1, self.num_angles_bin)
         node_heading_visited = self.heading_visited.reshape(-1, self.num_angles_bin)
         node_visited_by_others = self.visited_by_others.reshape(-1, 1)
@@ -197,8 +198,10 @@ class Agent:
                                              node_coords[:, 1].reshape(-1, 1) - current_node_coords[1]),
                                            axis=-1) / UPDATING_MAP_SIZE / 2
         node_utility = node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
+        node_highest_utility_angles = node_highest_utility_angles / 360
         node_frontier_distribution = node_frontier_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
-        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_visited_by_others), axis=1)
+        # visited_by_others is already 0 or 1, no normalization needed
+        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others), axis=1)
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
         all_node_frontier_distribution = torch.Tensor(node_frontier_distribution).unsqueeze(0).to(self.device)
         node_heading_visited = torch.Tensor(node_heading_visited).unsqueeze(0).to(self.device)
@@ -526,10 +529,9 @@ class Agent:
             dx = x - self.location[0]
             dy = y - self.location[1]
 
-            # Normalize by sensor range: detected agents are always within SENSOR_RANGE,
-            # so this maps them to [-1, 1] and is more informative than the map-scale norm.
-            dx_norm = np.clip(dx / self.sensor_range, -1.0, 1.0)
-            dy_norm = np.clip(dy / self.sensor_range, -1.0, 1.0)
+            # Normalize coordinates to roughly [-1, 1]
+            dx_norm = np.clip(dx / (UPDATING_MAP_SIZE / 2), -1.0, 1.0)
+            dy_norm = np.clip(dy / (UPDATING_MAP_SIZE / 2), -1.0, 1.0)
 
             # Encode heading as periodic features to avoid 0/360 discontinuity
             heading_rad = np.radians(heading)
@@ -552,13 +554,13 @@ class Agent:
 
     def mark_nodes_visited_by_others(self, robot_locations, trajectory_buffer):
         """
-        Update the visited_by_others signal for all nodes in the local graph.
+        Mark nodes as visited by other agents based on observed trajectories in FoV.
 
-        Each planning step:
-        1. All existing marks decay by VISITED_DECAY; previously-visited nodes are
-           held at VISITED_MIN_FLOOR so the "was visited" signal is never lost.
-        2. Nodes corresponding to currently-tracked teammate positions are refreshed
-           to 1.0.
+        This method:
+        1. Detects other robots in FoV using get_robots_in_fov()
+        2. For each detected robot, retrieves its trajectory history
+        3. Identifies which nodes the detected robots have visited
+        4. Marks those nodes with visited_by_others = 1
 
         Args:
             robot_locations (np.ndarray): Array of all robot locations, shape (n_agents, 2)
@@ -569,17 +571,11 @@ class Agent:
         """
         if not hasattr(self, 'observed_trajectory_buffer'):
             return
-
-        # Step 1: Decay all existing marks; hold previously-visited nodes at floor
-        for quad_node in self.node_manager.nodes_dict:
-            v = quad_node.data.visited_by_others * VISITED_DECAY
-            if v > 0:
-                v = max(VISITED_MIN_FLOOR, v)
-            quad_node.data.visited_by_others = v
-
-        # Step 2: Refresh detected-teammate positions to 1.0
+            
         for robot_id, trajectory_queue in self.observed_trajectory_buffer.items():
-            for step in list(trajectory_queue):
+            trajectory = list(trajectory_queue)
+
+            for step in trajectory:
                 x, y, heading, velocity = step
 
                 # Skip zero-padded entries
@@ -593,8 +589,9 @@ class Agent:
 
                 if len(nodes_nearby) > 0:
                     nearest_node = nodes_nearby[0]
+                    # Check distance threshold to ensure it's actually at this node
                     if np.linalg.norm(nearest_node.data.coords - position) < NODE_RESOLUTION:
-                        nearest_node.data.visited_by_others = 1.0
+                        nearest_node.data.visited_by_others = 1
 
     def calculate_overlap_reward(self, current_robot_location, all_robots_locations, robot_headings_list):
         ## Robot heading list in degrees

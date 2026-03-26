@@ -141,6 +141,7 @@ class GroundTruthNodeManager:
         node_explored_sign = explored_sign.reshape(-1, 1)
         node_guidepost = guidepost.reshape(-1, 1)
         node_occupancy = occupancy.reshape(-1, 1)
+        node_highest_utility_angles = highest_utility_angles.reshape(-1, 1)
         node_frontiers_distribution = frontiers_distribution.reshape(-1, self.num_angles_bin)
         node_heading_visited = heading_visited.reshape(-1, self.num_angles_bin)
         node_visited_by_others = visited_by_others.reshape(-1, 1)
@@ -156,7 +157,9 @@ class GroundTruthNodeManager:
 
         node_utility = node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
         node_frontiers_distribution = node_frontiers_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
-        node_inputs = np.concatenate((node_coords, node_utility, node_guidepost, node_occupancy, node_visited_by_others, node_explored_sign), axis=1)
+        node_highest_utility_angles = node_highest_utility_angles / 360
+        # visited_by_others is already 0 or 1, no normalization needed
+        node_inputs = np.concatenate((node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_explored_sign), axis=1)
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
 
         assert node_coords.shape[0] < NODE_PADDING_SIZE, print(node_coords.shape[0], NODE_PADDING_SIZE)

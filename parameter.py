@@ -72,15 +72,15 @@ MINIMUM_BUFFER_SIZE = 2000
 BATCH_SIZE = 128
 LR = 1e-5
 GAMMA = 0.99
-TAU = 0.005  # Soft update coefficient for target network (0.001 ~ 0.01)
-NUM_META_AGENT = 15
+TAU = 0.001  # Soft update coefficient for target network (0.001 ~ 0.01)
+NUM_META_AGENT = 18
 
 # Gradient clipping parameters
 GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5.0)
 GRAD_CLIP_Q = 10.0      # Max gradient norm for Q networks (typical: 1.0 ~ 10.0)
 
 # network parameters
-NODE_INPUT_DIM = 6  # removed highest_utility_angle (redundant with frontier_distribution)
+NODE_INPUT_DIM = 7  # Changed from 6: added visited_by_others feature
 EMBEDDING_DIM = 128
 
 # Trajectory tracking parameters
@@ -100,9 +100,6 @@ USE_GPU = False  # Workers use CPU to avoid GPU memory conflict with Ray
 USE_GPU_GLOBAL = True  # Main training process uses GPU
 NUM_GPU = 1  # Number of GPUs for DataParallel in main process
 GPU_ID = 0  # Which GPU to use (0 or 1). Set to None to use all available GPUs
-
-VISITED_DECAY = 0.97      # per-planning-step decay factor for visited_by_others
-VISITED_MIN_FLOOR = 0.05  # minimum non-zero value once a node has been visited
 
 USE_WANDB = False
 TRAIN_ALGO = 3

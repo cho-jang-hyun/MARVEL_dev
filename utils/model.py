@@ -222,32 +222,6 @@ class Decoder(nn.Module):
         return tgt, w
 
 
-class SpatialPositionalEncoding(nn.Module):
-    """
-    2D Fourier spatial positional encoding for graph nodes.
-
-    Takes the (dx, dy) normalized coordinates from node_inputs and encodes them
-    with multi-frequency sinusoids, giving the transformer explicit geometric
-    priors beyond what a single linear layer can capture.
-    """
-    def __init__(self, d_model, num_freq_bands=4):
-        super(SpatialPositionalEncoding, self).__init__()
-        freqs = (2.0 ** torch.arange(num_freq_bands).float()) * math.pi
-        self.register_buffer('freqs', freqs)
-        # sin + cos for x and y = num_freq_bands * 4 raw features → d_model
-        self.projection = nn.Linear(num_freq_bands * 4, d_model)
-
-    def forward(self, xy_coords):
-        # xy_coords: [batch, n_nodes, 2]
-        x = xy_coords[..., 0:1]  # [batch, n_nodes, 1]
-        y = xy_coords[..., 1:2]
-        x_scaled = x * self.freqs   # [batch, n_nodes, num_freq_bands]
-        y_scaled = y * self.freqs
-        pe = torch.cat([torch.sin(x_scaled), torch.cos(x_scaled),
-                        torch.sin(y_scaled), torch.cos(y_scaled)], dim=-1)
-        return self.projection(pe)  # [batch, n_nodes, d_model]
-
-
 class PositionalEncoding(nn.Module):
     """Positional encoding for temporal sequences."""
     def __init__(self, d_model, max_len=100):
@@ -418,7 +392,6 @@ class PolicyNet(nn.Module):
 
         # Graph Encoder
         self.initial_embedding = nn.Linear(node_dim, embedding_dim)
-        self.spatial_pe = SpatialPositionalEncoding(embedding_dim)
         self.encoder = Encoder(embedding_dim=embedding_dim, n_head=4, n_layer=6, gated_attention=gated_attention)
 
         # Local frontiers distribution encoder
@@ -469,7 +442,6 @@ class PolicyNet(nn.Module):
 
     def encode_graph(self, node_inputs, node_padding_mask, edge_mask, frontier_distribution):
         node_feature = self.initial_embedding(node_inputs)
-        node_feature = node_feature + self.spatial_pe(node_inputs[:, :, :2])
         enhanced_node_feature = self.encoder(src=node_feature,
                                                          key_padding_mask=node_padding_mask,
                                                          attn_mask=edge_mask)
@@ -497,29 +469,38 @@ class PolicyNet(nn.Module):
         batch_size, num_nodes, embedding_dim = enhanced_node_feature.shape
         _, max_agents, seq_len = trajectory_node_indices.shape
 
-        # Build validity mask: True where index is valid and agent is not padded
-        valid_mask = (trajectory_node_indices >= 0) & (~trajectory_mask.unsqueeze(-1))
-        # [batch, max_agents, seq_len]
+        # Initialize output tensor
+        trajectory_node_features = torch.zeros(
+            batch_size, max_agents, seq_len, embedding_dim,
+            dtype=enhanced_node_feature.dtype,
+            device=enhanced_node_feature.device
+        )
 
-        # Clamp invalid indices to 0 so gather never goes out of bounds;
-        # invalid positions will be zeroed out by valid_mask afterward.
-        clamped_indices = trajectory_node_indices.clamp(min=0)  # [B, A, T]
+        # Process each batch
+        for b in range(batch_size):
+            for a in range(max_agents):
+                # Skip if this agent is padded
+                if trajectory_mask[b, a]:
+                    continue
 
-        # Flatten agent and time dims for a single gather call
-        flat_indices = clamped_indices.view(batch_size, max_agents * seq_len, 1)
-        flat_indices = flat_indices.expand(-1, -1, embedding_dim)  # [B, A*T, D]
+                for t in range(seq_len):
+                    node_idx = trajectory_node_indices[b, a, t].item()
 
-        # Gather all node embeddings at once — fully on-device, no Python loops
-        traj_flat = torch.gather(enhanced_node_feature, 1, flat_indices)  # [B, A*T, D]
-        traj_flat = traj_flat.view(batch_size, max_agents, seq_len, embedding_dim)
+                    # Skip if invalid node index
+                    if node_idx < 0 or node_idx >= num_nodes:
+                        continue
 
-        # Zero out positions that correspond to invalid indices or padded agents
-        traj_flat = traj_flat * valid_mask.unsqueeze(-1).float()
+                    # Extract node embedding
+                    trajectory_node_features[b, a, t] = enhanced_node_feature[b, node_idx]
 
         # Apply FFN projection
+        # Reshape to [batch * max_agents * seq_len, embedding_dim]
+        traj_flat = trajectory_node_features.reshape(-1, embedding_dim)
         traj_projected = self.trajectory_node_ffn(traj_flat)
+        # Reshape back to [batch, max_agents, seq_len, embedding_dim]
+        trajectory_node_features = traj_projected.reshape(batch_size, max_agents, seq_len, embedding_dim)
 
-        return traj_projected
+        return trajectory_node_features
 
     def decode_state(self, enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding=None,
                      trajectory_node_features=None, trajectory_mask=None, trajectory_node_indices=None):
@@ -692,7 +673,6 @@ class QNet(nn.Module):
         else:
             # Graph embedding
             self.initial_embedding = nn.Linear(node_dim, embedding_dim)
-        self.spatial_pe = SpatialPositionalEncoding(embedding_dim)
 
         if train_algo in (1, 3):
             self.agent_decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1, gated_attention=gated_attention)
@@ -705,11 +685,10 @@ class QNet(nn.Module):
 
     def encode_graph(self, node_inputs, node_padding_mask, edge_mask, frontier_distribution):
         node_feature = self.initial_embedding(node_inputs)
-        node_feature = node_feature + self.spatial_pe(node_inputs[:, :, :2])
         enhanced_node_feature = self.encoder(src=node_feature,
                                                          key_padding_mask=node_padding_mask,
                                                          attn_mask=edge_mask)
-
+        
         frontier_distribution = frontier_distribution.permute(0, 2, 1)
         frontiers_feature = self.frontiers_embedding(frontier_distribution)
         frontiers_feature = frontiers_feature.permute(0, 2, 1)
@@ -733,29 +712,38 @@ class QNet(nn.Module):
         batch_size, num_nodes, embedding_dim = enhanced_node_feature.shape
         _, max_agents, seq_len = trajectory_node_indices.shape
 
-        # Build validity mask: True where index is valid and agent is not padded
-        valid_mask = (trajectory_node_indices >= 0) & (~trajectory_mask.unsqueeze(-1))
-        # [batch, max_agents, seq_len]
+        # Initialize output tensor
+        trajectory_node_features = torch.zeros(
+            batch_size, max_agents, seq_len, embedding_dim,
+            dtype=enhanced_node_feature.dtype,
+            device=enhanced_node_feature.device
+        )
 
-        # Clamp invalid indices to 0 so gather never goes out of bounds;
-        # invalid positions will be zeroed out by valid_mask afterward.
-        clamped_indices = trajectory_node_indices.clamp(min=0)  # [B, A, T]
+        # Process each batch
+        for b in range(batch_size):
+            for a in range(max_agents):
+                # Skip if this agent is padded
+                if trajectory_mask[b, a]:
+                    continue
 
-        # Flatten agent and time dims for a single gather call
-        flat_indices = clamped_indices.view(batch_size, max_agents * seq_len, 1)
-        flat_indices = flat_indices.expand(-1, -1, embedding_dim)  # [B, A*T, D]
+                for t in range(seq_len):
+                    node_idx = trajectory_node_indices[b, a, t].item()
 
-        # Gather all node embeddings at once — fully on-device, no Python loops
-        traj_flat = torch.gather(enhanced_node_feature, 1, flat_indices)  # [B, A*T, D]
-        traj_flat = traj_flat.view(batch_size, max_agents, seq_len, embedding_dim)
+                    # Skip if invalid node index
+                    if node_idx < 0 or node_idx >= num_nodes:
+                        continue
 
-        # Zero out positions that correspond to invalid indices or padded agents
-        traj_flat = traj_flat * valid_mask.unsqueeze(-1).float()
+                    # Extract node embedding
+                    trajectory_node_features[b, a, t] = enhanced_node_feature[b, node_idx]
 
         # Apply FFN projection
+        # Reshape to [batch * max_agents * seq_len, embedding_dim]
+        traj_flat = trajectory_node_features.reshape(-1, embedding_dim)
         traj_projected = self.trajectory_node_ffn(traj_flat)
+        # Reshape back to [batch, max_agents, seq_len, embedding_dim]
+        trajectory_node_features = traj_projected.reshape(batch_size, max_agents, seq_len, embedding_dim)
 
-        return traj_projected
+        return trajectory_node_features
 
     def decode_state(self, enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding=None,
                      trajectory_node_features=None, trajectory_mask=None, trajectory_node_indices=None):
