@@ -23,7 +23,7 @@ Attributes:
 """
 import matplotlib.pyplot as plt
 from copy import deepcopy
-from matplotlib.patches import Wedge, FancyArrowPatch
+from matplotlib.patches import Wedge, FancyArrowPatch, Rectangle
 from collections import deque
 
 from utils.env import Env
@@ -84,7 +84,7 @@ class MultiAgentWorker:
     def run_episode(self):
         done = False
         for robot in self.robot_list:
-            robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
+            robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
         for robot in self.robot_list:
             robot.update_planning_state()
 
@@ -163,13 +163,13 @@ class MultiAgentWorker:
                 robot_location_sim_step = []
                 robot_heading_sim_step = []
                 for q in range(self.n_agents):
-                    self.env.update_robot_belief(robot_locations_sim[q][l], robot_headings_sim[q][l])
+                    self.env.update_robot_belief(q, robot_locations_sim[q][l], robot_headings_sim[q][l])
                     robot_location_sim_step.append(robot_locations_sim[q][l])
                     robot_heading_sim_step.append(robot_headings_sim[q][l])
                 
                 if self.save_image:
                     num_frame = i * self.sim_steps + l
-                    self.plot_local_env_sim(num_frame, robot_location_sim_step, robot_heading_sim_step)
+                    self.plot_local_env_sim(num_frame, robot_location_sim_step, robot_heading_sim_step, locations_are_cells=True)
 
             # Apply all final positions before reward computation to avoid order-dependent rewards.
             for robot, next_location in zip(self.robot_list, selected_locations):
@@ -232,7 +232,7 @@ class MultiAgentWorker:
 
                 reward_list.append(utility_reward + trajectory_reward - overlap_penalty)  
 
-                robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
+                robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
                 # Mark nodes visited by other agents based on FoV detection
                 robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
 
@@ -312,94 +312,292 @@ class MultiAgentWorker:
         heading_rad = np.radians(heading)
         return np.cos(heading_rad) * length, np.sin(heading_rad) * length
 
-    def plot_local_env_sim(self, step, robot_locations, robot_headings):
+    def _draw_robot_overlay(self, ax, location, heading, color, sensing_range, draw_fov=False, linewidth=1.5):
+        dx, dy = self.heading_to_vector(heading, length=sensing_range)
+        arrow = FancyArrowPatch(
+            (location[0], location[1]),
+            (location[0] + dx / 1.25, location[1] + dy / 1.25),
+            mutation_scale=10,
+            color=color,
+            arrowstyle='-|>',
+            linewidth=linewidth,
+            zorder=12,
+        )
+        ax.add_artist(arrow)
+        ax.plot(location[0], location[1], 'o', color=color, markersize=5, zorder=13)
+
+        if draw_fov:
+            cone = Wedge(
+                center=(location[0], location[1]),
+                r=self.sensor_range / CELL_SIZE,
+                theta1=(heading - self.fov / 2),
+                theta2=(heading + self.fov / 2),
+                facecolor=color,
+                alpha=0.5,
+                linewidth=1.2,
+                edgecolor=color,
+                zorder=11,
+            )
+            ax.add_artist(cone)
+
+    def _locations_to_plot_cells(self, robot_locations, map_info, locations_are_cells):
+        robot_locations = np.asarray(robot_locations)
+        if locations_are_cells:
+            return robot_locations
+        return get_cell_position_from_coords(robot_locations, map_info)
+
+    def plot_local_env_sim(self, step, robot_locations, robot_headings, locations_are_cells=False):
         plt.switch_backend('agg')
-        plt.figure(figsize=(6, 2.5))
-        color_list = ['r', 'b', 'g', 'y']
+        n_cols = max(4, self.n_agents)
+        fig = plt.figure(figsize=(15, 7.5), constrained_layout=True)
+        gs = fig.add_gridspec(2, n_cols, height_ratios=[1.0, 1.05])
+        color_list = ['tab:red', 'tab:blue', 'tab:green', 'goldenrod', 'tab:purple', 'tab:brown']
         color_name = ['Red', 'Blue', 'Green', 'Yellow']
         sensing_range = self.sensor_range / CELL_SIZE
+        plot_robot_locations = self._locations_to_plot_cells(robot_locations, self.env.belief_info, locations_are_cells)
 
-        plt.subplot(1, 3, 1)
-        plt.imshow(self.env.robot_belief, cmap='gray')
-        plt.axis('off')
-        xlim = plt.gca().get_xlim()
-        ylim = plt.gca().get_ylim()
-        plt.xlim(xlim[0], xlim[1])
-        plt.ylim(ylim[0], ylim[1])
-          
-        for robot in self.robot_list:
+        merged_ax = fig.add_subplot(gs[0, 0])
+        merged_ax.imshow(self.env.robot_belief, cmap='gray', interpolation='nearest', vmin=OCCUPIED, vmax=FREE)
+        merged_ax.axis('off')
+        merged_ax.set_title('Merged Team Belief', fontsize=10, fontweight='bold')
+        xlim = merged_ax.get_xlim()
+        ylim = merged_ax.get_ylim()
+        merged_ax.set_xlim(xlim[0], xlim[1])
+        merged_ax.set_ylim(ylim[0], ylim[1])
+
+        for robot, location, heading in zip(self.robot_list, plot_robot_locations, robot_headings):
             c = color_list[robot.id]
-            # Plot nodes for all robots
-            nodes = get_cell_position_from_coords(robot.node_coords, robot.map_info)
-            plt.scatter(nodes[:, 0], nodes[:, 1], c=c, s=8, zorder=2, alpha=0.7)
-            for i, (x, y) in enumerate(nodes):
-                plt.text(x-3, y-3, f'{robot.utility[i]:.0f}', ha='center', va='bottom', fontsize=3, color=c, zorder=3)
-                   
-        # Plot frontiers
-        global_frontiers = get_frontier_in_map(self.env.belief_info)
-        if len(global_frontiers) != 0:
-            frontiers_cell = get_cell_position_from_coords(np.array(list(global_frontiers)), self.env.belief_info) #shape is (2,)
-            if len(global_frontiers) == 1:
-                frontiers_cell = frontiers_cell.reshape(1,2)
-            plt.scatter(frontiers_cell[:, 0], frontiers_cell[:, 1], s=1, c='r')       
+            self._draw_robot_overlay(merged_ax, location, heading, c, sensing_range, draw_fov=True, linewidth=1.2)
 
-        plt.subplot(1, 3, 2)
-        plt.imshow(self.env.robot_belief, cmap='gray')
-        plt.axis('off')
-        plt.xlim(xlim[0], xlim[1])
-        plt.ylim(ylim[0], ylim[1])
-        color_list = ['r', 'b', 'g', 'y']
+        fov_ax = fig.add_subplot(gs[0, 1])
+        fov_ax.imshow(self.env.robot_belief, cmap='gray', interpolation='nearest', vmin=OCCUPIED, vmax=FREE)
+        fov_ax.axis('off')
+        fov_ax.set_xlim(xlim[0], xlim[1])
+        fov_ax.set_ylim(ylim[0], ylim[1])
+        fov_ax.set_title('Team Motion + FoV', fontsize=10, fontweight='bold')
 
-        for i, (robot, location, heading) in enumerate(zip(self.robot_list, robot_locations, robot_headings)):
+        for robot, location, heading in zip(self.robot_list, plot_robot_locations, robot_headings):
             c = color_list[robot.id]
-            dx, dy = self.heading_to_vector(heading, length=sensing_range)
-            arrow = FancyArrowPatch((location[0], location[1]), (location[0] + dx/1.25, location[1] + dy/1.25),
-                                    mutation_scale=10,
-                                    color=c,
-                                    arrowstyle='-|>')
-            plt.gca().add_artist(arrow)
-            plt.text(location[0] + 5, location[1] + 5, f'{heading:.0f}°', color=c, fontsize=6, ha='left', va='center', zorder=16)
-
             robot_location = get_coords_from_cell_position(location, self.env.belief_info)
             trajectory_x = robot.trajectory_x.copy()
             trajectory_y = robot.trajectory_y.copy()
             trajectory_x.append(robot_location[0])
             trajectory_y.append(robot_location[1])
-            plt.plot((np.array(trajectory_x) - robot.map_info.map_origin_x) / robot.cell_size,
-                     (np.array(trajectory_y) - robot.map_info.map_origin_y) / robot.cell_size, c,
-                     linewidth=1.2, zorder=1)
-            
-        # Plot frontiers
-        if len(global_frontiers) != 0:
-            plt.scatter(frontiers_cell[:, 0], frontiers_cell[:, 1], s=1, c='r')
+            fov_ax.plot(
+                (np.array(trajectory_x) - self.env.belief_info.map_origin_x) / CELL_SIZE,
+                (np.array(trajectory_y) - self.env.belief_info.map_origin_y) / CELL_SIZE,
+                c,
+                linewidth=1.2,
+                zorder=1,
+            )
+            self._draw_robot_overlay(fov_ax, location, heading, c, sensing_range, draw_fov=True, linewidth=1.2)
 
-        # Ground truth data
-        plt.subplot(1, 3, 3)
-        plt.imshow(self.robot_list[0].ground_truth_node_manager.ground_truth_map_info.map, cmap='gray')
-        plt.xlim(xlim[0], xlim[1])
-        plt.ylim(ylim[0], ylim[1])
-        for i, (location, heading) in enumerate(zip(robot_locations, robot_headings)):
+        gt_ax = fig.add_subplot(gs[0, 2])
+        gt_ax.imshow(
+            self.robot_list[0].ground_truth_node_manager.ground_truth_map_info.map,
+            cmap='gray',
+            interpolation='nearest',
+            vmin=OCCUPIED,
+            vmax=FREE,
+        )
+        gt_ax.set_xlim(xlim[0], xlim[1])
+        gt_ax.set_ylim(ylim[0], ylim[1])
+        gt_ax.axis('off')
+        gt_ax.set_title('Ground Truth', fontsize=10, fontweight='bold')
+
+        for i, (location, heading) in enumerate(zip(plot_robot_locations, robot_headings)):
             c = color_list[i]
-            plt.plot(location[0], location[1], c+'o', markersize=6, zorder=5)
-            dx, dy = self.heading_to_vector(heading, length=sensing_range)
-            plt.arrow(location[0], location[1], dx, dy, head_width=5, head_length=5, fc=c, ec=c, zorder= 15)
+            self._draw_robot_overlay(gt_ax, location, heading, c, sensing_range, draw_fov=True, linewidth=1.2)
 
-            # Draw cone representing field of vision
-            cone = Wedge(center=(location[0], location[1]), r=self.sensor_range / CELL_SIZE, theta1=(heading-self.fov/2), 
-                         theta2=(heading+self.fov/2), color=c, alpha=0.5, zorder=10)
-            plt.gca().add_artist(cone)
-            nodes = get_cell_position_from_coords(self.robot_list[0].ground_truth_node_manager.ground_truth_node_coords, self.robot_list[0].ground_truth_node_manager.ground_truth_map_info)
-            plt.scatter(nodes[:, 0], nodes[:, 1], c=self.robot_list[0].ground_truth_node_manager.explored_sign, s=8, zorder=2)
+        summary_ax = fig.add_subplot(gs[0, 3])
+        summary_ax.axis('off')
+        summary_ax.set_xlim(0, 1)
+        summary_ax.set_ylim(0, 1)
 
-        plt.axis('off')
-        robot_headings = [f"{color_name[robot.id]}- {robot.heading:.0f}°" for robot in self.robot_list]
-        plt.suptitle('Explored ratio: {:.4g}  Travel distance: {:.4g}\nRobot Headings: {}'.format(
-            self.env.explored_rate,
-            max([robot.travel_dist for robot in self.robot_list]),
-            ', '.join(robot_headings)
-        ), fontweight='bold', fontsize=10)
-        plt.tight_layout()
-        plt.savefig('{}/{}_{}_samples.png'.format(gifs_path, self.global_step, step), dpi=150)
+        card = Rectangle(
+            (0.01, 0.01),
+            0.98,
+            0.98,
+            facecolor='#f7f5ef',
+            edgecolor='#c8c2b5',
+            linewidth=1.4,
+            clip_on=False,
+        )
+        summary_ax.add_patch(card)
+        summary_ax.text(0.08, 0.96, 'Legend & Stats', fontsize=11.5, fontweight='bold', color='#2b2b2b', va='top')
+
+        legend_rows = [
+            [('Occupied', '#101010'), ('Unknown', '#7f7f7f')],
+            [('Free', '#f5f5f5'), ('Utility Node', 'orange')],
+            [('Frontier', 'red'), None],
+        ]
+
+        legend_col_x = [0.08, 0.53]
+        legend_row_y = [0.84, 0.75, 0.66]
+        for row_y, row_items in zip(legend_row_y, legend_rows):
+            for col_x, item in zip(legend_col_x, row_items):
+                if item is None:
+                    continue
+                label, facecolor = item
+                swatch = Rectangle(
+                    (col_x, row_y - 0.022),
+                    0.055,
+                    0.038,
+                    facecolor=facecolor,
+                    edgecolor='#333333',
+                    linewidth=0.8,
+                )
+                summary_ax.add_patch(swatch)
+                summary_ax.text(
+                    col_x + 0.09,
+                    row_y - 0.003,
+                    label,
+                    fontsize=9.0,
+                    fontweight='bold',
+                    color='#2b2b2b',
+                    va='center',
+                )
+
+        summary_ax.plot([0.08, 0.92], [0.58, 0.58], color='#d8d2c7', linewidth=1.0)
+        summary_ax.text(0.08, 0.55, 'Episode', fontsize=10, fontweight='bold', color='#2b2b2b', va='top')
+        summary_ax.text(0.08, 0.45, 'Merged explored', fontsize=9.0, fontweight='bold', color='#4a4a4a', va='center')
+        summary_ax.text(0.08, 0.37, 'Max travel dist', fontsize=9.0, fontweight='bold', color='#4a4a4a', va='center')
+        summary_ax.text(
+            0.86,
+            0.45,
+            f'{self.env.explored_rate:.1%}',
+            fontsize=9.2,
+            fontweight='bold',
+            color='#2b2b2b',
+            va='center',
+            ha='right',
+        )
+        summary_ax.text(
+            0.86,
+            0.37,
+            f'{max([robot.travel_dist for robot in self.robot_list]):.1f}',
+            fontsize=9.2,
+            fontweight='bold',
+            color='#2b2b2b',
+            va='center',
+            ha='right',
+        )
+
+        summary_ax.plot([0.08, 0.92], [0.33, 0.33], color='#d8d2c7', linewidth=1.0)
+        summary_ax.text(0.08, 0.30, 'Per-Agent', fontsize=10, fontweight='bold', color='#2b2b2b', va='top')
+        summary_ax.text(0.62, 0.24, 'Explored', fontsize=8.6, fontweight='bold', color='#6a6a6a', va='center', ha='right')
+        summary_ax.text(0.86, 0.24, 'Nodes', fontsize=8.6, fontweight='bold', color='#6a6a6a', va='center', ha='right')
+        row_y = 0.185
+        for robot in self.robot_list:
+            num_nodes = 0 if robot.node_coords is None else len(robot.node_coords)
+            agent_map = self.env.agent_beliefs[robot.id]
+            total_free = np.sum(self.env.ground_truth == FREE)
+            agent_explored_rate = np.sum(agent_map == FREE) / total_free if total_free > 0 else 0
+            summary_ax.plot([0.08, 0.13], [row_y, row_y], color=color_list[robot.id], linewidth=3.5, solid_capstyle='round')
+            summary_ax.text(
+                0.17,
+                row_y,
+                color_name[robot.id],
+                fontsize=9.0,
+                fontweight='bold',
+                color='#2b2b2b',
+                va='center',
+            )
+            summary_ax.text(
+                0.62,
+                row_y,
+                f'{agent_explored_rate:.1%}',
+                fontsize=9.0,
+                fontweight='bold',
+                color='#2b2b2b',
+                va='center',
+                ha='right',
+            )
+            summary_ax.text(
+                0.86,
+                row_y,
+                f'{num_nodes}',
+                fontsize=9.0,
+                fontweight='bold',
+                color='#2b2b2b',
+                va='center',
+                ha='right',
+            )
+            row_y -= 0.045
+
+        for robot in self.robot_list:
+            agent_ax = fig.add_subplot(gs[1, robot.id])
+            c = color_list[robot.id]
+            agent_map_info = self.env.get_agent_map_info(robot.id)
+            agent_map = agent_map_info.map
+            agent_ax.imshow(agent_map, cmap='gray', interpolation='nearest', vmin=OCCUPIED, vmax=FREE)
+            agent_ax.axis('off')
+            agent_ax.set_xlim(xlim[0], xlim[1])
+            agent_ax.set_ylim(ylim[0], ylim[1])
+
+            robot_location = get_coords_from_cell_position(plot_robot_locations[robot.id], self.env.belief_info)
+            trajectory_x = robot.trajectory_x.copy()
+            trajectory_y = robot.trajectory_y.copy()
+            trajectory_x.append(robot_location[0])
+            trajectory_y.append(robot_location[1])
+            agent_ax.plot(
+                (np.array(trajectory_x) - self.env.belief_info.map_origin_x) / self.env.belief_info.cell_size,
+                (np.array(trajectory_y) - self.env.belief_info.map_origin_y) / self.env.belief_info.cell_size,
+                c,
+                linewidth=1.5,
+                alpha=0.9,
+                zorder=2,
+            )
+
+            if robot.node_coords is not None and len(robot.node_coords) > 0:
+                nodes = get_cell_position_from_coords(robot.node_coords, agent_map_info)
+                agent_ax.scatter(nodes[:, 0], nodes[:, 1], c=c, s=8, zorder=3, alpha=0.65)
+                utility_mask = robot.utility > 0
+                if np.any(utility_mask):
+                    agent_ax.scatter(
+                        nodes[utility_mask, 0],
+                        nodes[utility_mask, 1],
+                        c='orange',
+                        s=20,
+                        zorder=4,
+                        alpha=0.8,
+                    )
+
+            agent_frontiers = get_frontier_in_map(agent_map_info)
+            if len(agent_frontiers) != 0:
+                frontier_cells = get_cell_position_from_coords(np.array(list(agent_frontiers)), agent_map_info)
+                if len(agent_frontiers) == 1:
+                    frontier_cells = frontier_cells.reshape(1, 2)
+                agent_ax.scatter(frontier_cells[:, 0], frontier_cells[:, 1], s=2, c='r', zorder=5)
+
+            location = plot_robot_locations[robot.id]
+            heading = robot_headings[robot.id]
+            self._draw_robot_overlay(agent_ax, location, heading, c, sensing_range, draw_fov=True, linewidth=1.2)
+
+            num_nodes = 0 if robot.node_coords is None else len(robot.node_coords)
+            total_free = np.sum(self.env.ground_truth == FREE)
+            agent_explored_rate = np.sum(agent_map == FREE) / total_free if total_free > 0 else 0
+            agent_ax.set_title(
+                f'{color_name[robot.id]} Belief\nExplored: {agent_explored_rate:.1%}  Nodes: {num_nodes}',
+                fontsize=9,
+                fontweight='bold',
+                color=c,
+            )
+
+        for empty_col in range(self.n_agents, n_cols):
+            empty_ax = fig.add_subplot(gs[1, empty_col])
+            empty_ax.axis('off')
+
+        robot_headings_str = [f"{color_name[robot.id]} {robot.heading:.0f} deg" for robot in self.robot_list]
+        fig.suptitle(
+            'Experiment ID: {}\nRobot headings: {}'.format(
+                FOLDER_NAME,
+                ', '.join(robot_headings_str)
+            ),
+            fontweight='bold',
+            fontsize=11,
+        )
+        plt.savefig('{}/{}_{}_samples.png'.format(gifs_path, self.global_step, step), dpi=150, bbox_inches='tight', pad_inches=0.05)
         plt.close()
         frame = '{}/{}_{}_samples.png'.format(gifs_path, self.global_step, step)
         self.env.frame_files.append(frame)

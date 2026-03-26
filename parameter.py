@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = 'fixed_partial_map_visualization_for_test'
+FOLDER_NAME = '3_26_updated_individual_map_belief'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -69,7 +69,7 @@ UPDATING_MAP_SIZE = 4 * SENSOR_RANGE + 4 * NODE_RESOLUTION
 MAX_EPISODE_STEP = 128
 REPLAY_SIZE = 10000
 MINIMUM_BUFFER_SIZE = 2000
-BATCH_SIZE = 256
+BATCH_SIZE = 128
 LR = 1e-5
 GAMMA = 0.99
 TAU = 0.001  # Soft update coefficient for target network (0.001 ~ 0.01)

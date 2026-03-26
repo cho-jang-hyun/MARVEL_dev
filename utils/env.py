@@ -21,7 +21,7 @@ class Env:
         self.ground_truth_size = np.shape(self.ground_truth)  # cell
         self.cell_size = CELL_SIZE  # meter
 
-        self.robot_belief = np.ones(self.ground_truth_size) * 127
+        initial_belief = np.ones(self.ground_truth_size) * UNKNOWN
         self.belief_origin_x = -np.round(initial_cell[0] * self.cell_size, 1)   # meter
         self.belief_origin_y = -np.round(initial_cell[1] * self.cell_size, 1)  # meter
 
@@ -31,25 +31,29 @@ class Env:
         self.fov = fov
         self.done = False
 
-        self.robot_belief = sensor_work_heading(initial_cell, self.sensor_range / self.cell_size, self.robot_belief,
+        initial_belief = sensor_work_heading(initial_cell, self.sensor_range / self.cell_size, initial_belief,
                                         self.ground_truth, 0, 360)
-        self.belief_info = MapInfo(self.robot_belief, self.belief_origin_x, self.belief_origin_y, self.cell_size)
+        initial_belief_info = MapInfo(initial_belief, self.belief_origin_x, self.belief_origin_y, self.cell_size)
 
-        free, _ = get_updating_node_coords(np.array([0.0, 0.0]), self.belief_info)
+        free, _ = get_updating_node_coords(np.array([0.0, 0.0]), initial_belief_info)
         choice = np.random.choice(free.shape[0], N_AGENTS, replace=False)
         starts = free[choice]
         self.robot_locations = np.array(starts)
 
-        robot_cells = get_cell_position_from_coords(self.robot_locations, self.belief_info).reshape(-1, 2)
+        robot_cells = get_cell_position_from_coords(self.robot_locations, initial_belief_info).reshape(-1, 2)
         self.angles =  np.random.uniform(0, 360, size=N_AGENTS)   # Intialise the robot heading
-        # World frame, origin pointing right
-        if N_AGENTS == 1:
-            self.robot_belief = sensor_work_heading(robot_cells, self.sensor_range / self.cell_size, self.robot_belief,
-                                            self.ground_truth, self.angles[0], self.fov)
-        else:
-            for i, robot_cell in enumerate(robot_cells):
-                self.robot_belief = sensor_work_heading(robot_cell, self.sensor_range / self.cell_size, self.robot_belief,
-                                                self.ground_truth, self.angles[i], self.fov)
+        self.agent_beliefs = [np.ones(self.ground_truth_size) * UNKNOWN for _ in range(N_AGENTS)]
+        for i, robot_cell in enumerate(robot_cells):
+            self.agent_beliefs[i] = sensor_work_heading(
+                robot_cell,
+                self.sensor_range / self.cell_size,
+                self.agent_beliefs[i],
+                self.ground_truth,
+                self.angles[i],
+                self.fov,
+            )
+        self.robot_belief = self.merge_agent_beliefs()
+        self.belief_info = MapInfo(self.robot_belief, self.belief_origin_x, self.belief_origin_y, self.cell_size)
         self.old_belief = deepcopy(self.robot_belief)
         self.global_frontiers = get_frontier_in_map(self.belief_info)
 
@@ -79,9 +83,28 @@ class Env:
         self.robot_cell = np.array([round((robot_location[0] - self.belief_origin_x) / self.cell_size),
                                     round((robot_location[1] - self.belief_origin_y) / self.cell_size)])
 
-    def update_robot_belief(self, robot_cell, heading):
-        self.robot_belief = sensor_work_heading(robot_cell, round(self.sensor_range / self.cell_size), self.robot_belief,
-                                        self.ground_truth, heading, self.fov)
+    def merge_agent_beliefs(self):
+        merged_belief = np.ones(self.ground_truth_size) * UNKNOWN
+        occupied_mask = np.any(np.stack([belief == OCCUPIED for belief in self.agent_beliefs], axis=0), axis=0)
+        free_mask = np.any(np.stack([belief == FREE for belief in self.agent_beliefs], axis=0), axis=0)
+        merged_belief[free_mask] = FREE
+        merged_belief[occupied_mask] = OCCUPIED
+        return merged_belief
+
+    def get_agent_map_info(self, agent_id):
+        return MapInfo(self.agent_beliefs[agent_id], self.belief_origin_x, self.belief_origin_y, self.cell_size)
+
+    def update_robot_belief(self, agent_id, robot_cell, heading):
+        self.agent_beliefs[agent_id] = sensor_work_heading(
+            robot_cell,
+            round(self.sensor_range / self.cell_size),
+            self.agent_beliefs[agent_id],
+            self.ground_truth,
+            heading,
+            self.fov,
+        )
+        self.robot_belief = self.merge_agent_beliefs()
+        self.belief_info.update_map_info(self.robot_belief, self.belief_origin_x, self.belief_origin_y)
 
     def calculate_team_reward(self):
         reward = 0
@@ -112,7 +135,7 @@ class Env:
         self.robot_locations[agent_id] = next_waypoint
         reward = 0
         cell = get_cell_position_from_coords(next_waypoint, self.belief_info)
-        self.update_robot_belief(cell)
+        self.update_robot_belief(agent_id, cell, self.angles[agent_id])
 
         return reward
     
@@ -182,6 +205,5 @@ class Env:
         overlap_reward = (total_sensing_area - total_overlap_area) / total_sensing_area     
         
         return overlap_reward
-
 
 
