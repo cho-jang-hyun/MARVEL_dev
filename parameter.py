@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '3_26_updated_individual_map_belief'
+FOLDER_NAME = '3_26_updated_individual_map_belief_and trajectory_encoder'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -27,7 +27,7 @@ gifs_path = f'gifs/{FOLDER_NAME}' # save gif
 
 # save training data
 SUMMARY_WINDOW = 32
-LOAD_MODEL = False  # do you want to load the model trained before
+LOAD_MODEL = True  # do you want to load the model trained before
 SAVE_IMG_GAP = 1000
 NUM_EPISODE_BUFFER = 46
 

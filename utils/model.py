@@ -296,10 +296,9 @@ class TrajectoryEncoder(nn.Module):
         batch_size, max_agents, seq_len, feature_dim = detected_trajectories.shape
 
         # Build timestep validity mask (True means invalid/padded timestep).
-        if trajectory_node_indices is not None:
-            timestep_mask = trajectory_node_indices < 0
-        else:
-            timestep_mask = detected_trajectories.abs().sum(dim=-1) == 0
+        # We should not use trajectory_node_indices here because an agent's valid coordinate 
+        # might not have a corresponding node in the current agent's local graph yet.
+        timestep_mask = detected_trajectories.abs().sum(dim=-1) == 0
         timestep_mask = timestep_mask | trajectory_mask.unsqueeze(-1)
 
         # Reshape to process all agents together: [batch * max_agents, seq_len, feature_dim]

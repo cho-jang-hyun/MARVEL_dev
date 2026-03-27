@@ -230,7 +230,12 @@ class MultiAgentWorker:
                     robot_headings_list
                 )
 
-                reward_list.append(utility_reward + trajectory_reward - overlap_penalty)  
+                # Explicit penalty for redundantly following a teammate's trail
+                trajectory_history_penalty = 0.0
+                if node.visited_by_others > 0.9:
+                    trajectory_history_penalty = 0.15
+
+                reward_list.append(utility_reward + trajectory_reward - overlap_penalty - trajectory_history_penalty)  
 
                 robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
                 # Mark nodes visited by other agents based on FoV detection
@@ -551,6 +556,8 @@ class MultiAgentWorker:
 
             if robot.node_coords is not None and len(robot.node_coords) > 0:
                 nodes = get_cell_position_from_coords(robot.node_coords, agent_map_info)
+                if nodes.ndim == 1:
+                    nodes = nodes.reshape(1, 2)
                 agent_ax.scatter(nodes[:, 0], nodes[:, 1], c=c, s=8, zorder=3, alpha=0.65)
                 utility_mask = robot.utility > 0
                 if np.any(utility_mask):

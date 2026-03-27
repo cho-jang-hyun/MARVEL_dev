@@ -542,7 +542,13 @@ class Agent:
             velocity_norm = np.clip(velocity / (VELOCITY * NUM_SIM_STEPS), 0.0, 1.0)
 
             # Stack features: (dx, dy, sin(heading), cos(heading), velocity)
-            trajectories[i] = np.stack([dx_norm, dy_norm, heading_sin, heading_cos, velocity_norm], axis=1)
+            agent_traj = np.stack([dx_norm, dy_norm, heading_sin, heading_cos, velocity_norm], axis=1)
+            
+            # Zero out padded timesteps (where original x=0 and y=0)
+            valid_steps = (x != 0) | (y != 0)
+            agent_traj[~valid_steps] = 0.0
+            
+            trajectories[i] = agent_traj
             mask[i] = False  # This agent is not padded
 
         # Convert to torch tensors
@@ -591,7 +597,7 @@ class Agent:
                     nearest_node = nodes_nearby[0]
                     # Check distance threshold to ensure it's actually at this node
                     if np.linalg.norm(nearest_node.data.coords - position) < NODE_RESOLUTION:
-                        nearest_node.data.visited_by_others = 1
+                        nearest_node.data.visited_by_others = 1.0
 
     def calculate_overlap_reward(self, current_robot_location, all_robots_locations, robot_headings_list):
         ## Robot heading list in degrees

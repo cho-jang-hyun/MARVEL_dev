@@ -89,6 +89,9 @@ class NodeManager:
             frontiers_distribution.append(node.frontiers_distribution)
             heading_visited.append(node.heading_visited)
             highest_utility_angle.append(node.highest_utility_angle)
+            
+            # Decay visited_by_others over time so the graph retains a fading memory of teammates
+            node.visited_by_others = max(0.0, node.visited_by_others - 0.02)
             visited_by_others.append(node.visited_by_others)
 
             for neighbor in node.neighbor_list:
@@ -282,7 +285,7 @@ class Node:
         self.heading_visited = np.zeros(self.num_angles_bin)
         self.observable_frontiers = self.initialize_observable_frontiers(frontiers, updating_map_info)
         self.visited = 0
-        self.visited_by_others = 0  # Binary: marked when other agents visit this node
+        self.visited_by_others = 0.0  # Float: decays over time
 
         self.neighbor_matrix = -np.ones((NUM_NODE_NEIGHBORS, NUM_NODE_NEIGHBORS))
         self.neighbor_list = []
