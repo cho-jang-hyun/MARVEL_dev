@@ -31,6 +31,7 @@ from utils.agent import Agent
 from utils.utils import *
 from utils.node_manager import NodeManager
 from utils.ground_truth_node_manager import GroundTruthNodeManager
+from utils.merged_critic_manager import MergedBeliefCriticManager
 from utils.model import PolicyNet
 from utils.motion_model import compute_allowable_heading  
 
@@ -49,6 +50,15 @@ class MultiAgentWorker:
 
         self.env = Env(global_step, self.fov, self.sensor_range, plot=self.save_image)
         self.n_agents = N_AGENTS
+        self.use_merged_critic = TRAIN_ALGO == 4
+        self.merged_critic_manager = None
+        if self.use_merged_critic:
+            self.merged_critic_manager = MergedBeliefCriticManager(
+                self.fov,
+                self.sensor_range,
+                device=self.device,
+                plot=self.save_image,
+            )
 
         # Create independent node managers for each agent to ensure decentralized learning
         self.robot_list = []
@@ -87,6 +97,8 @@ class MultiAgentWorker:
             robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
         for robot in self.robot_list:
             robot.update_planning_state()
+        if self.use_merged_critic:
+            self.merged_critic_manager.update_graph(self.env.belief_info, self.env.robot_locations)
 
         for i in range(MAX_EPISODE_STEP):
 
@@ -94,15 +106,27 @@ class MultiAgentWorker:
             dist_list = []
             next_node_index_list = []
             next_heading_index_list = []
+            critic_next_node_index_list = []
+            if self.use_merged_critic:
+                critic_index_lookup = self.merged_critic_manager.get_index_lookup()
             for robot in self.robot_list:
                 observation = robot.get_observation(
                     robot_locations=self.env.robot_locations,
                     trajectory_buffer=self.trajectory_buffer
                 )
-                ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
 
                 robot.save_observation(observation)
-                robot.save_ground_truth_observation(ground_truth_observation)
+                if self.use_merged_critic:
+                    critic_observation = self.merged_critic_manager.get_critic_observation(
+                        robot.location,
+                        robot.node_manager,
+                        self.env.get_agent_map_info(robot.id),
+                    )
+                    robot.current_critic_index = critic_observation[3][0, 0, 0].item()
+                    robot.save_critic_observation(critic_observation)
+                else:
+                    ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
+                    robot.save_ground_truth_observation(ground_truth_observation)
 
                 next_location, next_node_index, action_index, next_heading_index = robot.select_next_waypoint(observation)
 
@@ -112,6 +136,10 @@ class MultiAgentWorker:
                 dist_list.append(np.linalg.norm(next_location - robot.location))
                 next_node_index_list.append(next_node_index)
                 next_heading_index_list.append(next_heading_index)
+                if self.use_merged_critic:
+                    critic_next_node_index_list.append(
+                        critic_index_lookup[(float(next_location[0]), float(next_location[1]))]
+                    )
 
             selected_locations = np.array(selected_locations).reshape(-1, 2)
             arriving_sequence = np.argsort(np.array(dist_list))
@@ -240,6 +268,8 @@ class MultiAgentWorker:
                 robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
                 # Mark nodes visited by other agents based on FoV detection
                 robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
+            if self.use_merged_critic:
+                self.merged_critic_manager.update_graph(self.env.belief_info, self.env.robot_locations)
 
             # Check termination conditions
             # 1. All utility exhausted (sum of all robots' utility)
@@ -255,12 +285,18 @@ class MultiAgentWorker:
                 team_reward += 10
 
             curr_node_indices = np.array([robot.current_index for robot in self.robot_list])
+            curr_critic_indices = None
+            if self.use_merged_critic and USE_COMMUNICATION:
+                curr_critic_indices = np.array([robot.current_critic_index for robot in self.robot_list])
             for robot, reward in zip(self.robot_list, reward_list):
                 robot.save_reward(reward + team_reward)
                 # Only save all agent indices when communication is enabled
                 # When USE_COMMUNICATION=False, agents rely solely on FOV-detected trajectories
                 if USE_COMMUNICATION:
-                    robot.save_all_indices(curr_node_indices)
+                    if self.use_merged_critic:
+                        robot.save_all_indices(curr_critic_indices)
+                    else:
+                        robot.save_all_indices(curr_node_indices)
                 robot.update_planning_state()
                 robot.save_done(done)
 
@@ -278,9 +314,20 @@ class MultiAgentWorker:
                 robot_locations=self.env.robot_locations,
                 trajectory_buffer=self.trajectory_buffer
             )
-            ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
-            robot.save_next_observations(observation, next_node_index_list)
-            robot.save_next_ground_truth_observations(ground_truth_observation)
+            joint_next_index_list = next_node_index_list
+            if self.use_merged_critic and USE_COMMUNICATION:
+                joint_next_index_list = critic_next_node_index_list
+            robot.save_next_observations(observation, joint_next_index_list)
+            if self.use_merged_critic:
+                critic_observation = self.merged_critic_manager.get_critic_observation(
+                    robot.location,
+                    robot.node_manager,
+                    self.env.get_agent_map_info(robot.id),
+                )
+                robot.save_next_critic_observations(critic_observation)
+            else:
+                ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
+                robot.save_next_ground_truth_observations(ground_truth_observation)
             for i in range(len(self.episode_buffer)):
                 self.episode_buffer[i] += robot.episode_buffer[i]
 

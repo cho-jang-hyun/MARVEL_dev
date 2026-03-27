@@ -667,13 +667,13 @@ class QNet(nn.Module):
         self.neighboring_node_embedding = nn.Linear(embedding_dim * 3, embedding_dim)
 
         # Agent decoder
-        if train_algo in (2 ,3):
+        if train_algo in (2, 3, 4, 5):
             self.initial_embedding = nn.Linear(node_dim + 1, embedding_dim)
         else:
             # Graph embedding
             self.initial_embedding = nn.Linear(node_dim, embedding_dim)
 
-        if train_algo in (1, 3):
+        if train_algo in (1, 3, 5):
             self.agent_decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1, gated_attention=gated_attention)
             self.all_agent_embedding = nn.Linear(embedding_dim * 2, embedding_dim)
 

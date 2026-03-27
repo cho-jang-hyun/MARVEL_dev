@@ -58,7 +58,10 @@ def main():
     # Determine effective training algorithm based on communication setting
     # When USE_COMMUNICATION=False, disable agent communication in QNet
     if USE_COMMUNICATION:
-        effective_train_algo = TRAIN_ALGO
+        if TRAIN_ALGO == 4:
+            effective_train_algo = 5
+        else:
+            effective_train_algo = TRAIN_ALGO
     else:
         # Remove agent communication component from TRAIN_ALGO
         # TRAIN_ALGO 3 (MAAC + GT) -> 2 (GT only)
@@ -67,6 +70,8 @@ def main():
             effective_train_algo = 2  # Ground Truth only, no communication
         elif TRAIN_ALGO == 1:
             effective_train_algo = 0  # SAC, no communication
+        elif TRAIN_ALGO == 4:
+            effective_train_algo = 4  # Merged-belief critic, no communication
         else:
             effective_train_algo = TRAIN_ALGO  # 0 or 2 already have no communication
 
@@ -254,27 +259,31 @@ def main():
                     next_trajectory_node_indices = torch.stack(rollouts[45]).to(device)
 
                     # Load ground truth data if needed
-                    if effective_train_algo in (2,3):
-                        gt_node_inputs = torch.stack(rollouts[19]).to(device)
-                        gt_node_padding_mask = torch.stack(rollouts[20]).to(device)
-                        gt_edge_mask = torch.stack(rollouts[21]).to(device)
-                        gt_current_index = torch.stack(rollouts[22]).to(device)
-                        gt_current_edge = torch.stack(rollouts[23]).to(device)
-                        gt_edge_padding_mask = torch.stack(rollouts[24]).to(device)
-                        gt_frontier_distribution = torch.stack(rollouts[25]).to(device)
-                        gt_heading_visited = torch.stack(rollouts[26]).to(device)
-                        gt_next_node_inputs = torch.stack(rollouts[27]).to(device)
-                        gt_next_node_padding_mask = torch.stack(rollouts[28]).to(device)
-                        gt_next_edge_mask = torch.stack(rollouts[29]).to(device)
-                        gt_next_current_index = torch.stack(rollouts[30]).to(device)
-                        gt_next_current_edge = torch.stack(rollouts[31]).to(device)
-                        gt_next_edge_padding_mask = torch.stack(rollouts[32]).to(device)
-                        gt_next_frontier_distribution = torch.stack(rollouts[33]).to(device)
-                        gt_next_heading_visited = torch.stack(rollouts[34]).to(device)
+                    if effective_train_algo in (2, 3, 4, 5):
+                        critic_node_inputs = torch.stack(rollouts[19]).to(device)
+                        critic_node_padding_mask = torch.stack(rollouts[20]).to(device)
+                        critic_edge_mask = torch.stack(rollouts[21]).to(device)
+                        critic_current_index = torch.stack(rollouts[22]).to(device)
+                        critic_current_edge = torch.stack(rollouts[23]).to(device)
+                        critic_edge_padding_mask = torch.stack(rollouts[24]).to(device)
+                        critic_frontier_distribution = torch.stack(rollouts[25]).to(device)
+                        critic_heading_visited = torch.stack(rollouts[26]).to(device)
+                        critic_next_node_inputs = torch.stack(rollouts[27]).to(device)
+                        critic_next_node_padding_mask = torch.stack(rollouts[28]).to(device)
+                        critic_next_edge_mask = torch.stack(rollouts[29]).to(device)
+                        critic_next_current_index = torch.stack(rollouts[30]).to(device)
+                        critic_next_current_edge = torch.stack(rollouts[31]).to(device)
+                        critic_next_edge_padding_mask = torch.stack(rollouts[32]).to(device)
+                        critic_next_frontier_distribution = torch.stack(rollouts[33]).to(device)
+                        critic_next_heading_visited = torch.stack(rollouts[34]).to(device)
+
+                    if effective_train_algo in (4, 5):
+                        critic_neighbor_best_headings = torch.stack(rollouts[46]).to(device)
+                        next_critic_neighbor_best_headings = torch.stack(rollouts[47]).to(device)
 
                     # Load agent indices only when communication is enabled
                     # When USE_COMMUNICATION=False, effective_train_algo won't include agent communication
-                    if effective_train_algo in (1,3):
+                    if effective_train_algo in (1, 3, 5):
                         all_agent_indices = torch.stack(rollouts[35]).to(device)
                         all_agent_next_indices = torch.stack(rollouts[36]).to(device)
                         next_all_agent_next_indices = torch.stack(rollouts[37]).to(device)
@@ -330,10 +339,10 @@ def main():
                         )
                     elif effective_train_algo == 2:
                         # Ground truth only, no communication
-                        state = [gt_node_inputs, gt_node_padding_mask, gt_edge_mask, gt_current_index,
-                                 gt_current_edge, gt_edge_padding_mask, gt_frontier_distribution, gt_heading_visited, neighbor_best_headings]
-                        next_state = [gt_next_node_inputs, gt_next_node_padding_mask, gt_next_edge_mask,
-                                      gt_next_current_index, gt_next_current_edge, gt_next_edge_padding_mask, gt_next_frontier_distribution, gt_next_heading_visited, next_neighbor_best_headings]
+                        state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
+                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited, neighbor_best_headings]
+                        next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
+                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask, critic_next_frontier_distribution, critic_next_heading_visited, next_neighbor_best_headings]
                         q_kwargs = dict(
                             detected_trajectories=detected_trajectories,
                             trajectory_mask=trajectory_mask,
@@ -346,10 +355,46 @@ def main():
                         )
                     elif effective_train_algo == 3:
                         # MAAC with ground truth and communication
-                        state = [gt_node_inputs, gt_node_padding_mask, gt_edge_mask, gt_current_index,
-                                 gt_current_edge, gt_edge_padding_mask, gt_frontier_distribution, gt_heading_visited, neighbor_best_headings]
-                        next_state = [gt_next_node_inputs, gt_next_node_padding_mask, gt_next_edge_mask,
-                                      gt_next_current_index, gt_next_current_edge, gt_next_edge_padding_mask, gt_next_frontier_distribution, gt_next_heading_visited, next_neighbor_best_headings]
+                        state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
+                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited, neighbor_best_headings]
+                        next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
+                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask, critic_next_frontier_distribution, critic_next_heading_visited, next_neighbor_best_headings]
+                        q_kwargs = dict(
+                            all_agent_indices=all_agent_indices,
+                            all_agent_next_indices=all_agent_next_indices,
+                            detected_trajectories=detected_trajectories,
+                            trajectory_mask=trajectory_mask,
+                            trajectory_node_indices=trajectory_node_indices,
+                        )
+                        next_q_kwargs = dict(
+                            all_agent_indices=all_agent_next_indices,
+                            all_agent_next_indices=next_all_agent_next_indices,
+                            detected_trajectories=next_detected_trajectories,
+                            trajectory_mask=next_trajectory_mask,
+                            trajectory_node_indices=next_trajectory_node_indices,
+                        )
+                    elif effective_train_algo == 4:
+                        # Merged-belief critic only, no communication
+                        state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
+                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited, critic_neighbor_best_headings]
+                        next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
+                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask, critic_next_frontier_distribution, critic_next_heading_visited, next_critic_neighbor_best_headings]
+                        q_kwargs = dict(
+                            detected_trajectories=detected_trajectories,
+                            trajectory_mask=trajectory_mask,
+                            trajectory_node_indices=trajectory_node_indices,
+                        )
+                        next_q_kwargs = dict(
+                            detected_trajectories=next_detected_trajectories,
+                            trajectory_mask=next_trajectory_mask,
+                            trajectory_node_indices=next_trajectory_node_indices,
+                        )
+                    elif effective_train_algo == 5:
+                        # Merged-belief critic with communication
+                        state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
+                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited, critic_neighbor_best_headings]
+                        next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
+                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask, critic_next_frontier_distribution, critic_next_heading_visited, next_critic_neighbor_best_headings]
                         q_kwargs = dict(
                             all_agent_indices=all_agent_indices,
                             all_agent_next_indices=all_agent_next_indices,

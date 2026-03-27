@@ -29,7 +29,7 @@ gifs_path = f'gifs/{FOLDER_NAME}' # save gif
 SUMMARY_WINDOW = 32
 LOAD_MODEL = True  # do you want to load the model trained before
 SAVE_IMG_GAP = 1000
-NUM_EPISODE_BUFFER = 46
+NUM_EPISODE_BUFFER = 48
 
 # Sim parameters
 N_AGENTS = 4
@@ -103,7 +103,11 @@ GPU_ID = 0  # Which GPU to use (0 or 1). Set to None to use all available GPUs
 
 USE_WANDB = False
 TRAIN_ALGO = 3
-# 0: SAC, 1:MAAC , 2: Ground Truth 3: MAAC and Ground Truth
+# 0: SAC
+# 1: MAAC
+# 2: Ground Truth critic
+# 3: MAAC + Ground Truth critic
+# 4: Merged-belief critic with teammate-only delta
 
 # Communication settings
 USE_COMMUNICATION = False  # True: MAAC with all agent communication (centralized critic)

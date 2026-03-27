@@ -85,6 +85,7 @@ class Agent:
         if self.plot:
             self.trajectory_x = []
             self.trajectory_y = []
+        self.current_critic_index = None
 
 
     def update_map(self, map_info):
@@ -732,6 +733,18 @@ class Agent:
         self.episode_buffer[25] += frontier_distribution
         self.episode_buffer[26] += heading_visited
 
+    def save_critic_observation(self, critic_observation):
+        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, critic_neighbor_best_headings = critic_observation
+        self.episode_buffer[19] += node_inputs
+        self.episode_buffer[20] += node_padding_mask.bool()
+        self.episode_buffer[21] += edge_mask.bool()
+        self.episode_buffer[22] += current_index
+        self.episode_buffer[23] += current_edge
+        self.episode_buffer[24] += edge_padding_mask.bool()
+        self.episode_buffer[25] += frontier_distribution
+        self.episode_buffer[26] += heading_visited
+        self.episode_buffer[46] += critic_neighbor_best_headings
+
     def save_next_ground_truth_observations(self, ground_truth_observation):
         self.episode_buffer[27] = copy.deepcopy(self.episode_buffer[19])[1:]
         self.episode_buffer[28] = copy.deepcopy(self.episode_buffer[20])[1:]
@@ -751,6 +764,28 @@ class Agent:
         self.episode_buffer[32] += edge_padding_mask.bool()
         self.episode_buffer[33] += frontier_distribution
         self.episode_buffer[34] += heading_visited
+
+    def save_next_critic_observations(self, critic_observation):
+        self.episode_buffer[27] = copy.deepcopy(self.episode_buffer[19])[1:]
+        self.episode_buffer[28] = copy.deepcopy(self.episode_buffer[20])[1:]
+        self.episode_buffer[29] = copy.deepcopy(self.episode_buffer[21])[1:]
+        self.episode_buffer[30] = copy.deepcopy(self.episode_buffer[22])[1:]
+        self.episode_buffer[31] = copy.deepcopy(self.episode_buffer[23])[1:]
+        self.episode_buffer[32] = copy.deepcopy(self.episode_buffer[24])[1:]
+        self.episode_buffer[33] = copy.deepcopy(self.episode_buffer[25])[1:]
+        self.episode_buffer[34] = copy.deepcopy(self.episode_buffer[26])[1:]
+        self.episode_buffer[47] = copy.deepcopy(self.episode_buffer[46])[1:]
+
+        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, critic_neighbor_best_headings = critic_observation
+        self.episode_buffer[27] += node_inputs
+        self.episode_buffer[28] += node_padding_mask.bool()
+        self.episode_buffer[29] += edge_mask.bool()
+        self.episode_buffer[30] += current_index
+        self.episode_buffer[31] += current_edge
+        self.episode_buffer[32] += edge_padding_mask.bool()
+        self.episode_buffer[33] += frontier_distribution
+        self.episode_buffer[34] += heading_visited
+        self.episode_buffer[47] += critic_neighbor_best_headings
 
     def save_all_indices(self, all_agent_indices):
         self.episode_buffer[35] += torch.tensor(all_agent_indices).reshape(1, -1, 1).to(self.device)
