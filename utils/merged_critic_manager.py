@@ -22,6 +22,9 @@ class MergedBeliefCriticManager:
 
     def update_graph(self, map_info, robot_locations):
         self.map_info = map_info
+        # Rebuild from the latest merged team belief so utilities/frontiers stay tied to
+        # the current merged map and keep merged obstacles authoritative.
+        self.node_manager = NodeManager(self.fov, self.sensor_range, plot=self.plot)
         for robot_location in robot_locations:
             updating_map_info = self.get_updating_map(robot_location)
             frontiers = get_frontier_in_map(updating_map_info)
@@ -30,6 +33,7 @@ class MergedBeliefCriticManager:
                 frontiers,
                 updating_map_info,
                 self.map_info,
+                skip_far_existing_updates=False,
             )
 
     def get_updating_map(self, location):
@@ -85,6 +89,75 @@ class MergedBeliefCriticManager:
             (float(coords[0]), float(coords[1])): index
             for index, coords in enumerate(all_node_coords)
         }
+
+    def get_node_index(self, coords, index_lookup=None):
+        if index_lookup is None:
+            index_lookup = self.get_index_lookup()
+
+        key = (float(coords[0]), float(coords[1]))
+        merged_index = index_lookup.get(key)
+        if merged_index is not None:
+            return merged_index
+
+        nearest_node = self.node_manager.nodes_dict.nearest_neighbors(np.asarray(coords).tolist(), 1)[0]
+        nearest_coords = nearest_node.data.coords
+        return index_lookup[(float(nearest_coords[0]), float(nearest_coords[1]))]
+
+    def get_node_utility(self, coords):
+        node = self.node_manager.nodes_dict.find((float(coords[0]), float(coords[1])))
+        if node is None:
+            return 0.0
+        return float(node.data.utility)
+
+    def get_total_utility(self):
+        total_utility = 0.0
+        for node in self.node_manager.nodes_dict.__iter__():
+            total_utility += float(node.data.utility)
+        return total_utility
+
+    def _map_local_action_candidates(self, current_index, local_observation, local_node_coords):
+        _, _, _, _, local_current_edge, local_edge_padding_mask, _, _, local_neighbor_best_headings, *_ = local_observation
+        index_lookup = self.get_index_lookup()
+
+        mapped_edge = local_current_edge.clone()
+        mapped_edge_values = mapped_edge[0, :, 0]
+        local_edge_values = local_current_edge[0, :, 0].detach().cpu().numpy()
+        local_mask_values = local_edge_padding_mask[0, 0].detach().cpu().numpy()
+
+        for slot, (local_node_index, masked) in enumerate(zip(local_edge_values, local_mask_values)):
+            if masked:
+                mapped_edge_values[slot] = current_index
+                continue
+
+            local_coords = local_node_coords[int(local_node_index)]
+            merged_index = self.get_node_index(local_coords, index_lookup=index_lookup)
+            mapped_edge_values[slot] = merged_index
+
+        return mapped_edge, local_edge_padding_mask.clone(), local_neighbor_best_headings.clone()
+
+    def _aggregate_team_visit_features(self, node_coords, team_node_managers):
+        team_heading_visited = []
+        team_visited_fraction = []
+
+        for coords in node_coords:
+            aggregated_heading = np.zeros(self.num_angles_bin)
+            visited_count = 0
+
+            for node_manager in team_node_managers:
+                local_node = node_manager.nodes_dict.find((coords[0], coords[1]))
+                if local_node is None:
+                    continue
+
+                local_node = local_node.data
+                aggregated_heading = np.maximum(aggregated_heading, local_node.heading_visited)
+                visited_count += int(local_node.visited > 0)
+
+            team_heading_visited.append(aggregated_heading)
+            team_visited_fraction.append(visited_count / max(len(team_node_managers), 1))
+
+        team_heading_visited = np.array(team_heading_visited).reshape(-1, self.num_angles_bin)
+        team_visited_fraction = np.array(team_visited_fraction).reshape(-1, 1)
+        return team_heading_visited, team_visited_fraction
 
     def _build_merged_graph_state(self, robot_location):
         all_node_coords = self._get_all_node_coords()
@@ -225,7 +298,7 @@ class MergedBeliefCriticManager:
                 neighbor_best_headings.append(heading_candidates)
         return torch.stack(neighbor_best_headings).unsqueeze(0).to(self.device)
 
-    def get_critic_observation(self, robot_location, agent_node_manager, agent_map_info, pad=True):
+    def get_critic_observation(self, robot_location, team_node_managers, agent_map_info, local_observation=None, local_node_coords=None, pad=True):
         (
             node_coords,
             utility,
@@ -253,27 +326,20 @@ class MergedBeliefCriticManager:
         node_highest_utility_angles = highest_utility_angles.reshape(-1, 1) / 360
 
         # Critic utility/frontier/neighbor structure comes strictly from the merged team map.
-        # Only these memory-like channels remain agent-specific.
-        node_heading_visited = []
-        node_visited_by_others = []
+        # Team visit memory is aggregated across all agents, while agent-specific overlays
+        # are recomputed per observation from the requesting agent's own map.
+        node_heading_visited, node_team_visited = self._aggregate_team_visit_features(
+            node_coords,
+            team_node_managers,
+        )
         node_other_agents_explored = []
         node_cells = get_cell_position_from_coords(node_coords, self.map_info).reshape(-1, 2)
 
-        for coords, cell in zip(node_coords, node_cells):
-            local_node = agent_node_manager.nodes_dict.find((coords[0], coords[1]))
-            if local_node is not None:
-                node_heading_visited.append(local_node.data.heading_visited)
-                node_visited_by_others.append(local_node.data.visited_by_others)
-            else:
-                node_heading_visited.append(np.zeros(self.num_angles_bin))
-                node_visited_by_others.append(0.0)
-
+        for cell in node_cells:
             merged_value = self.map_info.map[cell[1], cell[0]]
             agent_value = agent_map_info.map[cell[1], cell[0]]
             node_other_agents_explored.append(float(merged_value != UNKNOWN and agent_value == UNKNOWN))
 
-        node_heading_visited = np.array(node_heading_visited).reshape(-1, self.num_angles_bin)
-        node_visited_by_others = np.array(node_visited_by_others).reshape(-1, 1)
         node_other_agents_explored = np.array(node_other_agents_explored).reshape(-1, 1)
         node_frontier_distribution = merged_frontier_distribution.reshape(-1, self.num_angles_bin)
         node_frontier_distribution = node_frontier_distribution / (
@@ -286,7 +352,7 @@ class MergedBeliefCriticManager:
             node_guidepost,
             node_occupancy,
             node_highest_utility_angles,
-            node_visited_by_others,
+            node_team_visited,
             node_other_agents_explored,
         ), axis=1)
 
@@ -312,26 +378,33 @@ class MergedBeliefCriticManager:
             )
             edge_mask_tensor = padding(edge_mask_tensor)
 
-        current_in_edge = np.argwhere(merged_current_edge == current_index)[0][0]
-        current_edge_tensor = torch.tensor(merged_current_edge).unsqueeze(0)
-        k_size = current_edge_tensor.size()[-1]
-        if pad:
-            padding = torch.nn.ConstantPad1d((0, K_SIZE - k_size), 0)
-            current_edge_tensor = padding(current_edge_tensor)
-        current_edge_tensor = current_edge_tensor.unsqueeze(-1)
+        if local_observation is not None and local_node_coords is not None:
+            current_edge_tensor, edge_padding_mask, critic_neighbor_best_headings = self._map_local_action_candidates(
+                current_index,
+                local_observation,
+                local_node_coords,
+            )
+        else:
+            current_in_edge = np.argwhere(merged_current_edge == current_index)[0][0]
+            current_edge_tensor = torch.tensor(merged_current_edge).unsqueeze(0)
+            k_size = current_edge_tensor.size()[-1]
+            if pad:
+                padding = torch.nn.ConstantPad1d((0, K_SIZE - k_size), 0)
+                current_edge_tensor = padding(current_edge_tensor)
+            current_edge_tensor = current_edge_tensor.unsqueeze(-1)
 
-        critic_neighbor_best_headings = self._compute_best_heading(
-            node_coords,
-            merged_frontier_distribution,
-            current_edge_tensor,
-            path_coords,
-        )
+            critic_neighbor_best_headings = self._compute_best_heading(
+                node_coords,
+                merged_frontier_distribution,
+                current_edge_tensor,
+                path_coords,
+            )
 
-        edge_padding_mask = torch.zeros((1, 1, k_size), dtype=torch.int16).to(self.device)
-        edge_padding_mask[0, 0, current_in_edge] = 1
-        if pad:
-            padding = torch.nn.ConstantPad1d((0, K_SIZE - k_size), 1)
-            edge_padding_mask = padding(edge_padding_mask)
+            edge_padding_mask = torch.zeros((1, 1, k_size), dtype=torch.int16).to(self.device)
+            edge_padding_mask[0, 0, current_in_edge] = 1
+            if pad:
+                padding = torch.nn.ConstantPad1d((0, K_SIZE - k_size), 1)
+                edge_padding_mask = padding(edge_padding_mask)
 
         return [
             node_inputs,

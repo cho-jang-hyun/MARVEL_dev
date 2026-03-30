@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 from copy import deepcopy
 from matplotlib.patches import Wedge, FancyArrowPatch, Rectangle
 from collections import deque
+import torch
 
 from utils.env import Env
 from utils.agent import Agent
@@ -51,14 +52,13 @@ class MultiAgentWorker:
         self.env = Env(global_step, self.fov, self.sensor_range, plot=self.save_image)
         self.n_agents = N_AGENTS
         self.use_merged_critic = TRAIN_ALGO == 4
-        self.merged_critic_manager = None
-        if self.use_merged_critic:
-            self.merged_critic_manager = MergedBeliefCriticManager(
-                self.fov,
-                self.sensor_range,
-                device=self.device,
-                plot=self.save_image,
-            )
+        self.merged_map_manager = MergedBeliefCriticManager(
+            self.fov,
+            self.sensor_range,
+            device=self.device,
+            plot=self.save_image,
+        )
+        self.merged_critic_manager = self.merged_map_manager if self.use_merged_critic else None
 
         # Create independent node managers for each agent to ensure decentralized learning
         self.robot_list = []
@@ -91,24 +91,34 @@ class MultiAgentWorker:
                 0.0
             ))
 
+    def _get_collision_free_candidate(self, robot, occupied_locations):
+        occupied_keys = {
+            (float(location[0]), float(location[1]))
+            for location in np.asarray(occupied_locations).reshape(-1, 2)
+        }
+
+        for _, _, candidate_location, candidate_heading_index in robot.current_waypoint_candidates:
+            candidate_key = (float(candidate_location[0]), float(candidate_location[1]))
+            if candidate_key in occupied_keys:
+                continue
+            return candidate_location.copy(), candidate_heading_index
+
+        return None, None
+
     def run_episode(self):
         done = False
+        team_node_managers = [robot.node_manager for robot in self.robot_list]
         for robot in self.robot_list:
             robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
         for robot in self.robot_list:
             robot.update_planning_state()
-        if self.use_merged_critic:
-            self.merged_critic_manager.update_graph(self.env.belief_info, self.env.robot_locations)
+        self.merged_map_manager.update_graph(self.env.belief_info, self.env.robot_locations)
 
         for i in range(MAX_EPISODE_STEP):
 
             selected_locations = []
             dist_list = []
-            next_node_index_list = []
             next_heading_index_list = []
-            critic_next_node_index_list = []
-            if self.use_merged_critic:
-                critic_index_lookup = self.merged_critic_manager.get_index_lookup()
             for robot in self.robot_list:
                 observation = robot.get_observation(
                     robot_locations=self.env.robot_locations,
@@ -119,8 +129,10 @@ class MultiAgentWorker:
                 if self.use_merged_critic:
                     critic_observation = self.merged_critic_manager.get_critic_observation(
                         robot.location,
-                        robot.node_manager,
+                        team_node_managers,
                         self.env.get_agent_map_info(robot.id),
+                        local_observation=observation,
+                        local_node_coords=robot.node_coords,
                     )
                     robot.current_critic_index = critic_observation[3][0, 0, 0].item()
                     robot.save_critic_observation(critic_observation)
@@ -128,18 +140,11 @@ class MultiAgentWorker:
                     ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
                     robot.save_ground_truth_observation(ground_truth_observation)
 
-                next_location, next_node_index, action_index, next_heading_index = robot.select_next_waypoint(observation)
-
-                robot.save_action(action_index)
+                next_location, _, _, next_heading_index = robot.select_next_waypoint(observation)
 
                 selected_locations.append(next_location)
                 dist_list.append(np.linalg.norm(next_location - robot.location))
-                next_node_index_list.append(next_node_index)
                 next_heading_index_list.append(next_heading_index)
-                if self.use_merged_critic:
-                    critic_next_node_index_list.append(
-                        critic_index_lookup[(float(next_location[0]), float(next_location[1]))]
-                    )
 
             selected_locations = np.array(selected_locations).reshape(-1, 2)
             arriving_sequence = np.argsort(np.array(dist_list))
@@ -150,14 +155,15 @@ class MultiAgentWorker:
                 solved_locations = selected_locations_in_arriving_sequence[:j]
                 while selected_location[0] + selected_location[1] * 1j in solved_locations[:, 0] + solved_locations[:, 1] * 1j:
                     id = arriving_sequence[j]
-                    nearby_nodes = self.robot_list[id].node_manager.nodes_dict.nearest_neighbors(
-                        selected_location.tolist(), 25)
-                    for node in nearby_nodes:
-                        coords = node.data.coords
-                        if coords[0] + coords[1] * 1j in solved_locations[:, 0] + solved_locations[:, 1] * 1j:
-                            continue
-                        selected_location = coords
+                    replacement_location, replacement_heading_index = self._get_collision_free_candidate(
+                        self.robot_list[id],
+                        solved_locations,
+                    )
+                    if replacement_location is None:
                         break
+
+                    selected_location = replacement_location
+                    next_heading_index_list[id] = replacement_heading_index
 
                     selected_locations_in_arriving_sequence[j] = selected_location
                     selected_locations[id] = selected_location
@@ -167,12 +173,16 @@ class MultiAgentWorker:
             robot_locations_sim = []
             robot_headings_sim = []
             all_robots_heading_list = []
+            executed_action_index_list = []
+            executed_next_node_index_list = []
+            executed_critic_next_node_index_list = []
             for k, (robot, next_location, next_heading_index) in enumerate(zip(self.robot_list, selected_locations, next_heading_index_list)):
                 robot_current_cell = get_cell_position_from_coords(robot.location, self.env.belief_info)
                 robot_cell = get_cell_position_from_coords(next_location, self.env.belief_info)
 
                 next_heading = next_heading_index*(360/NUM_ANGLES_BIN)
                 final_heading = compute_allowable_heading(robot.location, next_location, robot.heading, next_heading, robot.velocity, robot.yaw_rate)
+                executed_action_index = robot.get_executed_action_index(next_location, final_heading)
 
                 # Generate intermediate points
                 intermediate_cells = np.linspace(robot_current_cell, robot_cell, self.sim_steps+1)[1:] 
@@ -184,6 +194,12 @@ class MultiAgentWorker:
                 robot_locations_sim.append(intermediate_cells)
                 robot_headings_sim.append(intermediate_headings)
                 all_robots_heading_list.append(final_heading)
+                executed_action_index_list.append(executed_action_index)
+                executed_next_node_index_list.append(int(np.argwhere(np.all(robot.node_coords == next_location, axis=1))[0][0]))
+                if self.use_merged_critic:
+                    executed_critic_next_node_index_list.append(
+                        self.merged_critic_manager.get_node_index(next_location)
+                    )
 
                 robot.update_heading(final_heading)
 
@@ -207,7 +223,7 @@ class MultiAgentWorker:
             # Collect robot headings for overlap reward calculation
             robot_headings_list = [robot.heading for robot in self.robot_list]
 
-            for robot, next_location, next_node_index in zip(self.robot_list, selected_locations, next_node_index_list):
+            for robot, next_location, executed_action_index in zip(self.robot_list, selected_locations, executed_action_index_list):
                 # Update trajectory buffer
                 prev_trajectory = self.trajectory_buffer[robot.id][-1] if len(self.trajectory_buffer[robot.id]) > 0 else None
                 if prev_trajectory is not None:
@@ -241,6 +257,11 @@ class MultiAgentWorker:
                 else:
                     utility_reward = 0
 
+                merged_node_utility = self.merged_map_manager.get_node_utility(next_location)
+                merged_node_utility_reward = MERGED_NODE_UTILITY_REWARD_WEIGHT * (
+                    merged_node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
+                )
+
                 preferred_angle = node.highest_utility_angle
                 if preferred_angle == -360:
                     angle_reward = 0
@@ -263,21 +284,22 @@ class MultiAgentWorker:
                 if node.visited_by_others > 0.9:
                     trajectory_history_penalty = 0.15
 
-                reward_list.append(utility_reward + trajectory_reward - overlap_penalty - trajectory_history_penalty)  
+                reward_list.append(
+                    utility_reward
+                    + merged_node_utility_reward
+                    + trajectory_reward
+                    - overlap_penalty
+                    - trajectory_history_penalty
+                )
+                robot.save_action(torch.tensor([executed_action_index], device=self.device))
 
                 robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
                 # Mark nodes visited by other agents based on FoV detection
                 robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
-            if self.use_merged_critic:
-                self.merged_critic_manager.update_graph(self.env.belief_info, self.env.robot_locations)
+            self.merged_map_manager.update_graph(self.env.belief_info, self.env.robot_locations)
 
-            # Check termination conditions
-            # 1. All utility exhausted (sum of all robots' utility)
-            # 2. Explored rate reaches SUCCESS_THRESHOLD
-            total_utility = sum(robot.utility.sum() for robot in self.robot_list)
-            if total_utility == 0:
-                done = True
-            if self.env.explored_rate >= SUCCESS_THRESHOLD:
+            # End the episode when total environment exploration exceeds the threshold.
+            if self.env.explored_rate > SUCCESS_THRESHOLD:
                 done = True
 
             team_reward = self.env.calculate_team_reward() - 0.5
@@ -314,15 +336,17 @@ class MultiAgentWorker:
                 robot_locations=self.env.robot_locations,
                 trajectory_buffer=self.trajectory_buffer
             )
-            joint_next_index_list = next_node_index_list
+            joint_next_index_list = executed_next_node_index_list
             if self.use_merged_critic and USE_COMMUNICATION:
-                joint_next_index_list = critic_next_node_index_list
+                joint_next_index_list = executed_critic_next_node_index_list
             robot.save_next_observations(observation, joint_next_index_list)
             if self.use_merged_critic:
                 critic_observation = self.merged_critic_manager.get_critic_observation(
                     robot.location,
-                    robot.node_manager,
+                    team_node_managers,
                     self.env.get_agent_map_info(robot.id),
+                    local_observation=observation,
+                    local_node_coords=robot.node_coords,
                 )
                 robot.save_next_critic_observations(critic_observation)
             else:

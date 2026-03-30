@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '3_26_updated_individual_map_belief_and trajectory_encoder'
+FOLDER_NAME = '3_28_enhanced_MAAC_GT_merged_belief_0.99_success_threshold'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -27,7 +27,7 @@ gifs_path = f'gifs/{FOLDER_NAME}' # save gif
 
 # save training data
 SUMMARY_WINDOW = 32
-LOAD_MODEL = True  # do you want to load the model trained before
+LOAD_MODEL = False  # do you want to load the model trained before
 SAVE_IMG_GAP = 1000
 NUM_EPISODE_BUFFER = 48
 
@@ -67,13 +67,16 @@ UPDATING_MAP_SIZE = 4 * SENSOR_RANGE + 4 * NODE_RESOLUTION
 
 # training parameters
 MAX_EPISODE_STEP = 128
-REPLAY_SIZE = 10000
-MINIMUM_BUFFER_SIZE = 2000
+REPLAY_SIZE = 15000
+MINIMUM_BUFFER_SIZE = 10000
 BATCH_SIZE = 128
 LR = 1e-5
 GAMMA = 0.99
 TAU = 0.001  # Soft update coefficient for target network (0.001 ~ 0.01)
 NUM_META_AGENT = 18
+
+# reward shaping
+MERGED_NODE_UTILITY_REWARD_WEIGHT = 0.7
 
 # Gradient clipping parameters
 GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5.0)
@@ -102,7 +105,7 @@ NUM_GPU = 1  # Number of GPUs for DataParallel in main process
 GPU_ID = 0  # Which GPU to use (0 or 1). Set to None to use all available GPUs
 
 USE_WANDB = False
-TRAIN_ALGO = 3
+TRAIN_ALGO = 4
 # 0: SAC
 # 1: MAAC
 # 2: Ground Truth critic

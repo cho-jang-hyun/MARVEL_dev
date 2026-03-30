@@ -48,7 +48,7 @@ class NodeManager:
             neighbor_node.data.neighbor_list.remove(node.coords.tolist())
         self.nodes_dict.remove(node.coords.tolist())
 
-    def update_graph(self, robot_location, frontiers, updating_map_info, map_info):
+    def update_graph(self, robot_location, frontiers, updating_map_info, map_info, skip_far_existing_updates=True):
         node_coords, _ = get_updating_node_coords(robot_location, updating_map_info)
 
         all_node_list = []
@@ -58,7 +58,11 @@ class NodeManager:
                 node = self.add_node_to_dict(coords, frontiers, updating_map_info)
             else:
                 node = node.data
-                if node.utility == 0 or np.linalg.norm(node.coords - robot_location) > 2 * self.sensor_range:
+                too_far_to_refresh = (
+                    skip_far_existing_updates
+                    and np.linalg.norm(node.coords - robot_location) > 2 * self.sensor_range
+                )
+                if node.utility == 0 or too_far_to_refresh:
                     pass
                 else:
                     node.update_node_observable_frontiers(frontiers, updating_map_info, map_info)

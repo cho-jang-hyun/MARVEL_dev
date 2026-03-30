@@ -86,6 +86,9 @@ class Agent:
             self.trajectory_x = []
             self.trajectory_y = []
         self.current_critic_index = None
+        self.current_edge_tensor = None
+        self.current_edge_padding_mask = None
+        self.current_waypoint_candidates = []
 
 
     def update_map(self, map_info):
@@ -245,6 +248,9 @@ class Agent:
             padding = torch.nn.ConstantPad1d((0, K_SIZE - k_size), 1)
             edge_padding_mask = padding(edge_padding_mask)
 
+        self.current_edge_tensor = current_edge.clone()
+        self.current_edge_padding_mask = edge_padding_mask.clone()
+
         # Process trajectory information if available
         detected_trajectories = None
         trajectory_mask = None
@@ -259,10 +265,33 @@ class Agent:
                 detected_trajectories, trajectory_mask, trajectory_node_indices]
 
     def select_next_waypoint(self, observation, greedy = False):
-        _, _, _, _, current_edge, _, _, _, _, _, _, _ = observation
+        _, _, _, _, current_edge, edge_padding_mask, _, _, _, _, _, _ = observation
         with torch.no_grad():
             logp = self.policy_net(*observation[:9], detected_trajectories=observation[9],
                                    trajectory_mask=observation[10], trajectory_node_indices=observation[11])
+
+        action_logp = logp.squeeze(0).detach().cpu()
+        current_edge_values = current_edge[0, :, 0].detach().cpu().numpy()
+        edge_padding_values = edge_padding_mask[0, 0].detach().cpu().numpy()
+        valid_waypoint_slots = np.where(edge_padding_values == 0)[0]
+
+        waypoint_candidates = []
+        for slot in valid_waypoint_slots:
+            waypoint_node_index = int(current_edge_values[slot])
+            action_offset = slot * self.num_heading_candidates
+            action_slice = action_logp[action_offset:action_offset + self.num_heading_candidates]
+            best_heading_offset = int(torch.argmax(action_slice).item())
+            best_heading_bin = int(self.neighbor_best_indices[slot][best_heading_offset])
+            best_score = float(action_slice[best_heading_offset].item())
+            waypoint_candidates.append((
+                best_score,
+                int(slot),
+                self.node_coords[waypoint_node_index].copy(),
+                best_heading_bin,
+            ))
+
+        waypoint_candidates.sort(key=lambda item: item[0], reverse=True)
+        self.current_waypoint_candidates = waypoint_candidates
 
         if greedy:
             action_index = torch.argmax(logp, 1).long()
@@ -275,6 +304,40 @@ class Agent:
         next_position = self.node_coords[next_node_index]
 
         return next_position, next_node_index, action_index, heading_index
+
+    def get_executed_action_index(self, next_location, final_heading):
+        if self.current_edge_tensor is None or self.current_edge_padding_mask is None:
+            raise RuntimeError("Current edge tensors are unavailable for executed action remapping.")
+
+        current_edge = self.current_edge_tensor[0, :, 0].detach().cpu().numpy()
+        edge_padding_mask = self.current_edge_padding_mask[0, 0].detach().cpu().numpy()
+        valid_waypoint_slots = np.where(edge_padding_mask == 0)[0]
+
+        if valid_waypoint_slots.size == 0:
+            raise RuntimeError("No valid waypoint slots available for executed action remapping.")
+
+        waypoint_slot = None
+        for slot in valid_waypoint_slots:
+            local_node_index = int(current_edge[slot])
+            candidate_coords = self.node_coords[local_node_index]
+            if np.allclose(candidate_coords, next_location):
+                waypoint_slot = int(slot)
+                break
+
+        if waypoint_slot is None:
+            waypoint_distances = []
+            for slot in valid_waypoint_slots:
+                local_node_index = int(current_edge[slot])
+                candidate_coords = self.node_coords[local_node_index]
+                waypoint_distances.append(np.linalg.norm(candidate_coords - next_location))
+            waypoint_slot = int(valid_waypoint_slots[int(np.argmin(waypoint_distances))])
+
+        final_heading_bin = int((final_heading % 360) / 360 * self.num_angles_bin) % self.num_angles_bin
+        heading_candidates = np.asarray(self.neighbor_best_indices[waypoint_slot], dtype=int)
+        circular_distance = np.abs(((heading_candidates - final_heading_bin + self.num_angles_bin // 2) % self.num_angles_bin) - self.num_angles_bin // 2)
+        heading_slot = int(np.argmin(circular_distance))
+
+        return waypoint_slot * self.num_heading_candidates + heading_slot
     
     def compute_best_heading(self, node_coords, frontier_distribution, neighbor_nodes):
         neighbor_best_headings = []
