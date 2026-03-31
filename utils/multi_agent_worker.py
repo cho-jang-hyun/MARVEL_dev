@@ -129,6 +129,8 @@ class MultiAgentWorker:
                 if self.use_merged_critic:
                     critic_observation = self.merged_critic_manager.get_critic_observation(
                         robot.location,
+                        robot.id,
+                        self.env.robot_locations,
                         team_node_managers,
                         self.env.get_agent_map_info(robot.id),
                         local_observation=observation,
@@ -343,6 +345,8 @@ class MultiAgentWorker:
             if self.use_merged_critic:
                 critic_observation = self.merged_critic_manager.get_critic_observation(
                     robot.location,
+                    robot.id,
+                    self.env.robot_locations,
                     team_node_managers,
                     self.env.get_agent_map_info(robot.id),
                     local_observation=observation,

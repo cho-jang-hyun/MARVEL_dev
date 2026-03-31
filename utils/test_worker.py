@@ -201,6 +201,7 @@ class TestWorker:
                 ))
 
                 robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
+                robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
 
             overlap_rate = self.compute_overlap_rate(selected_locations, all_robots_heading_list)
 

@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '3_28_enhanced_MAAC_GT_merged_belief_0.99_success_threshold'
+FOLDER_NAME = '3_31_Updated_critic_observations'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -69,7 +69,7 @@ UPDATING_MAP_SIZE = 4 * SENSOR_RANGE + 4 * NODE_RESOLUTION
 MAX_EPISODE_STEP = 128
 REPLAY_SIZE = 15000
 MINIMUM_BUFFER_SIZE = 10000
-BATCH_SIZE = 128
+BATCH_SIZE = 256
 LR = 1e-5
 GAMMA = 0.99
 TAU = 0.001  # Soft update coefficient for target network (0.001 ~ 0.01)
@@ -77,6 +77,8 @@ NUM_META_AGENT = 18
 
 # reward shaping
 MERGED_NODE_UTILITY_REWARD_WEIGHT = 0.7
+VISITED_BY_OTHERS_DECAY = 0.02
+VISITED_BY_OTHERS_MIN = 0.1
 
 # Gradient clipping parameters
 GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5.0)

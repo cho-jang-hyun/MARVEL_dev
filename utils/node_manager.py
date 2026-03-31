@@ -94,8 +94,9 @@ class NodeManager:
             heading_visited.append(node.heading_visited)
             highest_utility_angle.append(node.highest_utility_angle)
             
-            # Decay visited_by_others over time so the graph retains a fading memory of teammates
-            node.visited_by_others = max(0.0, node.visited_by_others - 0.02)
+            # Decay visited_by_others over time but keep a small persistent memory once a teammate was seen.
+            if node.visited_by_others > 0.0:
+                node.visited_by_others = max(VISITED_BY_OTHERS_MIN, node.visited_by_others - VISITED_BY_OTHERS_DECAY)
             visited_by_others.append(node.visited_by_others)
 
             for neighbor in node.neighbor_list:

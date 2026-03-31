@@ -183,15 +183,82 @@ class Agent:
         self.node_coords, self.utility, self.guidepost, self.occupancy, self.adjacent_matrix, self.current_index, self.neighbor_indices, self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.visited_by_others, self.path_coords = \
             self.node_manager.get_all_node_graph(self.location)
 
+    def _refresh_observed_trajectory_buffer(self, robot_locations, trajectory_buffer):
+        # Do not cheat using trajectory_buffer true past. Maintain agent's own history.
+        if not hasattr(self, 'observed_trajectory_buffer'):
+            from collections import deque
+            self.observed_trajectory_buffer = {}
+
+        detected_robot_ids = self.get_robots_in_fov(robot_locations)
+
+        for robot_id in range(len(robot_locations)):
+            if robot_id == self.id:
+                continue
+
+            if robot_id in detected_robot_ids:
+                if robot_id not in self.observed_trajectory_buffer:
+                    from collections import deque
+                    self.observed_trajectory_buffer[robot_id] = deque(maxlen=TRAJECTORY_HISTORY_LENGTH)
+
+                current_step = trajectory_buffer[robot_id][-1]
+                self.observed_trajectory_buffer[robot_id].append(current_step)
+            elif robot_id in self.observed_trajectory_buffer:
+                self.observed_trajectory_buffer[robot_id].append((0.0, 0.0, 0.0, 0.0))
+                if all(x[0] == 0.0 and x[1] == 0.0 for x in self.observed_trajectory_buffer[robot_id]):
+                    del self.observed_trajectory_buffer[robot_id]
+
+        return detected_robot_ids
+
+    def _get_local_node_index(self, position):
+        if self.node_coords is None or len(self.node_coords) == 0:
+            return None
+
+        distances = np.linalg.norm(self.node_coords - position, axis=1)
+        nearest_idx = int(np.argmin(distances))
+        if distances[nearest_idx] < NODE_RESOLUTION:
+            return nearest_idx
+        return None
+
+    def _mark_observed_teammates_on_graph(self, robot_locations, trajectory_buffer):
+        detected_robot_ids = self._refresh_observed_trajectory_buffer(robot_locations, trajectory_buffer)
+        occupied_node_indices = set()
+        visited_node_indices = set()
+
+        for robot_id in detected_robot_ids:
+            local_node_index = self._get_local_node_index(robot_locations[robot_id])
+            if local_node_index is not None:
+                occupied_node_indices.add(local_node_index)
+
+        for trajectory_queue in self.observed_trajectory_buffer.values():
+            for step in trajectory_queue:
+                x, y, _, _ = step
+                if x == 0 and y == 0:
+                    continue
+
+                position = np.array([x, y])
+                local_node_index = self._get_local_node_index(position)
+                if local_node_index is not None:
+                    visited_node_indices.add(local_node_index)
+
+                nodes_nearby = self.node_manager.nodes_dict.nearest_neighbors(position.tolist())
+                if len(nodes_nearby) == 0:
+                    continue
+
+                nearest_node = nodes_nearby[0]
+                if np.linalg.norm(nearest_node.data.coords - position) < NODE_RESOLUTION:
+                    nearest_node.data.visited_by_others = 1.0
+
+        return occupied_node_indices, visited_node_indices
+
     def get_observation(self, pad=True, robot_locations=None, trajectory_buffer=None):
         node_coords = self.node_coords
         node_utility = self.utility.reshape(-1, 1)
         node_guidepost = self.guidepost.reshape(-1, 1)
-        node_occupancy = self.occupancy.reshape(-1, 1)
+        node_occupancy = self.occupancy.copy().reshape(-1, 1)
         node_highest_utility_angles = self.highest_utility_angles.reshape(-1, 1)
         node_frontier_distribution = self.frontier_distribution.reshape(-1, self.num_angles_bin)
         node_heading_visited = self.heading_visited.reshape(-1, self.num_angles_bin)
-        node_visited_by_others = self.visited_by_others.reshape(-1, 1)
+        node_visited_by_others = self.visited_by_others.copy().reshape(-1, 1)
         current_index = self.current_index
         edge_mask = self.adjacent_matrix
         current_edge = self.neighbor_indices
@@ -204,6 +271,24 @@ class Agent:
         node_utility = node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
         node_highest_utility_angles = node_highest_utility_angles / 360
         node_frontier_distribution = node_frontier_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
+
+        # Process trajectory information if available
+        detected_trajectories = None
+        trajectory_mask = None
+        trajectory_node_indices = None
+        if robot_locations is not None and trajectory_buffer is not None:
+            occupied_node_indices, visited_node_indices = self._mark_observed_teammates_on_graph(
+                robot_locations, trajectory_buffer
+            )
+            for local_node_index in occupied_node_indices:
+                if local_node_index != current_index:
+                    node_occupancy[local_node_index] = 1.0
+            for local_node_index in visited_node_indices:
+                if local_node_index != current_index:
+                    node_visited_by_others[local_node_index] = 1.0
+
+            detected_trajectories, trajectory_mask, trajectory_node_indices = self._get_detected_trajectories()
+
         # visited_by_others is already 0 or 1, no normalization needed
         node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others), axis=1)
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
@@ -250,15 +335,6 @@ class Agent:
 
         self.current_edge_tensor = current_edge.clone()
         self.current_edge_padding_mask = edge_padding_mask.clone()
-
-        # Process trajectory information if available
-        detected_trajectories = None
-        trajectory_mask = None
-        trajectory_node_indices = None
-        if robot_locations is not None and trajectory_buffer is not None:
-            detected_trajectories, trajectory_mask, trajectory_node_indices = self._get_detected_trajectories(
-                robot_locations, trajectory_buffer
-            )
 
         return [node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask,
                 all_node_frontier_distribution, node_heading_visited, node_neighbor_best_headings,
@@ -495,47 +571,17 @@ class Agent:
 
         return detected_robots
 
-    def _get_detected_trajectories(self, robot_locations, trajectory_buffer):
+    def _get_detected_trajectories(self):
         """
-        Extract trajectories of detected robots within FOV and convert to observation format.
-
-        Args:
-            robot_locations (np.ndarray): Array of all robot locations, shape (n_agents, 2)
-            trajectory_buffer (dict): Dictionary mapping agent_id to deque of (x, y, heading, velocity)
+        Convert the agent's currently maintained observed-trajectory buffer into network tensors.
 
         Returns:
             detected_trajectories: torch.Tensor of shape [1, MAX_DETECTED_AGENTS, seq_len, feature_dim]
             trajectory_mask: torch.Tensor of shape [1, MAX_DETECTED_AGENTS], True for padded agents
             trajectory_node_indices: torch.Tensor of shape [1, MAX_DETECTED_AGENTS, seq_len], -1 for invalid
         """
-        # Do not cheat using trajectory_buffer true past. Maintain agent's own history.
         if not hasattr(self, 'observed_trajectory_buffer'):
-            from collections import deque
             self.observed_trajectory_buffer = {}
-
-        # Detect robots in FOV
-        detected_robot_ids = self.get_robots_in_fov(robot_locations)
-
-        # Update own tracking
-        for robot_id in range(len(robot_locations)):
-            if robot_id == self.id:
-                continue
-
-            if robot_id in detected_robot_ids:
-                if robot_id not in self.observed_trajectory_buffer:
-                    from collections import deque
-                    self.observed_trajectory_buffer[robot_id] = deque(maxlen=TRAJECTORY_HISTORY_LENGTH)
-                
-                # Fetch only the CURRENT step from true buffer to simulate sensing it presently
-                current_step = trajectory_buffer[robot_id][-1]
-                self.observed_trajectory_buffer[robot_id].append(current_step)
-            else:
-                if robot_id in self.observed_trajectory_buffer:
-                    # Not in FOV, pad with zero tuple to softly fade memory (solving instant amnesia)
-                    self.observed_trajectory_buffer[robot_id].append((0.0, 0.0, 0.0, 0.0))
-                    # Check if memory has completely faded
-                    if all(x[0] == 0.0 and x[1] == 0.0 for x in self.observed_trajectory_buffer[robot_id]):
-                        del self.observed_trajectory_buffer[robot_id]
 
         # Initialize output tensors
         max_agents = MAX_DETECTED_AGENTS
@@ -639,29 +685,7 @@ class Agent:
         Returns:
             None (modifies node_manager nodes in place)
         """
-        if not hasattr(self, 'observed_trajectory_buffer'):
-            return
-            
-        for robot_id, trajectory_queue in self.observed_trajectory_buffer.items():
-            trajectory = list(trajectory_queue)
-
-            for step in trajectory:
-                x, y, heading, velocity = step
-
-                # Skip zero-padded entries
-                if x == 0 and y == 0:
-                    continue
-
-                position = np.array([x, y])
-
-                # Find nearest node using quadtree
-                nodes_nearby = self.node_manager.nodes_dict.nearest_neighbors(position.tolist())
-
-                if len(nodes_nearby) > 0:
-                    nearest_node = nodes_nearby[0]
-                    # Check distance threshold to ensure it's actually at this node
-                    if np.linalg.norm(nearest_node.data.coords - position) < NODE_RESOLUTION:
-                        nearest_node.data.visited_by_others = 1.0
+        self._mark_observed_teammates_on_graph(robot_locations, trajectory_buffer)
 
     def calculate_overlap_reward(self, current_robot_location, all_robots_locations, robot_headings_list):
         ## Robot heading list in degrees

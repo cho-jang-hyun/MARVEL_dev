@@ -137,11 +137,11 @@ class MergedBeliefCriticManager:
 
     def _aggregate_team_visit_features(self, node_coords, team_node_managers):
         team_heading_visited = []
-        team_visited_fraction = []
+        team_visited_flag = []
 
         for coords in node_coords:
             aggregated_heading = np.zeros(self.num_angles_bin)
-            visited_count = 0
+            visited_any = 0.0
 
             for node_manager in team_node_managers:
                 local_node = node_manager.nodes_dict.find((coords[0], coords[1]))
@@ -150,16 +150,27 @@ class MergedBeliefCriticManager:
 
                 local_node = local_node.data
                 aggregated_heading = np.maximum(aggregated_heading, local_node.heading_visited)
-                visited_count += int(local_node.visited > 0)
+                visited_any = max(visited_any, float(local_node.visited > 0))
 
             team_heading_visited.append(aggregated_heading)
-            team_visited_fraction.append(visited_count / max(len(team_node_managers), 1))
+            team_visited_flag.append(visited_any)
 
         team_heading_visited = np.array(team_heading_visited).reshape(-1, self.num_angles_bin)
-        team_visited_fraction = np.array(team_visited_fraction).reshape(-1, 1)
-        return team_heading_visited, team_visited_fraction
+        team_visited_flag = np.array(team_visited_flag).reshape(-1, 1)
+        return team_heading_visited, team_visited_flag
 
-    def _build_merged_graph_state(self, robot_location):
+    def _build_team_occupancy(self, node_coords, robot_locations, current_agent_id):
+        occupancy = np.zeros((node_coords.shape[0], 1))
+        index_lookup = self.get_index_lookup()
+
+        for agent_id, robot_location in enumerate(robot_locations):
+            node_index = self.get_node_index(robot_location, index_lookup=index_lookup)
+            occupancy_value = -1.0 if agent_id == current_agent_id else 1.0
+            occupancy[node_index] = occupancy_value
+
+        return occupancy
+
+    def _build_merged_graph_state(self, robot_location, robot_locations, current_agent_id):
         all_node_coords = self._get_all_node_coords()
         utility = []
         frontiers_distribution = []
@@ -209,8 +220,7 @@ class MergedBeliefCriticManager:
         )[0][0]
         neighbor_indices = np.argwhere(adjacent_matrix[current_index] == 0).reshape(-1)
 
-        occupancy = np.zeros((n_nodes, 1))
-        occupancy[current_index] = -1
+        occupancy = self._build_team_occupancy(all_node_coords, robot_locations, current_agent_id)
 
         return (
             all_node_coords,
@@ -298,7 +308,7 @@ class MergedBeliefCriticManager:
                 neighbor_best_headings.append(heading_candidates)
         return torch.stack(neighbor_best_headings).unsqueeze(0).to(self.device)
 
-    def get_critic_observation(self, robot_location, team_node_managers, agent_map_info, local_observation=None, local_node_coords=None, pad=True):
+    def get_critic_observation(self, robot_location, current_agent_id, robot_locations, team_node_managers, agent_map_info, local_observation=None, local_node_coords=None, pad=True):
         (
             node_coords,
             utility,
@@ -310,7 +320,7 @@ class MergedBeliefCriticManager:
             highest_utility_angles,
             merged_frontier_distribution,
             path_coords,
-        ) = self._build_merged_graph_state(robot_location)
+        ) = self._build_merged_graph_state(robot_location, robot_locations, current_agent_id)
 
         n_node = node_coords.shape[0]
         current_node_coords = node_coords[current_index]
