@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '3_31_Updated_critic_observations'
+FOLDER_NAME = '4_1_Updated_critic_observations'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -73,7 +73,7 @@ BATCH_SIZE = 256
 LR = 1e-5
 GAMMA = 0.99
 TAU = 0.001  # Soft update coefficient for target network (0.001 ~ 0.01)
-NUM_META_AGENT = 18
+NUM_META_AGENT = 20
 
 # reward shaping
 MERGED_NODE_UTILITY_REWARD_WEIGHT = 0.7

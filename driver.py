@@ -75,7 +75,7 @@ def main():
         else:
             effective_train_algo = TRAIN_ALGO  # 0 or 2 already have no communication
 
-    # target entropy for SAC (discrete action space)
+    # target entropy for SAC (discrete action space) updated
     action_dim = K_SIZE * NUM_HEADING_CANDIDATES
     entropy_target = 0.5 * np.log(action_dim)
     log_alpha_min = -8.0
