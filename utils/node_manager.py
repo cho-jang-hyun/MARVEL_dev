@@ -48,7 +48,8 @@ class NodeManager:
             neighbor_node.data.neighbor_list.remove(node.coords.tolist())
         self.nodes_dict.remove(node.coords.tolist())
 
-    def update_graph(self, robot_location, frontiers, updating_map_info, map_info, skip_far_existing_updates=True):
+    def update_graph(self, robot_location, frontiers, updating_map_info, map_info,
+                     skip_far_existing_updates=True, refresh_all_neighbors=False):
         node_coords, _ = get_updating_node_coords(robot_location, updating_map_info)
 
         all_node_list = []
@@ -62,16 +63,19 @@ class NodeManager:
                     skip_far_existing_updates
                     and np.linalg.norm(node.coords - robot_location) > 2 * self.sensor_range
                 )
-                if node.utility == 0 or too_far_to_refresh:
+                if too_far_to_refresh:
                     pass
                 else:
                     node.update_node_observable_frontiers(frontiers, updating_map_info, map_info)
             all_node_list.append(node)
 
+        neighbor_map_info = map_info if refresh_all_neighbors else updating_map_info
         for node in all_node_list:
-            if node.need_update_neighbor and np.linalg.norm(node.coords - robot_location) < (
-                    self.sensor_range + NODE_RESOLUTION):
-                node.update_neighbor_nodes(updating_map_info, self.nodes_dict)
+            should_refresh_neighbor = refresh_all_neighbors or (
+                np.linalg.norm(node.coords - robot_location) < (self.sensor_range + NODE_RESOLUTION)
+            )
+            if node.need_update_neighbor and should_refresh_neighbor:
+                node.update_neighbor_nodes(neighbor_map_info, self.nodes_dict)
 
     def get_all_node_graph(self, robot_location):
         all_node_coords = []
@@ -370,9 +374,7 @@ class Node:
                             neighbor_node.neighbor_matrix[neighbor_matrix_x, neighbor_matrix_y] = 1
                             neighbor_node.neighbor_list.append(self.coords)
 
-        if self.utility == 0:
-            self.need_update_neighbor = False
-        elif 0 in self.neighbor_matrix is False:
+        if -1 not in self.neighbor_matrix:
             self.need_update_neighbor = False
 
     def update_node_observable_frontiers(self, frontiers, updating_map_info, map_info):
@@ -397,7 +399,6 @@ class Node:
             self.utility = 0
             self.observable_frontiers = set()
             self.highest_utility_angle = -360
-            self.need_update_neighbor = False
         else:
             observable_frontiers_array = np.array(list(self.observable_frontiers))
             angles = np.degrees(np.arctan2(observable_frontiers_array[:, 1] - self.coords[1], 

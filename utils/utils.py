@@ -162,43 +162,67 @@ def is_frontier(location, map_info):
         else:
             return False
 
-def check_collision(start, end, map_info, allow_unknown=False):
-    # Bresenham line algorithm checking
-    collision = False
+def _get_line_traversal_cells(start_cell, end_cell):
+    x0, y0 = int(start_cell[0]), int(start_cell[1])
+    x1, y1 = int(end_cell[0]), int(end_cell[1])
 
+    cells = [(x0, y0)]
+    dx = x1 - x0
+    dy = y1 - y0
+    step_x = 0 if dx == 0 else (1 if dx > 0 else -1)
+    step_y = 0 if dy == 0 else (1 if dy > 0 else -1)
+    abs_dx = abs(dx)
+    abs_dy = abs(dy)
+
+    if abs_dx == 0 and abs_dy == 0:
+        return cells
+
+    t_delta_x = np.inf if abs_dx == 0 else 1.0 / abs_dx
+    t_delta_y = np.inf if abs_dy == 0 else 1.0 / abs_dy
+    t_max_x = np.inf if abs_dx == 0 else 0.5 * t_delta_x
+    t_max_y = np.inf if abs_dy == 0 else 0.5 * t_delta_y
+
+    x, y = x0, y0
+    while x != x1 or y != y1:
+        if np.isclose(t_max_x, t_max_y):
+            next_x = x + step_x
+            next_y = y + step_y
+            cells.append((next_x, y))
+            cells.append((x, next_y))
+            x, y = next_x, next_y
+            cells.append((x, y))
+            t_max_x += t_delta_x
+            t_max_y += t_delta_y
+        elif t_max_x < t_max_y:
+            x += step_x
+            cells.append((x, y))
+            t_max_x += t_delta_x
+        else:
+            y += step_y
+            cells.append((x, y))
+            t_max_y += t_delta_y
+
+    return cells
+
+def check_collision(start, end, map_info, allow_unknown=False):
     start_cell = get_cell_position_from_coords(start, map_info)
     end_cell = get_cell_position_from_coords(end, map_info)
-    map = map_info.map
+    traversed_cells = _get_line_traversal_cells(start_cell, end_cell)
+    occupancy_map = map_info.map
 
-    x0 = start_cell[0]
-    y0 = start_cell[1]
-    x1 = end_cell[0]
-    y1 = end_cell[1]
-    dx, dy = abs(x1 - x0), abs(y1 - y0)
-    x, y = x0, y0
-    error = dx - dy
-    x_inc = 1 if x1 > x0 else -1
-    y_inc = 1 if y1 > y0 else -1
-    dx *= 2
-    dy *= 2
+    for x, y in traversed_cells:
+        if not (0 <= x < occupancy_map.shape[1] and 0 <= y < occupancy_map.shape[0]):
+            return True
+        if x == end_cell[0] and y == end_cell[1]:
+            continue
 
-    while 0 <= x < map.shape[1] and 0 <= y < map.shape[0]:
-        k = map.item(int(y), int(x))
-        if x == x1 and y == y1:
-            break
-        if k == OCCUPIED:
-            collision = True
-            break
-        if k == UNKNOWN and not allow_unknown:
-            collision = True
-            break
-        if error > 0:
-            x += x_inc
-            error -= dy
-        else:
-            y += y_inc
-            error += dx
-    return collision
+        cell_value = int(occupancy_map[y, x])
+        if cell_value == OCCUPIED:
+            return True
+        if cell_value == UNKNOWN and not allow_unknown:
+            return True
+
+    return False
 
 
 def make_gif(path, n, frame_files, rate):
@@ -232,5 +256,4 @@ class MapInfo:
         self.map = map
         self.map_origin_x = map_origin_x
         self.map_origin_y = map_origin_y
-
 

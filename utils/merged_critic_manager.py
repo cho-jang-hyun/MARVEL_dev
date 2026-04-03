@@ -34,6 +34,7 @@ class MergedBeliefCriticManager:
                 updating_map_info,
                 self.map_info,
                 skip_far_existing_updates=False,
+                refresh_all_neighbors=True,
             )
 
     def get_updating_map(self, location):
