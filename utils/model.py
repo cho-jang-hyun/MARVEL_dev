@@ -383,7 +383,8 @@ class TrajectoryEncoder(nn.Module):
 
 
 class PolicyNet(nn.Module):
-    def __init__(self, node_dim, embedding_dim, num_angles_bin, use_trajectory=True, gated_attention=True):
+    def __init__(self, node_dim, embedding_dim, num_angles_bin, use_trajectory=True, gated_attention=True,
+                 budget_feature_dim=5, action_budget_dim=4):
         super(PolicyNet, self).__init__()
 
         self.use_trajectory = use_trajectory
@@ -429,12 +430,14 @@ class PolicyNet(nn.Module):
 
         # Decoder
         self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1, gated_attention=gated_attention)
-        self.current_embedding = nn.Linear(embedding_dim * 2, embedding_dim)
+        self.current_embedding = nn.Linear(embedding_dim * 3, embedding_dim)
+        self.budget_state_embedding = nn.Linear(budget_feature_dim, embedding_dim)
+        self.action_budget_embedding = nn.Linear(action_budget_dim, embedding_dim)
 
         # Heading layer
         self.best_headings_embedding = nn.Linear(num_angles_bin, embedding_dim)
         self.visited_headings_embedding = nn.Linear(num_angles_bin, embedding_dim)
-        self.neighboring_node_embedding = nn.Linear(embedding_dim * 3, embedding_dim)
+        self.neighboring_node_embedding = nn.Linear(embedding_dim * 4, embedding_dim)
 
         # pointer
         self.pointer = SingleHeadAttention(embedding_dim)
@@ -559,13 +562,16 @@ class PolicyNet(nn.Module):
         return current_node_feature, enhanced_current_node_feature
 
     def output_policy(self, current_node_feature, enhanced_current_node_feature,
-                      enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings):
+                      enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings,
+                      budget_state, action_budget):
         
         embedding_dim = enhanced_node_feature.size()[2]
         batch_size = enhanced_node_feature.size()[0]
         num_best_headings = neighbor_best_headings.size()[2]
+        embedded_budget_state = self.budget_state_embedding(budget_state.unsqueeze(1))
         current_state_feature = self.current_embedding(torch.cat((enhanced_current_node_feature,
-                                                                  current_node_feature), dim=-1))
+                                                                  current_node_feature,
+                                                                  embedded_budget_state), dim=-1))
 
         neighboring_feature = torch.gather(enhanced_node_feature, 1,
                                            current_edge.repeat(1, 1, embedding_dim))     
@@ -577,11 +583,15 @@ class PolicyNet(nn.Module):
 
         neighboring_nodes_feature = neighboring_feature.unsqueeze(2).repeat(1, 1, num_best_headings, 1)                
         neighbor_headings_visited = all_neighbor_headings_visited.unsqueeze(2).repeat(1, 1, num_best_headings, 1)       
+        embedded_action_budget = self.action_budget_embedding(action_budget).unsqueeze(2).repeat(1, 1, num_best_headings, 1)
 
         enhanced_neighbor_features = self.neighboring_node_embedding(torch.cat((neighboring_nodes_feature, neighbor_headings_visited,
-                                                                                enhanced_neighbor_best_headings), dim=-1)).reshape(batch_size, -1, embedding_dim)      
+                                                                                enhanced_neighbor_best_headings,
+                                                                                embedded_action_budget), dim=-1)).reshape(batch_size, -1, embedding_dim)      
      
         current_mask = edge_padding_mask.unsqueeze(-1).repeat(1, 1, 1, num_best_headings).reshape(batch_size, 1, -1)
+        feasibility_mask = (action_budget[:, :, -1] <= 0).unsqueeze(-1).repeat(1, 1, num_best_headings).reshape(batch_size, 1, -1)
+        current_mask = torch.maximum(current_mask, feasibility_mask.to(current_mask.dtype))
         logp = self.pointer(current_state_feature, enhanced_neighbor_features, current_mask)
         logp = logp.squeeze(1)
 
@@ -589,6 +599,7 @@ class PolicyNet(nn.Module):
 
     def forward(self, node_inputs, node_padding_mask, edge_mask, current_index,
                 current_edge, edge_padding_mask, frontier_distribution, headings_visited, neighbor_best_headings,
+                budget_state, action_budget,
                 detected_trajectories=None, trajectory_mask=None, trajectory_node_indices=None):
         enhanced_node_feature = self.encode_graph(node_inputs, node_padding_mask, edge_mask, frontier_distribution)
 
@@ -608,13 +619,15 @@ class PolicyNet(nn.Module):
             enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding,
             trajectory_node_features, trajectory_mask, trajectory_node_indices)
         logp = self.output_policy(current_node_feature, enhanced_current_node_feature,
-                                  enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings)
+                                  enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings,
+                                  budget_state, action_budget)
 
         return logp
 
 
 class QNet(nn.Module):
-    def __init__(self, node_dim, embedding_dim, num_angles_bin, train_algo, use_trajectory=True, gated_attention=True):
+    def __init__(self, node_dim, embedding_dim, num_angles_bin, train_algo, use_trajectory=True, gated_attention=True,
+                 budget_feature_dim=5, action_budget_dim=4):
         super(QNet, self).__init__()
 
         self.use_trajectory = use_trajectory
@@ -659,12 +672,14 @@ class QNet(nn.Module):
 
         # Decoder
         self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1, gated_attention=gated_attention)
-        self.current_embedding = nn.Linear(embedding_dim * 2, embedding_dim)
+        self.current_embedding = nn.Linear(embedding_dim * 3, embedding_dim)
+        self.budget_state_embedding = nn.Linear(budget_feature_dim, embedding_dim)
+        self.action_budget_embedding = nn.Linear(action_budget_dim, embedding_dim)
 
         # Heeading layer
         self.best_headings_embedding = nn.Linear(num_angles_bin, embedding_dim)
         self.visited_headings_embedding = nn.Linear(num_angles_bin, embedding_dim)
-        self.neighboring_node_embedding = nn.Linear(embedding_dim * 3, embedding_dim)
+        self.neighboring_node_embedding = nn.Linear(embedding_dim * 4, embedding_dim)
 
         # Agent decoder
         if train_algo in (2, 3, 4, 5):
@@ -802,12 +817,15 @@ class QNet(nn.Module):
         return current_node_feature, enhanced_current_node_feature
 
     def output_q(self, current_node_feature, enhanced_current_node_feature, enhanced_node_feature,
-                 current_edge, edge_padding_mask, headings_visited, neighbor_best_headings, current_index, all_agent_indices, all_agent_next_indices):
+                 current_edge, edge_padding_mask, headings_visited, neighbor_best_headings, budget_state, action_budget,
+                 current_index, all_agent_indices, all_agent_next_indices):
         embedding_dim = enhanced_node_feature.size()[2]
         num_best_headings = neighbor_best_headings.size()[2]
         batch_size = enhanced_node_feature.size()[0]
+        embedded_budget_state = self.budget_state_embedding(budget_state.unsqueeze(1))
         current_state_feature = self.current_embedding(torch.cat((enhanced_current_node_feature,
-                                                                  current_node_feature), dim=-1))
+                                                                  current_node_feature,
+                                                                  embedded_budget_state), dim=-1))
 
         neighboring_feature = torch.gather(enhanced_node_feature, 1,
                                            current_edge.repeat(1, 1, embedding_dim))
@@ -819,9 +837,11 @@ class QNet(nn.Module):
 
         neighboring_nodes_feature = neighboring_feature.unsqueeze(2).repeat(1, 1, num_best_headings, 1)
         neighbor_headings_visited = all_neighbor_headings_visited.unsqueeze(2).repeat(1, 1, num_best_headings, 1)
+        embedded_action_budget = self.action_budget_embedding(action_budget).unsqueeze(2).repeat(1, 1, num_best_headings, 1)
 
         enhanced_neighbor_features = self.neighboring_node_embedding(torch.cat((neighboring_nodes_feature, neighbor_headings_visited,
-                                                                                enhanced_neighbor_best_headings), dim=-1)).reshape(batch_size, -1, embedding_dim)
+                                                                                enhanced_neighbor_best_headings,
+                                                                                embedded_action_budget), dim=-1)).reshape(batch_size, -1, embedding_dim)
         
         if all_agent_indices != None:
             all_agent_node_feature = torch.gather(enhanced_node_feature, 1,
@@ -843,6 +863,7 @@ class QNet(nn.Module):
 
     def forward(self, node_inputs, node_padding_mask, edge_mask, current_index,
                 current_edge, edge_padding_mask, frontier_distribution, headings_visited, neighbor_best_headings,
+                budget_state, action_budget,
                 all_agent_indices=None, all_agent_next_indices=None, detected_trajectories=None, trajectory_mask=None, trajectory_node_indices=None):
         enhanced_node_feature = self.encode_graph(node_inputs, node_padding_mask, edge_mask, frontier_distribution)
 
@@ -862,5 +883,6 @@ class QNet(nn.Module):
             enhanced_node_feature, current_index, node_padding_mask, trajectory_embedding,
             trajectory_node_features, trajectory_mask, trajectory_node_indices)
         q_values = self.output_q(current_node_feature, enhanced_current_node_feature,
-                                 enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings, current_index, all_agent_indices, all_agent_next_indices)
+                                 enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings,
+                                 budget_state, action_budget, current_index, all_agent_indices, all_agent_next_indices)
         return q_values

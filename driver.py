@@ -45,6 +45,17 @@ if not os.path.exists(load_path):
     os.makedirs(load_path)
 
 
+def load_compatible_state_dict(module, checkpoint_state, label):
+    model_state = module.state_dict()
+    compatible_state = {
+        key: value for key, value in checkpoint_state.items()
+        if key in model_state and model_state[key].shape == value.shape
+    }
+    missing_or_mismatched = len(model_state) - len(compatible_state)
+    module.load_state_dict(compatible_state, strict=False)
+    print(f'Loaded {label}: {len(compatible_state)} tensors, skipped {missing_or_mismatched}')
+
+
 def main():
     # Set specific GPU if GPU_ID is specified
     if USE_GPU_GLOBAL and GPU_ID is not None:
@@ -108,6 +119,7 @@ def main():
 
     curr_episode = 0
     best_success_rate = -float('inf')  # Track best performance for saving best model
+    curriculum_success_rate = 0.0     # EMA of success rate used to anneal the budget
 
     if USE_WANDB:
         import parameter
@@ -121,9 +133,9 @@ def main():
     if LOAD_MODEL:
         print('Loading Model...')
         checkpoint = torch.load(model_path + '/latest.pth', map_location=device)
-        global_policy_net.load_state_dict(checkpoint['policy_model'])
-        global_q_net1.load_state_dict(checkpoint['q_net1_model'])
-        global_q_net2.load_state_dict(checkpoint['q_net2_model'])
+        load_compatible_state_dict(global_policy_net, checkpoint['policy_model'], 'policy')
+        load_compatible_state_dict(global_q_net1, checkpoint['q_net1_model'], 'q_net1')
+        load_compatible_state_dict(global_q_net2, checkpoint['q_net2_model'], 'q_net2')
         log_alpha = checkpoint['log_alpha'].to(device)
         log_alpha.requires_grad_(True)
         log_alpha_optimizer = optim.Adam([log_alpha], lr=1e-4)
@@ -134,6 +146,7 @@ def main():
         log_alpha_optimizer.load_state_dict(checkpoint['log_alpha_optimizer'])
         curr_episode = checkpoint['episode']
         best_success_rate = checkpoint.get('best_success_rate', -float('inf'))
+        curriculum_success_rate = checkpoint.get('curriculum_success_rate', 0.0)
 
     global_target_q_net1.load_state_dict(global_q_net1.state_dict())
     global_target_q_net2.load_state_dict(global_q_net2.state_dict())
@@ -172,7 +185,7 @@ def main():
     job_list = []
     for i, meta_agent in enumerate(meta_agents):
         curr_episode += 1
-        job_list.append(meta_agent.job.remote(weights_set, curr_episode))
+        job_list.append(meta_agent.job.remote(weights_set, curr_episode, curriculum_success_rate))
 
     # initialize metric collector
     metric_name = ['travel_dist', 'success_rate', 'explored_rate']
@@ -201,10 +214,14 @@ def main():
                     experience_buffer[i] += job_results[i]
                 for n in metric_name:
                     perf_metrics[n].append(metrics[n])
+                curriculum_success_rate = (
+                    (1 - BUDGET_CURRICULUM_EMA) * curriculum_success_rate
+                    + BUDGET_CURRICULUM_EMA * float(metrics['success_rate'])
+                )
 
             # launch new task
             curr_episode += 1
-            job_list.append(meta_agents[info['id']].job.remote(weights_set, curr_episode))
+            job_list.append(meta_agents[info['id']].job.remote(weights_set, curr_episode, curriculum_success_rate))
 
             # start training
             if curr_episode % 1 == 0 and len(experience_buffer[0]) >= MINIMUM_BUFFER_SIZE:
@@ -251,6 +268,10 @@ def main():
                     next_heading_visited = torch.stack(rollouts[18]).to(device)
                     neighbor_best_headings = torch.stack(rollouts[38]).to(device)
                     next_neighbor_best_headings = torch.stack(rollouts[39]).to(device)
+                    budget_state = torch.stack(rollouts[48]).to(device)
+                    action_budget = torch.stack(rollouts[49]).to(device)
+                    next_budget_state = torch.stack(rollouts[50]).to(device)
+                    next_action_budget = torch.stack(rollouts[51]).to(device)
                     detected_trajectories = torch.stack(rollouts[40]).to(device)
                     trajectory_mask = torch.stack(rollouts[41]).to(device)
                     trajectory_node_indices = torch.stack(rollouts[42]).to(device)
@@ -289,9 +310,12 @@ def main():
                         next_all_agent_next_indices = torch.stack(rollouts[37]).to(device)
 
                     observation = [node_inputs, node_padding_mask, local_edge_mask, current_local_index,
-                                   current_local_edge, local_edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings]
+                                   current_local_edge, local_edge_padding_mask, frontier_distribution, heading_visited,
+                                   neighbor_best_headings, budget_state, action_budget]
                     next_observation = [next_node_inputs, next_node_padding_mask, next_local_edge_mask,
-                                        next_current_local_index, next_current_local_edge, next_local_edge_padding_mask, next_frontier_distribution, next_heading_visited, next_neighbor_best_headings]
+                                        next_current_local_index, next_current_local_edge, next_local_edge_padding_mask,
+                                        next_frontier_distribution, next_heading_visited, next_neighbor_best_headings,
+                                        next_budget_state, next_action_budget]
 
                     policy_kwargs = dict(
                         detected_trajectories=detected_trajectories,
@@ -340,9 +364,12 @@ def main():
                     elif effective_train_algo == 2:
                         # Ground truth only, no communication
                         state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
-                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited, neighbor_best_headings]
+                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited,
+                                 neighbor_best_headings, budget_state, action_budget]
                         next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
-                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask, critic_next_frontier_distribution, critic_next_heading_visited, next_neighbor_best_headings]
+                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask,
+                                      critic_next_frontier_distribution, critic_next_heading_visited, next_neighbor_best_headings,
+                                      next_budget_state, next_action_budget]
                         q_kwargs = dict(
                             detected_trajectories=detected_trajectories,
                             trajectory_mask=trajectory_mask,
@@ -356,9 +383,12 @@ def main():
                     elif effective_train_algo == 3:
                         # MAAC with ground truth and communication
                         state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
-                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited, neighbor_best_headings]
+                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited,
+                                 neighbor_best_headings, budget_state, action_budget]
                         next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
-                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask, critic_next_frontier_distribution, critic_next_heading_visited, next_neighbor_best_headings]
+                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask,
+                                      critic_next_frontier_distribution, critic_next_heading_visited, next_neighbor_best_headings,
+                                      next_budget_state, next_action_budget]
                         q_kwargs = dict(
                             all_agent_indices=all_agent_indices,
                             all_agent_next_indices=all_agent_next_indices,
@@ -376,9 +406,12 @@ def main():
                     elif effective_train_algo == 4:
                         # Merged-belief critic only, no communication
                         state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
-                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited, critic_neighbor_best_headings]
+                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited,
+                                 critic_neighbor_best_headings, budget_state, action_budget]
                         next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
-                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask, critic_next_frontier_distribution, critic_next_heading_visited, next_critic_neighbor_best_headings]
+                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask,
+                                      critic_next_frontier_distribution, critic_next_heading_visited, next_critic_neighbor_best_headings,
+                                      next_budget_state, next_action_budget]
                         q_kwargs = dict(
                             detected_trajectories=detected_trajectories,
                             trajectory_mask=trajectory_mask,
@@ -392,9 +425,12 @@ def main():
                     elif effective_train_algo == 5:
                         # Merged-belief critic with communication
                         state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
-                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited, critic_neighbor_best_headings]
+                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited,
+                                 critic_neighbor_best_headings, budget_state, action_budget]
                         next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
-                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask, critic_next_frontier_distribution, critic_next_heading_visited, next_critic_neighbor_best_headings]
+                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask,
+                                      critic_next_frontier_distribution, critic_next_heading_visited, next_critic_neighbor_best_headings,
+                                      next_budget_state, next_action_budget]
                         q_kwargs = dict(
                             all_agent_indices=all_agent_indices,
                             all_agent_next_indices=all_agent_next_indices,
@@ -494,6 +530,9 @@ def main():
             # write record to tensorboard
             if len(training_data) >= SUMMARY_WINDOW:
                 write_to_tensor_board(writer, training_data, curr_episode)
+                writer.add_scalar('Curriculum/success_rate_ema', curriculum_success_rate, curr_episode)
+                current_budget = BUDGET_END + int((BUDGET_START - BUDGET_END) * (1.0 - curriculum_success_rate))
+                writer.add_scalar('Curriculum/budget', current_budget, curr_episode)
                 training_data = []
                 perf_metrics = {}
                 for n in metric_name:
@@ -521,6 +560,7 @@ def main():
                               "log_alpha_optimizer": log_alpha_optimizer.state_dict(),
                               "episode": curr_episode,
                               "best_success_rate": best_success_rate,
+                              "curriculum_success_rate": curriculum_success_rate,
                               }
 
                 # Save latest model (always)

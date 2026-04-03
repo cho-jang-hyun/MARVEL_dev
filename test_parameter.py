@@ -26,6 +26,7 @@ NUM_TEST = 100
 USE_CONTINUOUS_SIM = True
 NUM_SIM_STEPS = 6
 MAX_EPISODE_STEP = 128
+BUDGET = MAX_EPISODE_STEP
 VELOCITY = 1
 YAW_RATE = 35 # in degrees
 
@@ -56,6 +57,8 @@ INITIAL_EXPLORED_RATE = 0.90
 # Network parameters
 NODE_INPUT_DIM = 7 # add visited node feature
 EMBEDDING_DIM = 128
+BUDGET_FEATURE_DIM = 5
+ACTION_BUDGET_DIM = 4
 USE_TRAJECTORY = True  # Enable trajectory encoder
 
 # Trajectory tracking parameters (same as parameter.py)

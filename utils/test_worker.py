@@ -18,6 +18,17 @@ from test_parameter import *
 if not os.path.exists(gifs_path):
     os.makedirs(gifs_path)
 
+
+def load_compatible_state_dict(module, checkpoint_state, label):
+    model_state = module.state_dict()
+    compatible_state = {
+        key: value for key, value in checkpoint_state.items()
+        if key in model_state and model_state[key].shape == value.shape
+    }
+    missing_or_mismatched = len(model_state) - len(compatible_state)
+    module.load_state_dict(compatible_state, strict=False)
+    print(f'Loaded {label}: {len(compatible_state)} tensors, skipped {missing_or_mismatched}')
+
 class TestWorker:
     def __init__(self, meta_agent_id, policy_net, global_step, n_agent, fov, sensor_range, utility_range, device='cpu', save_image=False, greedy=True):
         self.meta_agent_id = meta_agent_id
@@ -57,6 +68,10 @@ class TestWorker:
                 self.env.angles[i],
                 0.0
             ))
+        self.base_locations = self.env.robot_locations.copy()
+        self.initial_budgets = np.full(self.n_agents, BUDGET, dtype=int)
+        self.remaining_budgets = self.initial_budgets.copy()
+        self.returning_agents = np.zeros(self.n_agents, dtype=bool)
 
         # Initialize individual observation maps for each agent (for visualization)
         # Each agent tracks what ONLY they have observed
@@ -71,12 +86,53 @@ class TestWorker:
                 self.env.ground_truth, self.env.angles[i], self.fov
             )
 
+    def _set_agent_budget_context(self, robot):
+        robot.set_budget_context(
+            self.initial_budgets[robot.id],
+            self.remaining_budgets[robot.id],
+            self.base_locations[robot.id],
+            return_mode=self.returning_agents[robot.id],
+        )
+
+    def _get_return_path(self, robot):
+        self._set_agent_budget_context(robot)
+        return robot.get_path_to_base()
+
+    def _get_heading_index_towards(self, robot, next_location):
+        next_location = np.asarray(next_location, dtype=float)
+        if np.allclose(next_location, robot.location):
+            return int((robot.heading % 360) / 360 * NUM_ANGLES_BIN) % NUM_ANGLES_BIN
+        angle = np.degrees(np.arctan2(
+            next_location[1] - robot.location[1],
+            next_location[0] - robot.location[0],
+        ) % (2 * np.pi))
+        return int(angle / 360 * NUM_ANGLES_BIN) % NUM_ANGLES_BIN
+
+    def _append_trajectory_step(self, robot, next_location):
+        prev_trajectory = self.trajectory_buffer[robot.id][-1] if len(self.trajectory_buffer[robot.id]) > 0 else None
+        if prev_trajectory is not None:
+            prev_x, prev_y = prev_trajectory[0], prev_trajectory[1]
+            velocity = np.linalg.norm(next_location - np.array([prev_x, prev_y])) / NUM_SIM_STEPS
+        else:
+            velocity = 0.0
+
+        self.trajectory_buffer[robot.id].append((
+            next_location[0],
+            next_location[1],
+            robot.heading,
+            velocity
+        ))
+
+    def _all_agents_at_base(self):
+        return all(np.allclose(robot.location, self.base_locations[robot.id]) for robot in self.robot_list)
+
     def run_episode(self):
         done = False
         for robot in self.robot_list:
             robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
         for robot in self.robot_list:
             robot.update_planning_state()
+            self._set_agent_budget_context(robot)
         
         reach_checkpoint = False
 
@@ -90,27 +146,72 @@ class TestWorker:
 
         setpoints = [[] for _ in range(self.n_agents)]
         headings = [[] for _ in range(self.n_agents)]
+        mission_success = False
+        mission_failure = False
 
-
-        for i in range(MAX_EPISODE_STEP):
+        for i in range(MAX_EPISODE_STEP + BUDGET):
             # print(' Current timestep: {}/{}'.format(i, MAX_EPISODE_STEP))
-            selected_locations = []
-            dist_list = []
-            next_node_index_list = []
-            next_heading_index_list = []
+            selected_locations = [robot.location.copy() for robot in self.robot_list]
+            dist_list = [0.0 for _ in range(self.n_agents)]
+            next_node_index_list = [robot.current_index for robot in self.robot_list]
+            next_heading_index_list = [self._get_heading_index_towards(robot, robot.location) for robot in self.robot_list]
             for robot in self.robot_list:
-                observation = robot.get_observation(
-                    pad=False,
-                    robot_locations=self.env.robot_locations,
-                    trajectory_buffer=self.trajectory_buffer
-                )
+                self._set_agent_budget_context(robot)
+                robot_at_base = np.allclose(robot.location, self.base_locations[robot.id])
+                if self.returning_agents[robot.id] and robot_at_base:
+                    continue
 
-                next_location, next_node_index, _, next_heading_index = robot.select_next_waypoint(observation, greedy=self.greedy)
+                if (not self.returning_agents[robot.id]) and (mission_success or robot.get_hops_to_base() >= self.remaining_budgets[robot.id]):
+                    self.returning_agents[robot.id] = True
 
-                selected_locations.append(next_location)
-                dist_list.append(np.linalg.norm(next_location - robot.location))
-                next_node_index_list.append(next_node_index)
-                next_heading_index_list.append(next_heading_index)
+                if self.returning_agents[robot.id]:
+                    return_path = self._get_return_path(robot)
+                    if len(return_path) == 0:
+                        if not robot_at_base:
+                            mission_failure = True
+                        next_location = robot.location.copy()
+                    else:
+                        next_location = return_path[0].copy()
+                    next_heading_index = self._get_heading_index_towards(robot, next_location)
+                    next_node_index = robot.current_index
+                else:
+                    observation = robot.get_observation(
+                        pad=False,
+                        robot_locations=self.env.robot_locations,
+                        trajectory_buffer=self.trajectory_buffer
+                    )
+
+                    action_budget = observation[10][0].detach().cpu().numpy()
+                    current_edge = observation[4][0, :, 0].detach().cpu().numpy()
+                    feasible_slots = []
+                    for slot in range(current_edge.shape[0]):
+                        if action_budget[slot, -1] <= 0.5:
+                            continue
+                        if int(current_edge[slot]) == int(robot.current_index):
+                            continue
+                        feasible_slots.append(slot)
+
+                    if len(feasible_slots) == 0:
+                        self.returning_agents[robot.id] = True
+                        return_path = self._get_return_path(robot)
+                        if len(return_path) == 0:
+                            if not robot_at_base:
+                                mission_failure = True
+                            next_location = robot.location.copy()
+                        else:
+                            next_location = return_path[0].copy()
+                        next_heading_index = self._get_heading_index_towards(robot, next_location)
+                        next_node_index = robot.current_index
+                    else:
+                        next_location, next_node_index, _, next_heading_index = robot.select_next_waypoint(observation, greedy=self.greedy)
+
+                selected_locations[robot.id] = next_location
+                dist_list[robot.id] = np.linalg.norm(next_location - robot.location)
+                next_node_index_list[robot.id] = next_node_index
+                next_heading_index_list[robot.id] = next_heading_index
+
+            if mission_failure:
+                break
 
             selected_locations = np.array(selected_locations).reshape(-1, 2)
             arriving_sequence = np.argsort(np.array(dist_list))
@@ -121,14 +222,17 @@ class TestWorker:
                 solved_locations = selected_locations_in_arriving_sequence[:j]
                 while selected_location[0] + selected_location[1] * 1j in solved_locations[:, 0] + solved_locations[:, 1] * 1j:
                     id = arriving_sequence[j]
-                    nearby_nodes = self.robot_list[id].node_manager.nodes_dict.nearest_neighbors(
-                        selected_location.tolist(), 25)
-                    for node in nearby_nodes:
-                        coords = node.data.coords
-                        if coords[0] + coords[1] * 1j in solved_locations[:, 0] + solved_locations[:, 1] * 1j:
-                            continue
-                        selected_location = coords
-                        break
+                    if self.returning_agents[id]:
+                        selected_location = self.robot_list[id].location.copy()
+                    else:
+                        nearby_nodes = self.robot_list[id].node_manager.nodes_dict.nearest_neighbors(
+                            selected_location.tolist(), 25)
+                        for node in nearby_nodes:
+                            coords = node.data.coords
+                            if coords[0] + coords[1] * 1j in solved_locations[:, 0] + solved_locations[:, 1] * 1j:
+                                continue
+                            selected_location = coords
+                            break
 
                     selected_locations_in_arriving_sequence[j] = selected_location
                     selected_locations[id] = selected_location
@@ -184,21 +288,9 @@ class TestWorker:
 
             for robot, next_location, next_node_index in zip(self.robot_list, selected_locations, next_node_index_list):
                 self.env.final_sim_step(next_location, robot.id)
-
-                # Update trajectory buffer
-                prev_trajectory = self.trajectory_buffer[robot.id][-1] if len(self.trajectory_buffer[robot.id]) > 0 else None
-                if prev_trajectory is not None:
-                    prev_x, prev_y = prev_trajectory[0], prev_trajectory[1]
-                    velocity = np.linalg.norm(next_location - np.array([prev_x, prev_y])) / NUM_SIM_STEPS
-                else:
-                    velocity = 0.0
-
-                self.trajectory_buffer[robot.id].append((
-                    next_location[0],
-                    next_location[1],
-                    robot.heading,
-                    velocity
-                ))
+                if not np.allclose(next_location, robot.location):
+                    self.remaining_budgets[robot.id] -= 1
+                self._append_trajectory_step(robot, next_location)
 
                 robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
                 robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
@@ -207,6 +299,7 @@ class TestWorker:
 
             for robot in self.robot_list:
                 robot.update_planning_state()
+                self._set_agent_budget_context(robot)
 
             max_travel_dist += np.max(dist_list)
             length_history.append(max_travel_dist)
@@ -216,16 +309,20 @@ class TestWorker:
                 trajectory_length = max([robot.travel_dist for robot in self.robot_list])
                 reach_checkpoint = True
 
-            if self.env.explored_rate > SUCCESS_THRESHOLD: # changed from 0.99 to 0.95
+            mission_success = mission_success or (self.env.explored_rate > SUCCESS_THRESHOLD)
+            if np.any(self.remaining_budgets < 0):
+                mission_failure = True
+
+            if self._all_agents_at_base() and (mission_success or np.all(self.returning_agents)) :
                 done = True
 
-            if done:
+            if mission_failure or done:
                 break
 
         # Save metrics
         self.perf_metrics['travel_dist'] = max([robot.travel_dist for robot in self.robot_list])
         self.perf_metrics['explored_rate'] = self.env.explored_rate
-        self.perf_metrics['success_rate'] = done
+        self.perf_metrics['success_rate'] = bool(mission_success and self._all_agents_at_base() and not mission_failure and np.all(self.remaining_budgets >= 0))
         if trajectory_length > 0:
             self.perf_metrics['dist_to_0_90'] = trajectory_length
         else:
@@ -730,7 +827,7 @@ if __name__ == '__main__':
     policy_net = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, use_trajectory=USE_TRAJECTORY)
     if LOAD_MODEL:
         checkpoint = torch.load(load_path + '/checkpoint.pth', map_location='cpu')
-        policy_net.load_state_dict(checkpoint['policy_model'])
+        load_compatible_state_dict(policy_net, checkpoint['policy_model'], 'policy')
         print('Policy loaded!')
     worker = TestWorker(0, policy_net, 188, 4, 120, 10, 'cpu', True)
     worker.run_episode()

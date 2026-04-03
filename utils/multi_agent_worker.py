@@ -40,7 +40,7 @@ if not os.path.exists(gifs_path):
     os.makedirs(gifs_path)
 
 class MultiAgentWorker:
-    def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', save_image=False):
+    def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', save_image=False, curriculum_success_rate=0.0):
         self.meta_agent_id = meta_agent_id
         self.global_step = global_step
         self.save_image = save_image
@@ -90,6 +90,11 @@ class MultiAgentWorker:
                 self.env.angles[i],
                 0.0
             ))
+        self.base_locations = self.env.robot_locations.copy()
+        self.initial_budgets = self._sample_initial_budgets(curriculum_success_rate)
+        self.remaining_budgets = self.initial_budgets.copy()
+        self.returning_agents = np.zeros(self.n_agents, dtype=bool)
+        self.replay_closed = np.zeros(self.n_agents, dtype=bool)
 
     def _get_collision_free_candidate(self, robot, occupied_locations):
         occupied_keys = {
@@ -105,26 +110,208 @@ class MultiAgentWorker:
 
         return None, None
 
+    def _sample_initial_budgets(self, curriculum_success_rate=0.0):
+        success = float(np.clip(curriculum_success_rate, 0.0, 1.0))
+        target = BUDGET_END + int((BUDGET_START - BUDGET_END) * (1.0 - success))
+        lo = int(np.clip(target - BUDGET_CURRICULUM_NOISE, BUDGET_END, BUDGET_START))
+        hi = int(np.clip(target + BUDGET_CURRICULUM_NOISE, BUDGET_END, BUDGET_START))
+
+        if np.random.random() < BUDGET_CURRICULUM_UNIFORM_P:
+            left_count = max(0, lo - BUDGET_END)
+            right_count = max(0, BUDGET_START - hi)
+            total_outside = left_count + right_count
+            if total_outside > 0:
+                idx = np.random.randint(0, total_outside)
+                budget = (BUDGET_END + idx) if idx < left_count else (hi + 1 + idx - left_count)
+            else:
+                budget = int(np.random.randint(lo, hi + 1))
+        else:
+            noise = np.random.randint(-BUDGET_CURRICULUM_NOISE, BUDGET_CURRICULUM_NOISE + 1)
+            budget = int(np.clip(target + noise, BUDGET_END, BUDGET_START))
+
+        return np.full(self.n_agents, budget, dtype=int)
+
+    def _set_agent_budget_context(self, robot):
+        robot.set_budget_context(
+            self.initial_budgets[robot.id],
+            self.remaining_budgets[robot.id],
+            self.base_locations[robot.id],
+            return_mode=self.returning_agents[robot.id],
+        )
+
+    def _append_trajectory_step(self, robot, next_location):
+        prev_trajectory = self.trajectory_buffer[robot.id][-1] if len(self.trajectory_buffer[robot.id]) > 0 else None
+        if prev_trajectory is not None:
+            prev_x, prev_y = prev_trajectory[0], prev_trajectory[1]
+            velocity = np.linalg.norm(next_location - np.array([prev_x, prev_y])) / NUM_SIM_STEPS
+        else:
+            velocity = 0.0
+
+        self.trajectory_buffer[robot.id].append((
+            next_location[0],
+            next_location[1],
+            robot.heading,
+            velocity
+        ))
+
+    def _get_heading_index_towards(self, robot, next_location):
+        next_location = np.asarray(next_location, dtype=float)
+        if np.allclose(next_location, robot.location):
+            return int((robot.heading % 360) / 360 * NUM_ANGLES_BIN) % NUM_ANGLES_BIN
+        angle = np.degrees(np.arctan2(
+            next_location[1] - robot.location[1],
+            next_location[0] - robot.location[0],
+        ) % (2 * np.pi))
+        return int(angle / 360 * NUM_ANGLES_BIN) % NUM_ANGLES_BIN
+
+    def _get_return_path(self, robot, start_location=None):
+        self._set_agent_budget_context(robot)
+        return robot.get_path_to_base(start_location=start_location)
+
+    def _all_agents_at_base(self):
+        return all(np.allclose(robot.location, self.base_locations[robot.id]) for robot in self.robot_list)
+
+    def _get_joint_next_index_lists(self):
+        local_next_indices = [robot.current_index for robot in self.robot_list]
+        critic_next_indices = None
+        if self.use_merged_critic:
+            critic_next_indices = [self.merged_critic_manager.get_node_index(robot.location) for robot in self.robot_list]
+        return local_next_indices, critic_next_indices
+
+    def _close_agent_replay(self, robot, team_node_managers):
+        if self.replay_closed[robot.id] or len(robot.episode_buffer[0]) == 0:
+            self.replay_closed[robot.id] = True
+            return
+
+        self._set_agent_budget_context(robot)
+        observation = robot.get_observation(
+            robot_locations=self.env.robot_locations,
+            trajectory_buffer=self.trajectory_buffer
+        )
+        local_next_indices, critic_next_indices = self._get_joint_next_index_lists()
+        joint_next_index_list = local_next_indices
+        if self.use_merged_critic and USE_COMMUNICATION:
+            joint_next_index_list = critic_next_indices
+        robot.save_next_observations(observation, joint_next_index_list)
+
+        if self.use_merged_critic:
+            critic_observation = self.merged_critic_manager.get_critic_observation(
+                robot.location,
+                robot.id,
+                self.env.robot_locations,
+                team_node_managers,
+                self.env.get_agent_map_info(robot.id),
+                local_observation=observation,
+                local_node_coords=robot.node_coords,
+            )
+            robot.save_next_critic_observations(critic_observation)
+        else:
+            ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
+            robot.save_next_ground_truth_observations(ground_truth_observation)
+
+        self.replay_closed[robot.id] = True
+
+    def _finalize_open_agent_replays(self, team_node_managers):
+        for robot in self.robot_list:
+            if self.replay_closed[robot.id] or len(robot.episode_buffer[0]) == 0:
+                continue
+            self._close_agent_replay(robot, team_node_managers)
+
+    def _has_feasible_exploration_action(self, robot, observation):
+        current_edge = observation[4][0, :, 0].detach().cpu().numpy()
+        edge_padding = observation[5][0, 0].detach().cpu().numpy()
+        action_budget = observation[10][0].detach().cpu().numpy()
+
+        valid_slots = np.where(edge_padding == 0)[0]
+        for slot in valid_slots:
+            if action_budget[slot, -1] <= 0.5:
+                continue
+            if int(current_edge[slot]) == int(robot.current_index):
+                continue
+            return True
+        return False
+
+    def _get_local_node_index(self, robot, next_location):
+        if robot.node_coords is None or len(robot.node_coords) == 0:
+            return int(robot.current_index)
+        exact = np.argwhere(np.all(robot.node_coords == next_location, axis=1))
+        if exact.size > 0:
+            return int(exact[0][0])
+        distances = np.linalg.norm(robot.node_coords - next_location, axis=1)
+        return int(np.argmin(distances))
+
     def run_episode(self):
-        done = False
         team_node_managers = [robot.node_manager for robot in self.robot_list]
         for robot in self.robot_list:
             robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
         for robot in self.robot_list:
             robot.update_planning_state()
+            self._set_agent_budget_context(robot)
         self.merged_map_manager.update_graph(self.env.belief_info, self.env.robot_locations)
 
-        for i in range(MAX_EPISODE_STEP):
+        mission_success = False
+        mission_failure = False
+        max_decision_steps = MAX_EPISODE_STEP + int(np.max(self.initial_budgets))
 
-            selected_locations = []
-            dist_list = []
-            next_heading_index_list = []
+        for i in range(max_decision_steps):
+            selected_locations = [robot.location.copy() for robot in self.robot_list]
+            dist_list = [0.0 for _ in range(self.n_agents)]
+            next_heading_index_list = [self._get_heading_index_towards(robot, robot.location) for robot in self.robot_list]
+            observations = {}
+            active_explorer_ids = []
+
             for robot in self.robot_list:
+                self._set_agent_budget_context(robot)
+                robot_at_base = np.allclose(robot.location, self.base_locations[robot.id])
+                hops_to_base = robot.get_hops_to_base()
+
+                if self.returning_agents[robot.id] and robot_at_base:
+                    continue
+
+                if (not self.returning_agents[robot.id]) and (mission_success or hops_to_base >= self.remaining_budgets[robot.id]):
+                    self.returning_agents[robot.id] = True
+                    self._close_agent_replay(robot, team_node_managers)
+
+                if self.returning_agents[robot.id]:
+                    return_path = self._get_return_path(robot)
+                    if len(return_path) == 0:
+                        if not robot_at_base:
+                            mission_failure = True
+                        selected_locations[robot.id] = robot.location.copy()
+                    else:
+                        selected_locations[robot.id] = return_path[0].copy()
+                    dist_list[robot.id] = np.linalg.norm(selected_locations[robot.id] - robot.location)
+                    next_heading_index_list[robot.id] = self._get_heading_index_towards(robot, selected_locations[robot.id])
+                    continue
+
                 observation = robot.get_observation(
                     robot_locations=self.env.robot_locations,
                     trajectory_buffer=self.trajectory_buffer
                 )
 
+                if not self._has_feasible_exploration_action(robot, observation):
+                    self.returning_agents[robot.id] = True
+                    self._close_agent_replay(robot, team_node_managers)
+                    return_path = self._get_return_path(robot)
+                    if len(return_path) == 0:
+                        if not robot_at_base:
+                            mission_failure = True
+                        selected_locations[robot.id] = robot.location.copy()
+                    else:
+                        selected_locations[robot.id] = return_path[0].copy()
+                    dist_list[robot.id] = np.linalg.norm(selected_locations[robot.id] - robot.location)
+                    next_heading_index_list[robot.id] = self._get_heading_index_towards(robot, selected_locations[robot.id])
+                    continue
+
+                observations[robot.id] = observation
+                active_explorer_ids.append(robot.id)
+
+            if mission_failure:
+                break
+
+            for robot_id in active_explorer_ids:
+                robot = self.robot_list[robot_id]
+                observation = observations[robot_id]
                 robot.save_observation(observation)
                 if self.use_merged_critic:
                     critic_observation = self.merged_critic_manager.get_critic_observation(
@@ -143,48 +330,49 @@ class MultiAgentWorker:
                     robot.save_ground_truth_observation(ground_truth_observation)
 
                 next_location, _, _, next_heading_index = robot.select_next_waypoint(observation)
+                selected_locations[robot_id] = next_location.copy()
+                dist_list[robot_id] = np.linalg.norm(next_location - robot.location)
+                next_heading_index_list[robot_id] = next_heading_index
 
-                selected_locations.append(next_location)
-                dist_list.append(np.linalg.norm(next_location - robot.location))
-                next_heading_index_list.append(next_heading_index)
+            selected_locations = np.asarray(selected_locations).reshape(-1, 2)
+            arriving_sequence = np.argsort(np.asarray(dist_list))
+            selected_locations_in_arriving_sequence = selected_locations[arriving_sequence].copy()
 
-            selected_locations = np.array(selected_locations).reshape(-1, 2)
-            arriving_sequence = np.argsort(np.array(dist_list))
-            selected_locations_in_arriving_sequence = np.array(selected_locations)[arriving_sequence]
-
-            # Solve collision
             for j, selected_location in enumerate(selected_locations_in_arriving_sequence):
                 solved_locations = selected_locations_in_arriving_sequence[:j]
+                if solved_locations.size == 0:
+                    continue
                 while selected_location[0] + selected_location[1] * 1j in solved_locations[:, 0] + solved_locations[:, 1] * 1j:
-                    id = arriving_sequence[j]
-                    replacement_location, replacement_heading_index = self._get_collision_free_candidate(
-                        self.robot_list[id],
-                        solved_locations,
-                    )
-                    if replacement_location is None:
-                        break
+                    robot_id = arriving_sequence[j]
+                    if robot_id in active_explorer_ids:
+                        replacement_location, replacement_heading_index = self._get_collision_free_candidate(
+                            self.robot_list[robot_id],
+                            solved_locations,
+                        )
+                        if replacement_location is None:
+                            replacement_location = self.robot_list[robot_id].location.copy()
+                            replacement_heading_index = self._get_heading_index_towards(self.robot_list[robot_id], replacement_location)
+                    else:
+                        replacement_location = self.robot_list[robot_id].location.copy()
+                        replacement_heading_index = self._get_heading_index_towards(self.robot_list[robot_id], replacement_location)
 
                     selected_location = replacement_location
-                    next_heading_index_list[id] = replacement_heading_index
-
+                    next_heading_index_list[robot_id] = replacement_heading_index
                     selected_locations_in_arriving_sequence[j] = selected_location
-                    selected_locations[id] = selected_location
+                    selected_locations[robot_id] = selected_location
+                    break
 
-
-            # Compute simulation data
             robot_locations_sim = []
             robot_headings_sim = []
-            all_robots_heading_list = []
-            executed_action_index_list = []
-            executed_next_node_index_list = []
-            executed_critic_next_node_index_list = []
+            executed_action_index_list = {}
             for k, (robot, next_location, next_heading_index) in enumerate(zip(self.robot_list, selected_locations, next_heading_index_list)):
                 robot_current_cell = get_cell_position_from_coords(robot.location, self.env.belief_info)
                 robot_cell = get_cell_position_from_coords(next_location, self.env.belief_info)
 
                 next_heading = next_heading_index*(360/NUM_ANGLES_BIN)
                 final_heading = compute_allowable_heading(robot.location, next_location, robot.heading, next_heading, robot.velocity, robot.yaw_rate)
-                executed_action_index = robot.get_executed_action_index(next_location, final_heading)
+                if k in active_explorer_ids:
+                    executed_action_index_list[k] = robot.get_executed_action_index(next_location, final_heading)
 
                 # Generate intermediate points
                 intermediate_cells = np.linspace(robot_current_cell, robot_cell, self.sim_steps+1)[1:] 
@@ -195,14 +383,6 @@ class MultiAgentWorker:
 
                 robot_locations_sim.append(intermediate_cells)
                 robot_headings_sim.append(intermediate_headings)
-                all_robots_heading_list.append(final_heading)
-                executed_action_index_list.append(executed_action_index)
-                executed_next_node_index_list.append(int(np.argwhere(np.all(robot.node_coords == next_location, axis=1))[0][0]))
-                if self.use_merged_critic:
-                    executed_critic_next_node_index_list.append(
-                        self.merged_critic_manager.get_node_index(next_location)
-                    )
-
                 robot.update_heading(final_heading)
 
             for l in range(self.sim_steps):
@@ -218,28 +398,23 @@ class MultiAgentWorker:
                     self.plot_local_env_sim(num_frame, robot_location_sim_step, robot_heading_sim_step, locations_are_cells=True)
 
             # Apply all final positions before reward computation to avoid order-dependent rewards.
+            previous_locations = [robot.location.copy() for robot in self.robot_list]
             for robot, next_location in zip(self.robot_list, selected_locations):
                 self.env.final_sim_step(next_location, robot.id)
+                if not np.allclose(previous_locations[robot.id], next_location):
+                    self.remaining_budgets[robot.id] -= 1
 
             reward_list = []
             # Collect robot headings for overlap reward calculation
             robot_headings_list = [robot.heading for robot in self.robot_list]
 
-            for robot, next_location, executed_action_index in zip(self.robot_list, selected_locations, executed_action_index_list):
-                # Update trajectory buffer
-                prev_trajectory = self.trajectory_buffer[robot.id][-1] if len(self.trajectory_buffer[robot.id]) > 0 else None
-                if prev_trajectory is not None:
-                    prev_x, prev_y = prev_trajectory[0], prev_trajectory[1]
-                    velocity = np.linalg.norm(next_location - np.array([prev_x, prev_y])) / NUM_SIM_STEPS
-                else:
-                    velocity = 0.0
+            for robot, next_location in zip(self.robot_list, selected_locations):
+                self._append_trajectory_step(robot, next_location)
 
-                self.trajectory_buffer[robot.id].append((
-                    next_location[0],
-                    next_location[1],
-                    robot.heading,
-                    velocity
-                ))
+            for robot_id in active_explorer_ids:
+                robot = self.robot_list[robot_id]
+                next_location = selected_locations[robot_id]
+                executed_action_index = executed_action_index_list[robot_id]
 
                 node = robot.node_manager.nodes_dict.find((next_location[0], next_location[1])).data
                 observable_frontiers = node.observable_frontiers
@@ -294,70 +469,55 @@ class MultiAgentWorker:
                     - trajectory_history_penalty
                 )
                 robot.save_action(torch.tensor([executed_action_index], device=self.device))
-
+            for robot in self.robot_list:
                 robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
-                # Mark nodes visited by other agents based on FoV detection
+            for robot in self.robot_list:
                 robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
+                robot.update_planning_state()
+                self._set_agent_budget_context(robot)
             self.merged_map_manager.update_graph(self.env.belief_info, self.env.robot_locations)
 
-            # End the episode when total environment exploration exceeds the threshold.
-            if self.env.explored_rate > SUCCESS_THRESHOLD:
-                done = True
+            mission_success = mission_success or (self.env.explored_rate > SUCCESS_THRESHOLD)
+            if np.any(self.remaining_budgets < 0):
+                mission_failure = True
 
             team_reward = self.env.calculate_team_reward() - 0.5
-            if done:
+            if mission_success:
                 team_reward += 10
 
             curr_node_indices = np.array([robot.current_index for robot in self.robot_list])
             curr_critic_indices = None
             if self.use_merged_critic and USE_COMMUNICATION:
-                curr_critic_indices = np.array([robot.current_critic_index for robot in self.robot_list])
-            for robot, reward in zip(self.robot_list, reward_list):
+                curr_critic_indices = np.array([self.merged_critic_manager.get_node_index(robot.location) for robot in self.robot_list])
+
+            for robot_id, reward in zip(active_explorer_ids, reward_list):
+                robot = self.robot_list[robot_id]
+                robot_should_return = mission_success or (robot.get_hops_to_base() >= self.remaining_budgets[robot_id])
+                transition_done = mission_failure or robot_should_return
                 robot.save_reward(reward + team_reward)
-                # Only save all agent indices when communication is enabled
-                # When USE_COMMUNICATION=False, agents rely solely on FOV-detected trajectories
                 if USE_COMMUNICATION:
                     if self.use_merged_critic:
                         robot.save_all_indices(curr_critic_indices)
                     else:
                         robot.save_all_indices(curr_node_indices)
-                robot.update_planning_state()
-                robot.save_done(done)
+                robot.save_done(transition_done)
+                if robot_should_return:
+                    self.returning_agents[robot_id] = True
+                    self._close_agent_replay(robot, team_node_managers)
 
-            if done:
+            if mission_failure:
+                break
+            if self._all_agents_at_base() and (mission_success or np.all(self.returning_agents)):
                 break
 
-        # save metrics
+        self._finalize_open_agent_replays(team_node_managers)
+        for robot in self.robot_list:
+            for buffer_idx in range(len(self.episode_buffer)):
+                self.episode_buffer[buffer_idx] += robot.episode_buffer[buffer_idx]
+
         self.perf_metrics['travel_dist'] = max([robot.travel_dist for robot in self.robot_list])
         self.perf_metrics['explored_rate'] = self.env.explored_rate
-        self.perf_metrics['success_rate'] = done
-
-        # save episode buffer
-        for robot in self.robot_list:
-            observation = robot.get_observation(
-                robot_locations=self.env.robot_locations,
-                trajectory_buffer=self.trajectory_buffer
-            )
-            joint_next_index_list = executed_next_node_index_list
-            if self.use_merged_critic and USE_COMMUNICATION:
-                joint_next_index_list = executed_critic_next_node_index_list
-            robot.save_next_observations(observation, joint_next_index_list)
-            if self.use_merged_critic:
-                critic_observation = self.merged_critic_manager.get_critic_observation(
-                    robot.location,
-                    robot.id,
-                    self.env.robot_locations,
-                    team_node_managers,
-                    self.env.get_agent_map_info(robot.id),
-                    local_observation=observation,
-                    local_node_coords=robot.node_coords,
-                )
-                robot.save_next_critic_observations(critic_observation)
-            else:
-                ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
-                robot.save_next_ground_truth_observations(ground_truth_observation)
-            for i in range(len(self.episode_buffer)):
-                self.episode_buffer[i] += robot.episode_buffer[i]
+        self.perf_metrics['success_rate'] = bool(mission_success and self._all_agents_at_base() and not mission_failure and np.all(self.remaining_budgets >= 0))
 
         # save gif
         if self.save_image:
@@ -811,9 +971,9 @@ class MultiAgentWorker:
             )
 
             # Budget loading bar (below each agent subplot)
-            episode_step = step // self.sim_steps
-            remaining = BUDGET - episode_step
-            fraction_remaining = remaining / BUDGET
+            initial_budget = max(int(self.initial_budgets[robot.id]), 1) if hasattr(self, 'initial_budgets') else max(BUDGET, 1)
+            remaining = int(max(self.remaining_budgets[robot.id], 0)) if hasattr(self, 'remaining_budgets') else BUDGET
+            fraction_remaining = remaining / initial_budget
             if fraction_remaining > 0.5:
                 bar_color = '#2ecc71'   # green  — high budget
             elif fraction_remaining > 0.25:
@@ -830,7 +990,7 @@ class MultiAgentWorker:
             agent_ax.add_patch(bar_fg)
             agent_ax.text(
                 0.5, 0.975,
-                f'{remaining}/{BUDGET} budget',
+                f'{remaining}/{initial_budget} budget{" | return" if hasattr(self, "returning_agents") and self.returning_agents[robot.id] else ""}',
                 transform=agent_ax.transAxes,
                 fontsize=6.5, ha='center', va='center',
                 fontweight='bold', color='#1a1a1a',

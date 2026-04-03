@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '4_1_Updated_critic_observations'
+FOLDER_NAME = '4_3_Budget'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -29,7 +29,7 @@ gifs_path = f'gifs/{FOLDER_NAME}' # save gif
 SUMMARY_WINDOW = 32
 LOAD_MODEL = False  # do you want to load the model trained before
 SAVE_IMG_GAP = 1000
-NUM_EPISODE_BUFFER = 48
+NUM_EPISODE_BUFFER = 52
 
 # Sim parameters
 N_AGENTS = 4
@@ -67,7 +67,14 @@ UPDATING_MAP_SIZE = 4 * SENSOR_RANGE + 4 * NODE_RESOLUTION
 
 # training parameters
 MAX_EPISODE_STEP = 128
-BUDGET = MAX_EPISODE_STEP
+BUDGET_START = 150   # budget when success rate is 0 (easy)
+BUDGET_END = 96      # budget when success rate is 1 (hard)
+BUDGET_CURRICULUM_NOISE = 8   # ±uniform noise around the curriculum target budget
+BUDGET_CURRICULUM_EMA = 0.05  # EMA smoothing for success rate tracker
+BUDGET_CURRICULUM_UNIFORM_P = 0.15  # probability of ignoring curriculum and sampling uniformly (prevents forgetting)
+BUDGET = BUDGET_START
+MIN_BUDGET = BUDGET_END
+MAX_BUDGET = BUDGET_START
 REPLAY_SIZE = 15000
 MINIMUM_BUFFER_SIZE = 10000
 BATCH_SIZE = 256
@@ -88,6 +95,8 @@ GRAD_CLIP_Q = 10.0      # Max gradient norm for Q networks (typical: 1.0 ~ 10.0)
 # network parameters
 NODE_INPUT_DIM = 7  # Changed from 6: added visited_by_others feature
 EMBEDDING_DIM = 128
+BUDGET_FEATURE_DIM = 5
+ACTION_BUDGET_DIM = 4
 
 # Trajectory tracking parameters
 TRAJECTORY_HISTORY_LENGTH = 10  # Number of recent steps to track
