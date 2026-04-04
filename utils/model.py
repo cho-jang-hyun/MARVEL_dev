@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import math
 import numpy as np
+from parameter import BUDGET_FEATURE_DIM, ACTION_BUDGET_DIM
 
 class SingleHeadAttention(nn.Module):
     def __init__(self, embedding_dim):
@@ -384,7 +385,7 @@ class TrajectoryEncoder(nn.Module):
 
 class PolicyNet(nn.Module):
     def __init__(self, node_dim, embedding_dim, num_angles_bin, use_trajectory=True, gated_attention=True,
-                 budget_feature_dim=5, action_budget_dim=4):
+                 budget_feature_dim=BUDGET_FEATURE_DIM, action_budget_dim=ACTION_BUDGET_DIM):
         super(PolicyNet, self).__init__()
 
         self.use_trajectory = use_trajectory
@@ -627,7 +628,7 @@ class PolicyNet(nn.Module):
 
 class QNet(nn.Module):
     def __init__(self, node_dim, embedding_dim, num_angles_bin, train_algo, use_trajectory=True, gated_attention=True,
-                 budget_feature_dim=5, action_budget_dim=4):
+                 budget_feature_dim=BUDGET_FEATURE_DIM, action_budget_dim=ACTION_BUDGET_DIM):
         super(QNet, self).__init__()
 
         self.use_trajectory = use_trajectory

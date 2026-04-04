@@ -23,15 +23,16 @@ class MergedBeliefCriticManager:
     def update_graph(self, map_info, robot_locations):
         self.map_info = map_info
         # Rebuild from the latest merged team belief so utilities/frontiers stay tied to
-        # the current merged map and keep merged obstacles authoritative.
+        # the current merged map and keep merged obstacles authoritative. Use the whole
+        # merged belief map rather than per-robot windows; otherwise far connected graph
+        # regions disappear whenever they fall outside every robot's current local crop.
         self.node_manager = NodeManager(self.fov, self.sensor_range, plot=self.plot)
+        frontiers = get_frontier_in_map(self.map_info)
         for robot_location in robot_locations:
-            updating_map_info = self.get_updating_map(robot_location)
-            frontiers = get_frontier_in_map(updating_map_info)
             self.node_manager.update_graph(
                 robot_location,
                 frontiers,
-                updating_map_info,
+                self.map_info,
                 self.map_info,
                 skip_far_existing_updates=False,
                 refresh_all_neighbors=True,

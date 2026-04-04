@@ -84,9 +84,9 @@ TAU = 0.001  # Soft update coefficient for target network (0.001 ~ 0.01)
 NUM_META_AGENT = 20
 
 # reward shaping
-MERGED_NODE_UTILITY_REWARD_WEIGHT = 0.7
+MERGED_NODE_UTILITY_REWARD_WEIGHT = 1
 VISITED_BY_OTHERS_DECAY = 0.02
-VISITED_BY_OTHERS_MIN = 0.1
+VISITED_BY_OTHERS_MIN = 0.05
 
 # Gradient clipping parameters
 GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5.0)
