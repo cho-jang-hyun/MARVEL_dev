@@ -296,53 +296,37 @@ class Agent:
         scale = max(float(MAX_BUDGET), float(self.initial_budget), 1.0)
         return np.log1p(max(float(value), 0.0)) / np.log1p(scale)
 
-    def _build_budget_features(self, current_edge, pad):
-        budget_state = np.zeros(BUDGET_FEATURE_DIM, dtype=np.float32)
-        action_budget = np.zeros((current_edge.shape[0], ACTION_BUDGET_DIM), dtype=np.float32)
+    def _build_budget_features(self, hop_dict=None):
+        initial_budget = max(float(self.initial_budget), 1.0)
+        remaining_budget = max(float(self.remaining_budget), 0.0)
 
-        if self.base_location is None:
-            budget_state[-1] = 1.0
-            action_budget[:, -1] = 1.0
+        if self.base_location is None or hop_dict is None:
+            hops_to_base = 0.0
         else:
-            initial_budget = max(float(self.initial_budget), 1.0)
-            remaining_budget = max(float(self.remaining_budget), 0.0)
             current_hops = self.get_hops_to_base()
-            if current_hops >= int(1e6):
-                current_hops = remaining_budget + 1.0
-            slack_current = remaining_budget - current_hops
-            budget_state = np.array([
-                self._normalize_budget_log(self.initial_budget),
-                self._normalize_budget_log(remaining_budget),
-                remaining_budget / initial_budget,
-                min(current_hops / initial_budget, 2.0),
-                np.clip(slack_current / initial_budget, -1.0, 1.0),
-            ], dtype=np.float32)
+            hops_to_base = current_hops if current_hops < int(1e6) else remaining_budget + 1.0
 
-            for idx, node_index in enumerate(current_edge):
-                candidate_coords = self.node_coords[int(node_index)]
-                move_cost = 0.0 if int(node_index) == int(self.current_index) else 1.0
-                next_hops = self.get_hops_to_base(start_location=candidate_coords)
-                if next_hops >= int(1e6):
-                    feasible = 0.0
-                    next_hops = remaining_budget + initial_budget
-                else:
-                    feasible = 1.0 if remaining_budget - move_cost >= next_hops else 0.0
-                post_slack = remaining_budget - move_cost - next_hops
-                action_budget[idx] = np.array([
-                    move_cost,
-                    min(next_hops / initial_budget, 2.0),
-                    np.clip(post_slack / initial_budget, -1.0, 1.0),
-                    feasible,
-                ], dtype=np.float32)
+        hops_over_remaining = min(hops_to_base / max(remaining_budget, 1.0), 2.0)
+        budget_state = np.array([
+            self._normalize_budget_log(initial_budget),
+            self._normalize_budget_log(remaining_budget),
+            remaining_budget / initial_budget,
+            hops_over_remaining,
+        ], dtype=np.float32)
 
-        budget_state = torch.FloatTensor(budget_state).unsqueeze(0).to(self.device)
-        action_budget = torch.FloatTensor(action_budget).unsqueeze(0).to(self.device)
+        return torch.FloatTensor(budget_state).unsqueeze(0).to(self.device)
 
-        if pad and action_budget.size(1) < K_SIZE:
-            padding = torch.nn.ZeroPad2d((0, 0, 0, K_SIZE - action_budget.size(1)))
-            action_budget = padding(action_budget)
-
-        return budget_state, action_budget
+    def _build_node_hops(self, n_node, hop_dict):
+        """Return normalised hops-to-base for every node (shape [n_node, 1])."""
+        node_hops = np.zeros((n_node, 1), dtype=np.float32)
+        if hop_dict is None or self.base_location is None:
+            return node_hops
+        scale = max(float(MAX_BUDGET), 1.0)
+        for i, coord in enumerate(self.node_coords):
+            key = (coord[0], coord[1])
+            h = hop_dict.get(key, int(1e6))
+            node_hops[i, 0] = min(h / scale, 2.0) if h < int(1e6) else 2.0
+        return node_hops
 
     def get_observation(self, pad=True, robot_locations=None, trajectory_buffer=None):
         node_coords = self.node_coords
@@ -383,8 +367,12 @@ class Agent:
 
             detected_trajectories, trajectory_mask, trajectory_node_indices = self._get_detected_trajectories()
 
+        # BFS from base once — shared by node hop features and budget state
+        hop_dict = self.node_manager.hop_distances_from(self.base_location) if self.base_location is not None else None
+        node_hops = self._build_node_hops(n_node, hop_dict)
+
         # visited_by_others is already 0 or 1, no normalization needed
-        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others), axis=1)
+        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_hops), axis=1)
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
         all_node_frontier_distribution = torch.Tensor(node_frontier_distribution).unsqueeze(0).to(self.device)
         node_heading_visited = torch.Tensor(node_heading_visited).unsqueeze(0).to(self.device)
@@ -411,7 +399,7 @@ class Agent:
             edge_mask = padding(edge_mask)
 
         current_in_edge = np.argwhere(current_edge == self.current_index)[0][0]
-        budget_state, action_budget = self._build_budget_features(current_edge, pad=pad)
+        budget_state = self._build_budget_features(hop_dict=hop_dict)
         current_edge = torch.tensor(current_edge).unsqueeze(0)
         k_size = current_edge.size()[-1]
         if pad:
@@ -433,24 +421,22 @@ class Agent:
 
         return [node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask,
                 all_node_frontier_distribution, node_heading_visited, node_neighbor_best_headings,
-                budget_state, action_budget,
+                budget_state,
                 detected_trajectories, trajectory_mask, trajectory_node_indices]
 
     def select_next_waypoint(self, observation, greedy = False):
-        _, _, _, _, current_edge, edge_padding_mask, _, _, _, budget_state, action_budget, _, _, _ = observation
+        _, _, _, _, current_edge, edge_padding_mask, _, _, _, budget_state, _, _, _ = observation
         with torch.no_grad():
-            logp = self.policy_net(*observation[:11], detected_trajectories=observation[11],
-                                   trajectory_mask=observation[12], trajectory_node_indices=observation[13])
+            logp = self.policy_net(*observation[:10], detected_trajectories=observation[10],
+                                   trajectory_mask=observation[11], trajectory_node_indices=observation[12])
 
         action_logp = logp.squeeze(0).detach().cpu()
         current_edge_values = current_edge[0, :, 0].detach().cpu().numpy()
         edge_padding_values = edge_padding_mask[0, 0].detach().cpu().numpy()
-        action_budget_values = action_budget[0].detach().cpu().numpy()
         valid_waypoint_slots = np.where(edge_padding_values == 0)[0]
-        feasible_waypoint_slots = [slot for slot in valid_waypoint_slots if action_budget_values[slot, -1] > 0.5]
 
         waypoint_candidates = []
-        for slot in feasible_waypoint_slots:
+        for slot in valid_waypoint_slots:
             waypoint_node_index = int(current_edge_values[slot])
             action_offset = slot * self.num_heading_candidates
             action_slice = action_logp[action_offset:action_offset + self.num_heading_candidates]
@@ -467,7 +453,7 @@ class Agent:
         waypoint_candidates.sort(key=lambda item: item[0], reverse=True)
         self.current_waypoint_candidates = waypoint_candidates
 
-        if len(feasible_waypoint_slots) == 0:
+        if len(valid_waypoint_slots) == 0:
             return self.location.copy(), int(self.current_index), torch.zeros((1,), dtype=torch.long), int(self.heading / 360 * self.num_angles_bin) % self.num_angles_bin
 
         if greedy:
@@ -844,7 +830,7 @@ class Agent:
         return detected_trajectories, trajectory_mask, trajectory_node_indices
         
     def save_observation(self, observation):
-        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, budget_state, action_budget, detected_trajectories, trajectory_mask, trajectory_node_indices = observation
+        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, budget_state, detected_trajectories, trajectory_mask, trajectory_node_indices = observation
         if detected_trajectories is None or trajectory_mask is None or trajectory_node_indices is None:
             detected_trajectories, trajectory_mask, trajectory_node_indices = self._get_empty_trajectory_tensors()
         self.episode_buffer[0] += node_inputs
@@ -857,7 +843,6 @@ class Agent:
         self.episode_buffer[7] += heading_visited
         self.episode_buffer[38] += neighbor_best_headings
         self.episode_buffer[48] += budget_state
-        self.episode_buffer[49] += action_budget
         self.episode_buffer[40] += detected_trajectories
         self.episode_buffer[41] += trajectory_mask
         self.episode_buffer[42] += trajectory_node_indices
@@ -887,12 +872,11 @@ class Agent:
 
         self.episode_buffer[39] = copy.deepcopy(self.episode_buffer[38])[1:]
         self.episode_buffer[50] = copy.deepcopy(self.episode_buffer[48])[1:]
-        self.episode_buffer[51] = copy.deepcopy(self.episode_buffer[49])[1:]
         self.episode_buffer[43] = copy.deepcopy(self.episode_buffer[40])[1:]
         self.episode_buffer[44] = copy.deepcopy(self.episode_buffer[41])[1:]
         self.episode_buffer[45] = copy.deepcopy(self.episode_buffer[42])[1:]
 
-        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, budget_state, action_budget, detected_trajectories, trajectory_mask, trajectory_node_indices = observation
+        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, budget_state, detected_trajectories, trajectory_mask, trajectory_node_indices = observation
         if detected_trajectories is None or trajectory_mask is None or trajectory_node_indices is None:
             detected_trajectories, trajectory_mask, trajectory_node_indices = self._get_empty_trajectory_tensors()
         self.episode_buffer[11] += node_inputs
@@ -905,7 +889,6 @@ class Agent:
         self.episode_buffer[18] += heading_visited
         self.episode_buffer[39] += neighbor_best_headings
         self.episode_buffer[50] += budget_state
-        self.episode_buffer[51] += action_budget
         self.episode_buffer[43] += detected_trajectories
         self.episode_buffer[44] += trajectory_mask
         self.episode_buffer[45] += trajectory_node_indices

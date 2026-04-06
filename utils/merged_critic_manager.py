@@ -22,11 +22,6 @@ class MergedBeliefCriticManager:
 
     def update_graph(self, map_info, robot_locations):
         self.map_info = map_info
-        # Rebuild from the latest merged team belief so utilities/frontiers stay tied to
-        # the current merged map and keep merged obstacles authoritative. Use the whole
-        # merged belief map rather than per-robot windows; otherwise far connected graph
-        # regions disappear whenever they fall outside every robot's current local crop.
-        self.node_manager = NodeManager(self.fov, self.sensor_range, plot=self.plot)
         frontiers = get_frontier_in_map(self.map_info)
         for robot_location in robot_locations:
             self.node_manager.update_graph(
@@ -34,8 +29,8 @@ class MergedBeliefCriticManager:
                 frontiers,
                 self.map_info,
                 self.map_info,
-                skip_far_existing_updates=False,
-                refresh_all_neighbors=True,
+                skip_far_existing_updates=True,
+                refresh_all_neighbors=False,
             )
 
     def get_updating_map(self, location):
@@ -180,7 +175,7 @@ class MergedBeliefCriticManager:
 
         n_nodes = all_node_coords.shape[0]
         adjacent_matrix = np.ones((n_nodes, n_nodes)).astype(int)
-        node_coords_to_check = all_node_coords[:, 0] + all_node_coords[:, 1] * 1j
+        coord_to_index = {(c[0], c[1]): i for i, c in enumerate(all_node_coords)}
 
         for i, coords in enumerate(all_node_coords):
             node = self.node_manager.nodes_dict.find((coords[0], coords[1])).data
@@ -189,9 +184,9 @@ class MergedBeliefCriticManager:
             highest_utility_angle.append(node.highest_utility_angle)
 
             for neighbor in node.neighbor_list:
-                index = np.argwhere(node_coords_to_check == neighbor[0] + neighbor[1] * 1j)
-                if index.size > 0:
-                    adjacent_matrix[i, index[0][0]] = 0
+                index = coord_to_index.get((neighbor[0], neighbor[1]))
+                if index is not None:
+                    adjacent_matrix[i, index] = 0
 
         utility = np.array(utility)
         frontiers_distribution = np.array(frontiers_distribution)
@@ -211,15 +206,12 @@ class MergedBeliefCriticManager:
         path_coords, _ = self.node_manager.a_star(robot_location, nearest_utility_coords)
         guidepost = np.zeros_like(utility)
         for coords in path_coords:
-            index = np.argwhere(
-                all_node_coords[:, 0] + all_node_coords[:, 1] * 1j == coords[0] + coords[1] * 1j
-            )[0]
-            guidepost[index] = 1
+            index = coord_to_index.get((coords[0], coords[1]))
+            if index is not None:
+                guidepost[index] = 1
 
         robot_in_graph = self.node_manager.nodes_dict.nearest_neighbors(robot_location.tolist(), 1)[0].data.coords
-        current_index = np.argwhere(
-            node_coords_to_check == robot_in_graph[0] + robot_in_graph[1] * 1j
-        )[0][0]
+        current_index = coord_to_index[(robot_in_graph[0], robot_in_graph[1])]
         neighbor_indices = np.argwhere(adjacent_matrix[current_index] == 0).reshape(-1)
 
         occupancy = self._build_team_occupancy(all_node_coords, robot_locations, current_agent_id)
@@ -310,7 +302,7 @@ class MergedBeliefCriticManager:
                 neighbor_best_headings.append(heading_candidates)
         return torch.stack(neighbor_best_headings).unsqueeze(0).to(self.device)
 
-    def get_critic_observation(self, robot_location, current_agent_id, robot_locations, team_node_managers, agent_map_info, local_observation=None, local_node_coords=None, pad=True):
+    def get_critic_observation(self, robot_location, current_agent_id, robot_locations, team_node_managers, agent_map_info, local_observation=None, local_node_coords=None, pad=True, base_location=None):
         (
             node_coords,
             utility,
@@ -358,6 +350,15 @@ class MergedBeliefCriticManager:
             (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin
         )
 
+        node_hops = np.zeros((n_node, 1), dtype=np.float32)
+        if base_location is not None:
+            hop_dict = self.node_manager.hop_distances_from(base_location)
+            scale = max(float(MAX_BUDGET), 1.0)
+            for i, coords in enumerate(node_coords):
+                key = (coords[0], coords[1])
+                h = hop_dict.get(key, int(1e6))
+                node_hops[i, 0] = min(h / scale, 2.0) if h < int(1e6) else 2.0
+
         node_inputs = np.concatenate((
             all_node_coords,
             node_utility,
@@ -365,6 +366,7 @@ class MergedBeliefCriticManager:
             node_occupancy,
             node_highest_utility_angles,
             node_team_visited,
+            node_hops,
             node_other_agents_explored,
         ), axis=1)
 

@@ -20,8 +20,10 @@ Key Methods:
     Dijkstra(): Computes shortest paths between nodes
     a_star(): Finds optimal path between two nodes
 """
+import heapq
 import time
 import torch
+from collections import deque
 
 import numpy as np
 from utils.utils import *
@@ -52,7 +54,7 @@ class GroundTruthNodeManager:
         exist = self.nodes_dict.find(key)
         return exist
 
-    def get_ground_truth_observation(self, robot_location):
+    def get_ground_truth_observation(self, robot_location, base_location=None):
         self.update_graph()
 
         all_node_coords = []
@@ -158,8 +160,30 @@ class GroundTruthNodeManager:
         node_utility = node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
         node_frontiers_distribution = node_frontiers_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
         node_highest_utility_angles = node_highest_utility_angles / 360
+        # Compute hops-to-base per node via BFS on the ground truth graph
+        node_hops = np.zeros((n_node, 1), dtype=np.float32)
+        if base_location is not None:
+            base_key = (base_location[0], base_location[1])
+            hop_dict = {base_key: 0}
+            queue = deque([base_key])
+            while queue:
+                u = queue.popleft()
+                node_entry = self.nodes_dict.find(u)
+                if node_entry is None:
+                    continue
+                for neighbor_coords in node_entry.data.neighbor_list:
+                    v = (neighbor_coords[0], neighbor_coords[1])
+                    if v not in hop_dict:
+                        hop_dict[v] = hop_dict[u] + 1
+                        queue.append(v)
+            scale = max(float(MAX_BUDGET), 1.0)
+            for i, coords in enumerate(all_node_coords):
+                key = (coords[0], coords[1])
+                h = hop_dict.get(key, int(1e6))
+                node_hops[i, 0] = min(h / scale, 2.0) if h < int(1e6) else 2.0
+
         # visited_by_others is already 0 or 1, no normalization needed
-        node_inputs = np.concatenate((node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_explored_sign), axis=1)
+        node_inputs = np.concatenate((node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_hops, node_explored_sign), axis=1)
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
 
         assert node_coords.shape[0] < NODE_PADDING_SIZE, print(node_coords.shape[0], NODE_PADDING_SIZE)
@@ -200,7 +224,6 @@ class GroundTruthNodeManager:
         return [node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, node_frontiers_distribution, node_heading_visited]
     
     def Dijkstra(self, start):
-        q = set()
         dist_dict = {}
         prev_dict = {}
 
@@ -209,37 +232,40 @@ class GroundTruthNodeManager:
             key = (coords[0], coords[1])
             dist_dict[key] = 1e8
             prev_dict[key] = None
-            q.add(key)
 
-        assert (start[0], start[1]) in dist_dict.keys()
-        dist_dict[(start[0], start[1])] = 0
+        start_key = (start[0], start[1])
+        assert start_key in dist_dict
+        dist_dict[start_key] = 0
 
-        while len(q) > 0:
-            u = None
-            for coords in q:
-                if u is None:
-                    u = coords
-                elif dist_dict[coords] < dist_dict[u]:
-                    u = coords
+        heap = [(0.0, start_key)]
+        visited = set()
 
-            q.remove(u)
+        while heap:
+            d, u = heapq.heappop(heap)
+            if u in visited:
+                continue
+            visited.add(u)
 
-            if self.nodes_dict.find(u) is None:
+            node_entry = self.nodes_dict.find(u)
+            if node_entry is None:
                 print(u)
                 for node in self.nodes_dict.__iter__():
                     print(node.data.coords)
+                continue
 
-            node = self.nodes_dict.find(u).data
+            node = node_entry.data
             for neighbor_node_coords in node.neighbor_list:
                 v = (neighbor_node_coords[0], neighbor_node_coords[1])
-                if v in q:
-                    cost = ((neighbor_node_coords[0] - u[0]) ** 2 + (
-                            neighbor_node_coords[1] - u[1]) ** 2) ** (1 / 2)
-                    cost = np.round(cost, 2)
-                    alt = dist_dict[u] + cost
-                    if alt < dist_dict[v]:
-                        dist_dict[v] = alt
-                        prev_dict[v] = u
+                if v in visited:
+                    continue
+                cost = ((neighbor_node_coords[0] - u[0]) ** 2 + (
+                        neighbor_node_coords[1] - u[1]) ** 2) ** (1 / 2)
+                cost = np.round(cost, 2)
+                alt = d + cost
+                if alt < dist_dict.get(v, 1e8):
+                    dist_dict[v] = alt
+                    prev_dict[v] = u
+                    heapq.heappush(heap, (alt, v))
 
         return dist_dict, prev_dict
     
@@ -257,39 +283,37 @@ class GroundTruthNodeManager:
             Warning("end position is not in node dict")
             return [], 1e8
 
-        if start[0] == destination[0] and start[1] == destination[1]:
+        start_key = (start[0], start[1])
+        dest_key = (destination[0], destination[1])
+
+        if start_key == dest_key:
             return [destination], 0
 
-        open_list = {(start[0], start[1])}
-        closed_list = set()
-        g = {(start[0], start[1]): 0}
-        parents = {(start[0], start[1]): (start[0], start[1])}
+        g = {start_key: 0}
+        parents = {start_key: start_key}
+        closed_set = set()
 
-        while len(open_list) > 0:
-            n = None
-            h_n = 1e8
+        heap = [(self.h(start, destination), start_key)]
 
-            for v in open_list:
-                h_v = self.h(v, destination)
-                if n is not None:
-                    node = self.nodes_dict.find(n).data
-                    n_coords = node.coords
-                    h_n = self.h(n_coords, destination)
-                if n is None or g[v] + h_v < g[n] + h_n:
-                    n = v
-                    node = self.nodes_dict.find(n).data
-                    n_coords = node.coords
+        while heap:
+            _, n = heapq.heappop(heap)
+            if n in closed_set:
+                continue
+            closed_set.add(n)
 
-            if max_dist is not None:
-                if g[n] > max_dist:
-                    return [], 1e8
+            if max_dist is not None and g[n] > max_dist:
+                return [], 1e8
+
+            node = self.nodes_dict.find(n).data
+            n_coords = node.coords
 
             if n_coords[0] == destination[0] and n_coords[1] == destination[1]:
                 path = []
                 length = g[n]
-                while parents[n] != n:
-                    path.append(n)
-                    n = parents[n]
+                curr = n
+                while parents[curr] != curr:
+                    path.append(curr)
+                    curr = parents[curr]
                 path.reverse()
                 return path, np.round(length, 2)
 
@@ -303,20 +327,12 @@ class GroundTruthNodeManager:
                             neighbor_node_coords[1] - n_coords[1]) ** 2) ** (1 / 2)
                 cost = np.round(cost, 2)
                 m = (neighbor_node_coords[0], neighbor_node_coords[1])
-                if m not in open_list and m not in closed_list:
-                    open_list.add(m)
+                tentative_g = g[n] + cost
+                if m not in g or tentative_g < g[m]:
+                    g[m] = tentative_g
                     parents[m] = n
-                    g[m] = g[n] + cost
-                else:
-                    if g[m] > g[n] + cost:
-                        g[m] = g[n] + cost
-                        parents[m] = n
-
-                        if m in closed_list:
-                            closed_list.remove(m)
-                            open_list.add(m)
-            open_list.remove(n)
-            closed_list.add(n)
+                    if m not in closed_set:
+                        heapq.heappush(heap, (tentative_g + self.h(neighbor_node_coords, destination), m))
 
         print('Path does not exist!')
 

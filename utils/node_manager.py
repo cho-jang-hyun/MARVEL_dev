@@ -12,7 +12,9 @@ Key functionalities:
 - Manage neighbor node connections
 - Perform graph-based pathfinding algorithms
 """
+import heapq
 import time
+from collections import deque
 
 import numpy as np
 from utils.utils import *
@@ -30,6 +32,9 @@ class NodeManager:
             self.utility_range = UTILITY_RANGE
         else:
             self.utility_range = utility_range
+        self._dijkstra_cache = {}
+        self._astar_cache = {}
+        self._bfs_cache = {}
 
     def check_node_exist_in_dict(self, coords):
         key = (coords[0], coords[1])
@@ -50,6 +55,9 @@ class NodeManager:
 
     def update_graph(self, robot_location, frontiers, updating_map_info, map_info,
                      skip_far_existing_updates=True, refresh_all_neighbors=False):
+        self._dijkstra_cache.clear()
+        self._astar_cache.clear()
+        self._bfs_cache.clear()
         node_coords, _ = get_updating_node_coords(robot_location, updating_map_info)
 
         all_node_list = []
@@ -90,23 +98,22 @@ class NodeManager:
 
         n_nodes = all_node_coords.shape[0]
         adjacent_matrix = np.ones((n_nodes, n_nodes)).astype(int)
-        node_coords_to_check = all_node_coords[:, 0] + all_node_coords[:, 1] * 1j
+        coord_to_index = {(c[0], c[1]): i for i, c in enumerate(all_node_coords)}
         for i, coords in enumerate(all_node_coords):
             node = self.nodes_dict.find((coords[0], coords[1])).data
             utility.append(node.utility)
             frontiers_distribution.append(node.frontiers_distribution)
             heading_visited.append(node.heading_visited)
             highest_utility_angle.append(node.highest_utility_angle)
-            
+
             # Decay visited_by_others over time but keep a small persistent memory once a teammate was seen.
             if node.visited_by_others > 0.0:
                 node.visited_by_others = max(VISITED_BY_OTHERS_MIN, node.visited_by_others - VISITED_BY_OTHERS_DECAY)
             visited_by_others.append(node.visited_by_others)
 
             for neighbor in node.neighbor_list:
-                index = np.argwhere(node_coords_to_check == neighbor[0] + neighbor[1] * 1j)
-                if index or index == [[0]]:
-                    index = index[0][0]
+                index = coord_to_index.get((neighbor[0], neighbor[1]))
+                if index is not None:
                     adjacent_matrix[i, index] = 0
 
         utility = np.array(utility)
@@ -129,11 +136,12 @@ class NodeManager:
         path_coords, dist = self.a_star(robot_location, nearest_utility_coords)
         guidepost = np.zeros_like(utility)
         for coords in path_coords:
-            index = np.argwhere(all_node_coords[:, 0] + all_node_coords[:, 1] * 1j == coords[0] + coords[1] * 1j)[0]
-            guidepost[index] = 1
+            index = coord_to_index.get((coords[0], coords[1]))
+            if index is not None:
+                guidepost[index] = 1
 
         robot_in_graph = self.nodes_dict.nearest_neighbors(robot_location.tolist(), 1)[0].data.coords
-        current_index = np.argwhere(node_coords_to_check == robot_in_graph[0] + robot_in_graph[1] * 1j)[0][0]
+        current_index = coord_to_index[(robot_in_graph[0], robot_in_graph[1])]
         neighbor_indices = np.argwhere(adjacent_matrix[current_index] == 0).reshape(-1)
 
         # Modified: Only mark current robot's position in occupancy (no global position sharing)
@@ -143,7 +151,10 @@ class NodeManager:
         return all_node_coords, utility, guidepost, occupancy, adjacent_matrix, current_index, neighbor_indices, highest_utility_angle, frontiers_distribution, heading_visited, visited_by_others, path_coords
 
     def Dijkstra(self, start):
-        q = set()
+        cache_key = (start[0], start[1])
+        if cache_key in self._dijkstra_cache:
+            return self._dijkstra_cache[cache_key]
+
         dist_dict = {}
         prev_dict = {}
 
@@ -152,38 +163,42 @@ class NodeManager:
             key = (coords[0], coords[1])
             dist_dict[key] = 1e8
             prev_dict[key] = None
-            q.add(key)
 
-        assert (start[0], start[1]) in dist_dict.keys()
-        dist_dict[(start[0], start[1])] = 0
+        start_key = (start[0], start[1])
+        assert start_key in dist_dict
+        dist_dict[start_key] = 0
 
-        while len(q) > 0:
-            u = None
-            for coords in q:
-                if u is None:
-                    u = coords
-                elif dist_dict[coords] < dist_dict[u]:
-                    u = coords
+        heap = [(0.0, start_key)]
+        visited = set()
 
-            q.remove(u)
+        while heap:
+            d, u = heapq.heappop(heap)
+            if u in visited:
+                continue
+            visited.add(u)
 
-            if self.nodes_dict.find(u) is None:
+            node_entry = self.nodes_dict.find(u)
+            if node_entry is None:
                 print(u)
                 for node in self.nodes_dict.__iter__():
                     print(node.data.coords)
+                continue
 
-            node = self.nodes_dict.find(u).data
+            node = node_entry.data
             for neighbor_node_coords in node.neighbor_list:
                 v = (neighbor_node_coords[0], neighbor_node_coords[1])
-                if v in q:
-                    cost = ((neighbor_node_coords[0] - u[0]) ** 2 + (
-                            neighbor_node_coords[1] - u[1]) ** 2) ** (1 / 2)
-                    cost = np.round(cost, 2)
-                    alt = dist_dict[u] + cost
-                    if alt < dist_dict[v]:
-                        dist_dict[v] = alt
-                        prev_dict[v] = u
+                if v in visited:
+                    continue
+                cost = ((neighbor_node_coords[0] - u[0]) ** 2 + (
+                        neighbor_node_coords[1] - u[1]) ** 2) ** (1 / 2)
+                cost = np.round(cost, 2)
+                alt = d + cost
+                if alt < dist_dict.get(v, 1e8):
+                    dist_dict[v] = alt
+                    prev_dict[v] = u
+                    heapq.heappush(heap, (alt, v))
 
+        self._dijkstra_cache[cache_key] = (dist_dict, prev_dict)
         return dist_dict, prev_dict
 
     def get_Dijkstra_path_and_dist(self, dist_dict, prev_dict, end):
@@ -202,6 +217,28 @@ class NodeManager:
         path.reverse()
         return path[1:], np.round(dist, 2)
 
+    def hop_distances_from(self, source):
+        """BFS from source returning {node_key: hop_count} for all reachable nodes."""
+        source_key = (source[0], source[1])
+        if source_key in self._bfs_cache:
+            return self._bfs_cache[source_key]
+        if self.nodes_dict.find(source_key) is None:
+            return {}
+        hop_dict = {source_key: 0}
+        queue = deque([source_key])
+        while queue:
+            u = queue.popleft()
+            node_entry = self.nodes_dict.find(u)
+            if node_entry is None:
+                continue
+            for neighbor_coords in node_entry.data.neighbor_list:
+                v = (neighbor_coords[0], neighbor_coords[1])
+                if v not in hop_dict:
+                    hop_dict[v] = hop_dict[u] + 1
+                    queue.append(v)
+        self._bfs_cache[source_key] = hop_dict
+        return hop_dict
+
     def h(self, coords_1, coords_2):
         h = ((coords_1[0] - coords_2[0]) ** 2 + (coords_1[1] - coords_2[1]) ** 2) ** (1 / 2)
         h = np.round(h, 2)
@@ -216,41 +253,47 @@ class NodeManager:
             Warning("end position is not in node dict")
             return [], 1e8
 
-        if start[0] == destination[0] and start[1] == destination[1]:
+        start_key = (start[0], start[1])
+        dest_key = (destination[0], destination[1])
+
+        if start_key == dest_key:
             return [destination], 0
 
-        open_list = {(start[0], start[1])}
-        closed_list = set()
-        g = {(start[0], start[1]): 0}
-        parents = {(start[0], start[1]): (start[0], start[1])}
+        if boundary is None and max_dist is None:
+            cache_key = (start_key, dest_key)
+            if cache_key in self._astar_cache:
+                return self._astar_cache[cache_key]
 
-        while len(open_list) > 0:
-            n = None
-            h_n = 1e8
+        g = {start_key: 0}
+        parents = {start_key: start_key}
+        closed_set = set()
 
-            for v in open_list:
-                h_v = self.h(v, destination)
-                if n is not None:
-                    node = self.nodes_dict.find(n).data
-                    n_coords = node.coords
-                    h_n = self.h(n_coords, destination)
-                if n is None or g[v] + h_v < g[n] + h_n:
-                    n = v
-                    node = self.nodes_dict.find(n).data
-                    n_coords = node.coords
+        heap = [(self.h(start, destination), start_key)]
 
-            if max_dist is not None:
-                if g[n] > max_dist:
-                    return [], 1e8
+        while heap:
+            _, n = heapq.heappop(heap)
+            if n in closed_set:
+                continue
+            closed_set.add(n)
+
+            if max_dist is not None and g[n] > max_dist:
+                return [], 1e8
+
+            node = self.nodes_dict.find(n).data
+            n_coords = node.coords
 
             if n_coords[0] == destination[0] and n_coords[1] == destination[1]:
                 path = []
                 length = g[n]
-                while parents[n] != n:
-                    path.append(n)
-                    n = parents[n]
+                curr = n
+                while parents[curr] != curr:
+                    path.append(curr)
+                    curr = parents[curr]
                 path.reverse()
-                return path, np.round(length, 2)
+                result = path, np.round(length, 2)
+                if boundary is None and max_dist is None:
+                    self._astar_cache[(start_key, dest_key)] = result
+                return result
 
             for neighbor_node_coords in node.neighbor_list:
                 if self.nodes_dict.find(neighbor_node_coords.tolist()) is None:
@@ -262,24 +305,19 @@ class NodeManager:
                             neighbor_node_coords[1] - n_coords[1]) ** 2) ** (1 / 2)
                 cost = np.round(cost, 2)
                 m = (neighbor_node_coords[0], neighbor_node_coords[1])
-                if m not in open_list and m not in closed_list:
-                    open_list.add(m)
+                tentative_g = g[n] + cost
+                if m not in g or tentative_g < g[m]:
+                    g[m] = tentative_g
                     parents[m] = n
-                    g[m] = g[n] + cost
-                else:
-                    if g[m] > g[n] + cost:
-                        g[m] = g[n] + cost
-                        parents[m] = n
-
-                        if m in closed_list:
-                            closed_list.remove(m)
-                            open_list.add(m)
-            open_list.remove(n)
-            closed_list.add(n)
+                    if m not in closed_set:
+                        heapq.heappush(heap, (tentative_g + self.h(neighbor_node_coords, destination), m))
 
         print('Path does not exist!')
 
-        return [], 1e8
+        result = [], 1e8
+        if boundary is None and max_dist is None:
+            self._astar_cache[(start_key, dest_key)] = result
+        return result
 
 class Node:
     def __init__(self, coords, frontiers, updating_map_info, fov, sensor_range, utility_range=None):

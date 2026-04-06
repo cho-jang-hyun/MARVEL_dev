@@ -55,10 +55,9 @@ NUM_META_AGENT = 10
 INITIAL_EXPLORED_RATE = 0.90
 
 # Network parameters
-NODE_INPUT_DIM = 7 # add visited node feature
+NODE_INPUT_DIM = 8  # Added hops_to_base/MAX_BUDGET per node
 EMBEDDING_DIM = 128
-BUDGET_FEATURE_DIM = 5
-ACTION_BUDGET_DIM = 4
+BUDGET_FEATURE_DIM = 4  # log_initial, log_remaining, remaining/initial, hops/remaining
 USE_TRAJECTORY = True  # Enable trajectory encoder
 
 # Trajectory tracking parameters (same as parameter.py)

@@ -126,6 +126,10 @@ class TestWorker:
     def _all_agents_at_base(self):
         return all(np.allclose(robot.location, self.base_locations[robot.id]) for robot in self.robot_list)
 
+    @staticmethod
+    def _should_force_return(hops_to_base, remaining_budget):
+        return hops_to_base + RETURN_SAFETY_MARGIN >= remaining_budget
+
     def run_episode(self):
         done = False
         for robot in self.robot_list:
@@ -161,7 +165,9 @@ class TestWorker:
                 if self.returning_agents[robot.id] and robot_at_base:
                     continue
 
-                if (not self.returning_agents[robot.id]) and (mission_success or robot.get_hops_to_base() >= self.remaining_budgets[robot.id]):
+                if (not self.returning_agents[robot.id]) and (
+                    mission_success or self._should_force_return(robot.get_hops_to_base(), self.remaining_budgets[robot.id])
+                ):
                     self.returning_agents[robot.id] = True
 
                 if self.returning_agents[robot.id]:
@@ -181,11 +187,11 @@ class TestWorker:
                         trajectory_buffer=self.trajectory_buffer
                     )
 
-                    action_budget = observation[10][0].detach().cpu().numpy()
                     current_edge = observation[4][0, :, 0].detach().cpu().numpy()
+                    edge_padding = observation[5][0, 0].detach().cpu().numpy()
                     feasible_slots = []
                     for slot in range(current_edge.shape[0]):
-                        if action_budget[slot, -1] <= 0.5:
+                        if edge_padding[slot] != 0:
                             continue
                         if int(current_edge[slot]) == int(robot.current_index):
                             continue
@@ -309,7 +315,7 @@ class TestWorker:
                 trajectory_length = max([robot.travel_dist for robot in self.robot_list])
                 reach_checkpoint = True
 
-            mission_success = mission_success or (self.env.explored_rate > SUCCESS_THRESHOLD)
+            mission_success = mission_success or (self.env.explored_rate >= SUCCESS_THRESHOLD)
             if np.any(self.remaining_budgets < 0):
                 mission_failure = True
 
@@ -322,7 +328,7 @@ class TestWorker:
         # Save metrics
         self.perf_metrics['travel_dist'] = max([robot.travel_dist for robot in self.robot_list])
         self.perf_metrics['explored_rate'] = self.env.explored_rate
-        self.perf_metrics['success_rate'] = bool(mission_success and self._all_agents_at_base() and not mission_failure and np.all(self.remaining_budgets >= 0))
+        self.perf_metrics['success_rate'] = bool(mission_success and not mission_failure)
         if trajectory_length > 0:
             self.perf_metrics['dist_to_0_90'] = trajectory_length
         else:

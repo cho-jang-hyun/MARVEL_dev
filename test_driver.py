@@ -35,6 +35,17 @@ EVAL_USE_GPU = USE_GPU and NUM_GPU > 0 and torch.cuda.is_available()
 if USE_GPU and NUM_GPU > 0 and not torch.cuda.is_available():
     warnings.warn("USE_GPU is True but CUDA is unavailable; falling back to CPU.")
 
+
+def load_compatible_state_dict(module, checkpoint_state, label):
+    model_state = module.state_dict()
+    compatible_state = {
+        key: value for key, value in checkpoint_state.items()
+        if key in model_state and model_state[key].shape == value.shape
+    }
+    missing_or_mismatched = len(model_state) - len(compatible_state)
+    module.load_state_dict(compatible_state, strict=False)
+    print(f'Loaded {label}: {len(compatible_state)} tensors, skipped {missing_or_mismatched}')
+
 def run_test():
     device = torch.device('cuda') if EVAL_USE_GPU else torch.device('cpu')
     global_network = PolicyNet(
@@ -49,7 +60,7 @@ def run_test():
     else:
         checkpoint = torch.load(f'{load_path}/checkpoint.pth', map_location=torch.device('cpu'))
 
-    global_network.load_state_dict(checkpoint['policy_model'])
+    load_compatible_state_dict(global_network, checkpoint['policy_model'], 'policy')
     
     meta_agents = [Runner.remote(i) for i in range(NUM_META_AGENT)]
     weights = global_network.state_dict()

@@ -269,9 +269,7 @@ def main():
                     neighbor_best_headings = torch.stack(rollouts[38]).to(device)
                     next_neighbor_best_headings = torch.stack(rollouts[39]).to(device)
                     budget_state = torch.stack(rollouts[48]).to(device)
-                    action_budget = torch.stack(rollouts[49]).to(device)
                     next_budget_state = torch.stack(rollouts[50]).to(device)
-                    next_action_budget = torch.stack(rollouts[51]).to(device)
                     detected_trajectories = torch.stack(rollouts[40]).to(device)
                     trajectory_mask = torch.stack(rollouts[41]).to(device)
                     trajectory_node_indices = torch.stack(rollouts[42]).to(device)
@@ -311,11 +309,11 @@ def main():
 
                     observation = [node_inputs, node_padding_mask, local_edge_mask, current_local_index,
                                    current_local_edge, local_edge_padding_mask, frontier_distribution, heading_visited,
-                                   neighbor_best_headings, budget_state, action_budget]
+                                   neighbor_best_headings, budget_state]
                     next_observation = [next_node_inputs, next_node_padding_mask, next_local_edge_mask,
                                         next_current_local_index, next_current_local_edge, next_local_edge_padding_mask,
                                         next_frontier_distribution, next_heading_visited, next_neighbor_best_headings,
-                                        next_budget_state, next_action_budget]
+                                        next_budget_state]
 
                     policy_kwargs = dict(
                         detected_trajectories=detected_trajectories,
@@ -365,11 +363,11 @@ def main():
                         # Ground truth only, no communication
                         state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
                                  critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited,
-                                 neighbor_best_headings, budget_state, action_budget]
+                                 neighbor_best_headings, budget_state]
                         next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
                                       critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask,
                                       critic_next_frontier_distribution, critic_next_heading_visited, next_neighbor_best_headings,
-                                      next_budget_state, next_action_budget]
+                                      next_budget_state]
                         q_kwargs = dict(
                             detected_trajectories=detected_trajectories,
                             trajectory_mask=trajectory_mask,
@@ -384,11 +382,11 @@ def main():
                         # MAAC with ground truth and communication
                         state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
                                  critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited,
-                                 neighbor_best_headings, budget_state, action_budget]
+                                 neighbor_best_headings, budget_state]
                         next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
                                       critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask,
                                       critic_next_frontier_distribution, critic_next_heading_visited, next_neighbor_best_headings,
-                                      next_budget_state, next_action_budget]
+                                      next_budget_state]
                         q_kwargs = dict(
                             all_agent_indices=all_agent_indices,
                             all_agent_next_indices=all_agent_next_indices,
@@ -407,11 +405,11 @@ def main():
                         # Merged-belief critic only, no communication
                         state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
                                  critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited,
-                                 critic_neighbor_best_headings, budget_state, action_budget]
+                                 critic_neighbor_best_headings, budget_state]
                         next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
                                       critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask,
                                       critic_next_frontier_distribution, critic_next_heading_visited, next_critic_neighbor_best_headings,
-                                      next_budget_state, next_action_budget]
+                                      next_budget_state]
                         q_kwargs = dict(
                             detected_trajectories=detected_trajectories,
                             trajectory_mask=trajectory_mask,
@@ -426,11 +424,11 @@ def main():
                         # Merged-belief critic with communication
                         state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
                                  critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited,
-                                 critic_neighbor_best_headings, budget_state, action_budget]
+                                 critic_neighbor_best_headings, budget_state]
                         next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
                                       critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask,
                                       critic_next_frontier_distribution, critic_next_heading_visited, next_critic_neighbor_best_headings,
-                                      next_budget_state, next_action_budget]
+                                      next_budget_state]
                         q_kwargs = dict(
                             all_agent_indices=all_agent_indices,
                             all_agent_next_indices=all_agent_next_indices,

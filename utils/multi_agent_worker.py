@@ -95,6 +95,7 @@ class MultiAgentWorker:
         self.remaining_budgets = self.initial_budgets.copy()
         self.returning_agents = np.zeros(self.n_agents, dtype=bool)
         self.replay_closed = np.zeros(self.n_agents, dtype=bool)
+        self.low_utility_streaks = np.zeros(self.n_agents, dtype=int)
 
     def _get_collision_free_candidate(self, robot, occupied_locations):
         occupied_keys = {
@@ -111,25 +112,7 @@ class MultiAgentWorker:
         return None, None
 
     def _sample_initial_budgets(self, curriculum_success_rate=0.0):
-        success = float(np.clip(curriculum_success_rate, 0.0, 1.0))
-        target = BUDGET_END + int((BUDGET_START - BUDGET_END) * (1.0 - success))
-        lo = int(np.clip(target - BUDGET_CURRICULUM_NOISE, BUDGET_END, BUDGET_START))
-        hi = int(np.clip(target + BUDGET_CURRICULUM_NOISE, BUDGET_END, BUDGET_START))
-
-        if np.random.random() < BUDGET_CURRICULUM_UNIFORM_P:
-            left_count = max(0, lo - BUDGET_END)
-            right_count = max(0, BUDGET_START - hi)
-            total_outside = left_count + right_count
-            if total_outside > 0:
-                idx = np.random.randint(0, total_outside)
-                budget = (BUDGET_END + idx) if idx < left_count else (hi + 1 + idx - left_count)
-            else:
-                budget = int(np.random.randint(lo, hi + 1))
-        else:
-            noise = np.random.randint(-BUDGET_CURRICULUM_NOISE, BUDGET_CURRICULUM_NOISE + 1)
-            budget = int(np.clip(target + noise, BUDGET_END, BUDGET_START))
-
-        return np.full(self.n_agents, budget, dtype=int)
+        return np.full(self.n_agents, BUDGET_START, dtype=int)
 
     def _set_agent_budget_context(self, robot):
         robot.set_budget_context(
@@ -175,14 +158,16 @@ class MultiAgentWorker:
         return all(np.allclose(robot.location, self.base_locations[robot.id]) for robot in self.robot_list)
 
     def _coverage_success_reached(self):
-        return bool(self.env.explored_rate > SUCCESS_THRESHOLD)
+        return bool(self.env.explored_rate >= SUCCESS_THRESHOLD)
+
+    @staticmethod
+    def _should_force_return(hops_to_base, remaining_budget):
+        return hops_to_base + RETURN_SAFETY_MARGIN >= remaining_budget
 
     def _episode_success(self, mission_failure):
         return bool(
             self._coverage_success_reached()
-            and self._all_agents_at_base()
             and not mission_failure
-            and np.all(self.remaining_budgets >= 0)
         )
 
     def _get_joint_next_index_lists(self):
@@ -217,10 +202,11 @@ class MultiAgentWorker:
                 self.env.get_agent_map_info(robot.id),
                 local_observation=observation,
                 local_node_coords=robot.node_coords,
+                base_location=self.base_locations[robot.id],
             )
             robot.save_next_critic_observations(critic_observation)
         else:
-            ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
+            ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, base_location=self.base_locations[robot.id])
             robot.save_next_ground_truth_observations(ground_truth_observation)
 
         self.replay_closed[robot.id] = True
@@ -234,12 +220,9 @@ class MultiAgentWorker:
     def _has_feasible_exploration_action(self, robot, observation):
         current_edge = observation[4][0, :, 0].detach().cpu().numpy()
         edge_padding = observation[5][0, 0].detach().cpu().numpy()
-        action_budget = observation[10][0].detach().cpu().numpy()
 
         valid_slots = np.where(edge_padding == 0)[0]
         for slot in valid_slots:
-            if action_budget[slot, -1] <= 0.5:
-                continue
             if int(current_edge[slot]) == int(robot.current_index):
                 continue
             return True
@@ -279,14 +262,25 @@ class MultiAgentWorker:
                 robot_at_base = np.allclose(robot.location, self.base_locations[robot.id])
                 hops_to_base = robot.get_hops_to_base()
 
-                if self.returning_agents[robot.id] and robot_at_base:
+                if self.returning_agents[robot.id]:
+                    if not SIMULATE_RETURN_TO_BASE or robot_at_base:
+                        continue
+                    return_path = self._get_return_path(robot)
+                    if len(return_path) == 0:
+                        if not robot_at_base:
+                            mission_failure = True
+                        selected_locations[robot.id] = robot.location.copy()
+                    else:
+                        selected_locations[robot.id] = return_path[0].copy()
+                    dist_list[robot.id] = np.linalg.norm(selected_locations[robot.id] - robot.location)
+                    next_heading_index_list[robot.id] = self._get_heading_index_towards(robot, selected_locations[robot.id])
                     continue
 
-                if (not self.returning_agents[robot.id]) and (hops_to_base >= self.remaining_budgets[robot.id]):
+                if self._should_force_return(hops_to_base, self.remaining_budgets[robot.id]):
                     self.returning_agents[robot.id] = True
                     self._close_agent_replay(robot, team_node_managers)
-
-                if self.returning_agents[robot.id]:
+                    if not SIMULATE_RETURN_TO_BASE:
+                        continue
                     return_path = self._get_return_path(robot)
                     if len(return_path) == 0:
                         if not robot_at_base:
@@ -306,6 +300,8 @@ class MultiAgentWorker:
                 if not self._has_feasible_exploration_action(robot, observation):
                     self.returning_agents[robot.id] = True
                     self._close_agent_replay(robot, team_node_managers)
+                    if not SIMULATE_RETURN_TO_BASE:
+                        continue
                     return_path = self._get_return_path(robot)
                     if len(return_path) == 0:
                         if not robot_at_base:
@@ -323,6 +319,9 @@ class MultiAgentWorker:
             if mission_failure:
                 break
 
+            if len(active_explorer_ids) == 0 and np.all(self.returning_agents):
+                break
+
             for robot_id in active_explorer_ids:
                 robot = self.robot_list[robot_id]
                 observation = observations[robot_id]
@@ -336,11 +335,12 @@ class MultiAgentWorker:
                         self.env.get_agent_map_info(robot.id),
                         local_observation=observation,
                         local_node_coords=robot.node_coords,
+                        base_location=self.base_locations[robot.id],
                     )
                     robot.current_critic_index = critic_observation[3][0, 0, 0].item()
                     robot.save_critic_observation(critic_observation)
                 else:
-                    ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location)
+                    ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, base_location=self.base_locations[robot.id])
                     robot.save_ground_truth_observation(ground_truth_observation)
 
                 next_location, _, _, next_heading_index = robot.select_next_waypoint(observation)
@@ -464,24 +464,33 @@ class MultiAgentWorker:
                 trajectory_reward = np.cos(np.radians(robot.heading - trajectory_angle))
 
                 # Calculate overlap penalty for this agent
-                overlap_penalty = robot.calculate_overlap_reward(
-                    next_location,
-                    selected_locations,
-                    robot_headings_list
-                )
+                # overlap_penalty = robot.calculate_overlap_reward(
+                #     next_location,
+                #     selected_locations,
+                #     robot_headings_list
+                # )
 
-                # Explicit penalty for redundantly following a teammate's trail
-                trajectory_history_penalty = 0.0
-                if node.visited_by_others > 0.9:
-                    trajectory_history_penalty = 0.15
+                low_utility_signal = 0.5 * utility_reward + merged_node_utility_reward
+                if low_utility_signal < LOW_UTILITY_MOVE_THRESHOLD:
+                    self.low_utility_streaks[robot_id] += 1
+                else:
+                    self.low_utility_streaks[robot_id] = 0
+
+                repeated_low_utility_penalty = REPEATED_LOW_UTILITY_PENALTY * max(self.low_utility_streaks[robot_id] - 1, 0)
+
+                # Scale the teammate-trail penalty by the decayed recency signal.
+                trajectory_history_penalty = 0.15 * float(np.clip(node.visited_by_others, 0.0, 1.0))
+
+                budget_fraction = self.remaining_budgets[robot_id] / max(self.initial_budgets[robot_id], 1)
+                time_pressure = -TIME_PRESSURE_WEIGHT * (1.0 - budget_fraction)
 
                 reward_list.append(
-                    0.6 * utility_reward
+                    0.5 * utility_reward
                     + merged_node_utility_reward
                     + trajectory_reward
-                    - overlap_penalty
                     - trajectory_history_penalty
-                )
+                    - repeated_low_utility_penalty
+                    + time_pressure)
                 robot.save_action(torch.tensor([executed_action_index], device=self.device))
             for robot in self.robot_list:
                 robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
@@ -498,7 +507,7 @@ class MultiAgentWorker:
 
             team_reward = self.env.calculate_team_reward() - 0.5
             if coverage_success_reached:
-                team_reward += 10
+                team_reward += 4
 
             curr_node_indices = np.array([robot.current_index for robot in self.robot_list])
             curr_critic_indices = None
@@ -507,9 +516,12 @@ class MultiAgentWorker:
 
             for robot_id, reward in zip(active_explorer_ids, reward_list):
                 robot = self.robot_list[robot_id]
-                # Do not expose hidden team-merged coverage as an operational stop signal
-                # to decentralized actors. Coverage remains an evaluation metric only.
-                robot_should_return = robot.get_hops_to_base() >= self.remaining_budgets[robot_id]
+                # Once the team-level coverage objective is met, finish exploration and
+                # let the existing return-to-base controller close out the mission.
+                robot_should_return = (
+                    coverage_success_reached
+                    or self._should_force_return(robot.get_hops_to_base(), self.remaining_budgets[robot_id])
+                )
                 transition_done = mission_failure or robot_should_return
                 robot.save_reward(reward + team_reward)
                 if USE_COMMUNICATION:
@@ -524,8 +536,19 @@ class MultiAgentWorker:
 
             if mission_failure:
                 break
-            if self._all_agents_at_base() and np.all(self.returning_agents):
+
+            # Immediately terminate episode on coverage success — no more
+            # transitions are generated, preventing low-quality wandering
+            # data from entering the replay buffer.
+            if coverage_success_reached:
+                for robot in self.robot_list:
+                    if not self.replay_closed[robot.id]:
+                        self._close_agent_replay(robot, team_node_managers)
                 break
+
+            if np.all(self.returning_agents):
+                if not SIMULATE_RETURN_TO_BASE or self._all_agents_at_base():
+                    break
 
         self._finalize_open_agent_replays(team_node_managers)
         for robot in self.robot_list:
@@ -952,7 +975,6 @@ class MultiAgentWorker:
 
             plot_node_coords, plot_node_utility = plot_node_data
             if plot_node_coords is not None and len(plot_node_coords) > 0:
-                self._draw_node_manager_edges(agent_ax, plot_node_manager, agent_map_info)
                 nodes = get_cell_position_from_coords(plot_node_coords, agent_map_info)
                 if nodes.ndim == 1:
                     nodes = nodes.reshape(1, 2)
@@ -1035,10 +1057,21 @@ class MultiAgentWorker:
 if __name__ == '__main__':
     from parameter import *
     import torch
+
+    def load_compatible_state_dict(module, checkpoint_state, label):
+        model_state = module.state_dict()
+        compatible_state = {
+            key: value for key, value in checkpoint_state.items()
+            if key in model_state and model_state[key].shape == value.shape
+        }
+        missing_or_mismatched = len(model_state) - len(compatible_state)
+        module.load_state_dict(compatible_state, strict=False)
+        print(f'Loaded {label}: {len(compatible_state)} tensors, skipped {missing_or_mismatched}')
+
     policy_net = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN)
     if LOAD_MODEL:
         checkpoint = torch.load(load_path + '/checkpoint.pth', map_location='cpu')
-        policy_net.load_state_dict(checkpoint['policy_model'])
+        load_compatible_state_dict(policy_net, checkpoint['policy_model'], 'policy')
         print('Policy loaded!')
     worker = MultiAgentWorker(0, policy_net, 888, 'cpu', True)
     worker.run_episode()

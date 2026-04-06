@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import math
 import numpy as np
-from parameter import BUDGET_FEATURE_DIM, ACTION_BUDGET_DIM
+from parameter import BUDGET_FEATURE_DIM
 
 class SingleHeadAttention(nn.Module):
     def __init__(self, embedding_dim):
@@ -48,9 +48,10 @@ class SingleHeadAttention(nn.Module):
         return attention
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, embedding_dim, n_heads=8):
+    def __init__(self, embedding_dim, n_heads=8, gated_attention=True):
         super(MultiHeadAttention, self).__init__()
         self.n_heads = n_heads
+        self.gated_attention = gated_attention
         self.input_dim = embedding_dim
         self.embedding_dim = embedding_dim
         self.value_dim = self.embedding_dim // self.n_heads
@@ -60,6 +61,9 @@ class MultiHeadAttention(nn.Module):
         self.w_query = nn.Parameter(torch.Tensor(self.n_heads, self.input_dim, self.key_dim))
         self.w_key = nn.Parameter(torch.Tensor(self.n_heads, self.input_dim, self.key_dim))
         self.w_value = nn.Parameter(torch.Tensor(self.n_heads, self.input_dim, self.value_dim))
+        if gated_attention:
+            # Paper-style headwise gating: query-dependent sigmoid gate after attention output.
+            self.w_gate = nn.Parameter(torch.Tensor(self.n_heads, self.input_dim, 1))
         self.w_out = nn.Parameter(torch.Tensor(self.n_heads, self.value_dim, self.embedding_dim))
 
         self.init_parameters()
@@ -89,6 +93,8 @@ class MultiHeadAttention(nn.Module):
         Q = torch.matmul(q_flat, self.w_query).view(shape_q)
         K = torch.matmul(k_flat, self.w_key).view(shape_k) 
         V = torch.matmul(v_flat, self.w_value).view(shape_v)  
+        if self.gated_attention:
+            G = torch.matmul(q_flat, self.w_gate).view(self.n_heads, n_batch, n_query, 1)
 
         U = self.norm_factor * torch.matmul(Q, K.transpose(2, 3)) 
 
@@ -113,6 +119,8 @@ class MultiHeadAttention(nn.Module):
 
         attention = torch.softmax(U, dim=-1)  
         heads = torch.matmul(attention, V)  
+        if self.gated_attention:
+            heads = heads * torch.sigmoid(G)
         out = torch.mm(
             heads.permute(1, 2, 0, 3).reshape(-1, self.n_heads * self.value_dim),
             self.w_out.view(-1, self.embedding_dim)
@@ -133,30 +141,17 @@ class Normalization(nn.Module):
 class EncoderLayer(nn.Module):
     def __init__(self, embedding_dim, n_head, gated_attention=True):
         super(EncoderLayer, self).__init__()
-        self.gated_attention = gated_attention
-        self.multiHeadAttention = MultiHeadAttention(embedding_dim, n_head)
+        self.multiHeadAttention = MultiHeadAttention(embedding_dim, n_head, gated_attention=gated_attention)
         self.normalization1 = Normalization(embedding_dim)
         self.feedForward = nn.Sequential(nn.Linear(embedding_dim, 512), nn.ReLU(inplace=True),
                                          nn.Linear(512, embedding_dim))
         self.normalization2 = Normalization(embedding_dim)
 
-        # Gating mechanism for attention
-        if gated_attention:
-            self.attention_gate = nn.Sequential(
-                nn.Linear(embedding_dim * 2, embedding_dim),
-                nn.Sigmoid()
-            )
-
     def forward(self, src, key_padding_mask=None, attn_mask=None):
         h0 = src
         h = self.normalization1(src)
         h, _ = self.multiHeadAttention(q=h, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
-        # Apply gated or standard residual connection
-        if self.gated_attention:
-            gate = self.attention_gate(torch.cat([h0, h], dim=-1))
-            h = h0 + gate * h
-        else:
-            h = h + h0
+        h = h + h0
         h1 = h
         h = self.normalization2(h)
         h = self.feedForward(h)
@@ -167,20 +162,12 @@ class EncoderLayer(nn.Module):
 class DecoderLayer(nn.Module):
     def __init__(self, embedding_dim, n_head, gated_attention=True):
         super(DecoderLayer, self).__init__()
-        self.gated_attention = gated_attention
-        self.multiHeadAttention = MultiHeadAttention(embedding_dim, n_head)
+        self.multiHeadAttention = MultiHeadAttention(embedding_dim, n_head, gated_attention=gated_attention)
         self.normalization1 = Normalization(embedding_dim)
         self.feedForward = nn.Sequential(nn.Linear(embedding_dim, 512),
                                          nn.ReLU(inplace=True),
                                          nn.Linear(512, embedding_dim))
         self.normalization2 = Normalization(embedding_dim)
-
-        # Gating mechanism for cross attention
-        if gated_attention:
-            self.attention_gate = nn.Sequential(
-                nn.Linear(embedding_dim * 2, embedding_dim),
-                nn.Sigmoid()
-            )
 
     def forward(self, tgt, memory, key_padding_mask=None, attn_mask=None):
         h0 = tgt
@@ -188,12 +175,7 @@ class DecoderLayer(nn.Module):
         memory = self.normalization1(memory)
         h, w = self.multiHeadAttention(q=tgt, k=memory, v=memory, key_padding_mask=key_padding_mask,
                                        attn_mask=attn_mask)
-        # Apply gated or standard residual connection
-        if self.gated_attention:
-            gate = self.attention_gate(torch.cat([h0, h], dim=-1))
-            h = h0 + gate * h
-        else:
-            h = h + h0
+        h = h + h0
         h1 = h
         h = self.normalization2(h)
         h = self.feedForward(h)
@@ -268,12 +250,7 @@ class TrajectoryEncoder(nn.Module):
         self.temporal_encoder = Encoder(embedding_dim=trajectory_embedding_dim, n_head=n_head, n_layer=n_layer, gated_attention=gated_attention)
 
         # Agent aggregation layer
-        self.agent_attention = MultiHeadAttention(trajectory_embedding_dim, n_heads=n_head)
-        if gated_attention:
-            self.agent_attention_gate = nn.Sequential(
-                nn.Linear(trajectory_embedding_dim * 2, trajectory_embedding_dim),
-                nn.Sigmoid()
-            )
+        self.agent_attention = MultiHeadAttention(trajectory_embedding_dim, n_heads=n_head, gated_attention=gated_attention)
 
         # Output projection
         self.output_layer = nn.Sequential(
@@ -341,12 +318,7 @@ class TrajectoryEncoder(nn.Module):
             key_padding_mask=attention_mask
         )
 
-        # Apply gated or standard residual connection
-        if self.gated_attention:
-            gate = self.agent_attention_gate(torch.cat([query, aggregated], dim=-1))
-            aggregated = query + gate * aggregated
-        else:
-            aggregated = query + aggregated
+        aggregated = query + aggregated
 
         # If all agents are invalid, suppress attended output.
         has_valid_agents = agent_valid.any(dim=1)
@@ -385,7 +357,7 @@ class TrajectoryEncoder(nn.Module):
 
 class PolicyNet(nn.Module):
     def __init__(self, node_dim, embedding_dim, num_angles_bin, use_trajectory=True, gated_attention=True,
-                 budget_feature_dim=BUDGET_FEATURE_DIM, action_budget_dim=ACTION_BUDGET_DIM):
+                 budget_feature_dim=BUDGET_FEATURE_DIM):
         super(PolicyNet, self).__init__()
 
         self.use_trajectory = use_trajectory
@@ -421,24 +393,17 @@ class PolicyNet(nn.Module):
                 nn.Linear(embedding_dim, embedding_dim)
             )
             # Cross attention to fuse trajectory information with current state
-            self.trajectory_cross_attention = MultiHeadAttention(embedding_dim, n_heads=4)
-            # Gating mechanism for cross attention
-            if gated_attention:
-                self.trajectory_gate = nn.Sequential(
-                    nn.Linear(embedding_dim * 2, embedding_dim),
-                    nn.Sigmoid()
-                )
+            self.trajectory_cross_attention = MultiHeadAttention(embedding_dim, n_heads=4, gated_attention=gated_attention)
 
         # Decoder
         self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1, gated_attention=gated_attention)
         self.current_embedding = nn.Linear(embedding_dim * 3, embedding_dim)
         self.budget_state_embedding = nn.Linear(budget_feature_dim, embedding_dim)
-        self.action_budget_embedding = nn.Linear(action_budget_dim, embedding_dim)
 
         # Heading layer
         self.best_headings_embedding = nn.Linear(num_angles_bin, embedding_dim)
         self.visited_headings_embedding = nn.Linear(num_angles_bin, embedding_dim)
-        self.neighboring_node_embedding = nn.Linear(embedding_dim * 4, embedding_dim)
+        self.neighboring_node_embedding = nn.Linear(embedding_dim * 3, embedding_dim)
 
         # pointer
         self.pointer = SingleHeadAttention(embedding_dim)
@@ -550,22 +515,14 @@ class PolicyNet(nn.Module):
             )
             attended_features = attended_features * has_valid_tokens.view(batch_size, 1, 1).float()
 
-            # Apply gated or standard residual connection
-            if self.gated_attention:
-                # Compute gate based on both original and attended features
-                gate = self.trajectory_gate(torch.cat([enhanced_current_node_feature, attended_features], dim=-1))
-                # Gated residual connection
-                enhanced_current_node_feature = enhanced_current_node_feature + gate * attended_features
-            else:
-                # Standard residual connection
-                enhanced_current_node_feature = enhanced_current_node_feature + attended_features
+            enhanced_current_node_feature = enhanced_current_node_feature + attended_features
 
         return current_node_feature, enhanced_current_node_feature
 
     def output_policy(self, current_node_feature, enhanced_current_node_feature,
                       enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings,
-                      budget_state, action_budget):
-        
+                      budget_state):
+
         embedding_dim = enhanced_node_feature.size()[2]
         batch_size = enhanced_node_feature.size()[0]
         num_best_headings = neighbor_best_headings.size()[2]
@@ -575,24 +532,20 @@ class PolicyNet(nn.Module):
                                                                   embedded_budget_state), dim=-1))
 
         neighboring_feature = torch.gather(enhanced_node_feature, 1,
-                                           current_edge.repeat(1, 1, embedding_dim))     
+                                           current_edge.repeat(1, 1, embedding_dim))
 
-        enhanced_neighbor_best_headings = self.best_headings_embedding(neighbor_best_headings)  
-        all_headings_visited = self.visited_headings_embedding(headings_visited)              
+        enhanced_neighbor_best_headings = self.best_headings_embedding(neighbor_best_headings)
+        all_headings_visited = self.visited_headings_embedding(headings_visited)
         all_neighbor_headings_visited = torch.gather(all_headings_visited, 1,
-                                           current_edge.repeat(1, 1, embedding_dim))         
+                                           current_edge.repeat(1, 1, embedding_dim))
 
-        neighboring_nodes_feature = neighboring_feature.unsqueeze(2).repeat(1, 1, num_best_headings, 1)                
-        neighbor_headings_visited = all_neighbor_headings_visited.unsqueeze(2).repeat(1, 1, num_best_headings, 1)       
-        embedded_action_budget = self.action_budget_embedding(action_budget).unsqueeze(2).repeat(1, 1, num_best_headings, 1)
+        neighboring_nodes_feature = neighboring_feature.unsqueeze(2).repeat(1, 1, num_best_headings, 1)
+        neighbor_headings_visited = all_neighbor_headings_visited.unsqueeze(2).repeat(1, 1, num_best_headings, 1)
 
         enhanced_neighbor_features = self.neighboring_node_embedding(torch.cat((neighboring_nodes_feature, neighbor_headings_visited,
-                                                                                enhanced_neighbor_best_headings,
-                                                                                embedded_action_budget), dim=-1)).reshape(batch_size, -1, embedding_dim)      
-     
+                                                                                enhanced_neighbor_best_headings), dim=-1)).reshape(batch_size, -1, embedding_dim)
+
         current_mask = edge_padding_mask.unsqueeze(-1).repeat(1, 1, 1, num_best_headings).reshape(batch_size, 1, -1)
-        feasibility_mask = (action_budget[:, :, -1] <= 0).unsqueeze(-1).repeat(1, 1, num_best_headings).reshape(batch_size, 1, -1)
-        current_mask = torch.maximum(current_mask, feasibility_mask.to(current_mask.dtype))
         logp = self.pointer(current_state_feature, enhanced_neighbor_features, current_mask)
         logp = logp.squeeze(1)
 
@@ -600,7 +553,7 @@ class PolicyNet(nn.Module):
 
     def forward(self, node_inputs, node_padding_mask, edge_mask, current_index,
                 current_edge, edge_padding_mask, frontier_distribution, headings_visited, neighbor_best_headings,
-                budget_state, action_budget,
+                budget_state,
                 detected_trajectories=None, trajectory_mask=None, trajectory_node_indices=None):
         enhanced_node_feature = self.encode_graph(node_inputs, node_padding_mask, edge_mask, frontier_distribution)
 
@@ -621,14 +574,14 @@ class PolicyNet(nn.Module):
             trajectory_node_features, trajectory_mask, trajectory_node_indices)
         logp = self.output_policy(current_node_feature, enhanced_current_node_feature,
                                   enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings,
-                                  budget_state, action_budget)
+                                  budget_state)
 
         return logp
 
 
 class QNet(nn.Module):
     def __init__(self, node_dim, embedding_dim, num_angles_bin, train_algo, use_trajectory=True, gated_attention=True,
-                 budget_feature_dim=BUDGET_FEATURE_DIM, action_budget_dim=ACTION_BUDGET_DIM):
+                 budget_feature_dim=BUDGET_FEATURE_DIM):
         super(QNet, self).__init__()
 
         self.use_trajectory = use_trajectory
@@ -663,24 +616,17 @@ class QNet(nn.Module):
                 nn.Linear(embedding_dim, embedding_dim)
             )
             # Cross attention to fuse trajectory information with current state
-            self.trajectory_cross_attention = MultiHeadAttention(embedding_dim, n_heads=4)
-            # Gating mechanism for cross attention
-            if gated_attention:
-                self.trajectory_gate = nn.Sequential(
-                    nn.Linear(embedding_dim * 2, embedding_dim),
-                    nn.Sigmoid()
-                )
+            self.trajectory_cross_attention = MultiHeadAttention(embedding_dim, n_heads=4, gated_attention=gated_attention)
 
         # Decoder
         self.decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1, gated_attention=gated_attention)
         self.current_embedding = nn.Linear(embedding_dim * 3, embedding_dim)
         self.budget_state_embedding = nn.Linear(budget_feature_dim, embedding_dim)
-        self.action_budget_embedding = nn.Linear(action_budget_dim, embedding_dim)
 
-        # Heeading layer
+        # Heading layer
         self.best_headings_embedding = nn.Linear(num_angles_bin, embedding_dim)
         self.visited_headings_embedding = nn.Linear(num_angles_bin, embedding_dim)
-        self.neighboring_node_embedding = nn.Linear(embedding_dim * 4, embedding_dim)
+        self.neighboring_node_embedding = nn.Linear(embedding_dim * 3, embedding_dim)
 
         # Agent decoder
         if train_algo in (2, 3, 4, 5):
@@ -805,20 +751,12 @@ class QNet(nn.Module):
             )
             attended_features = attended_features * has_valid_tokens.view(batch_size, 1, 1).float()
 
-            # Apply gated or standard residual connection
-            if self.gated_attention:
-                # Compute gate based on both original and attended features
-                gate = self.trajectory_gate(torch.cat([enhanced_current_node_feature, attended_features], dim=-1))
-                # Gated residual connection
-                enhanced_current_node_feature = enhanced_current_node_feature + gate * attended_features
-            else:
-                # Standard residual connection
-                enhanced_current_node_feature = enhanced_current_node_feature + attended_features
+            enhanced_current_node_feature = enhanced_current_node_feature + attended_features
 
         return current_node_feature, enhanced_current_node_feature
 
     def output_q(self, current_node_feature, enhanced_current_node_feature, enhanced_node_feature,
-                 current_edge, edge_padding_mask, headings_visited, neighbor_best_headings, budget_state, action_budget,
+                 current_edge, edge_padding_mask, headings_visited, neighbor_best_headings, budget_state,
                  current_index, all_agent_indices, all_agent_next_indices):
         embedding_dim = enhanced_node_feature.size()[2]
         num_best_headings = neighbor_best_headings.size()[2]
@@ -830,19 +768,17 @@ class QNet(nn.Module):
 
         neighboring_feature = torch.gather(enhanced_node_feature, 1,
                                            current_edge.repeat(1, 1, embedding_dim))
-        
+
         enhanced_neighbor_best_headings = self.best_headings_embedding(neighbor_best_headings)
         all_headings_visited = self.visited_headings_embedding(headings_visited)
         all_neighbor_headings_visited = torch.gather(all_headings_visited, 1,
-                                           current_edge.repeat(1, 1, embedding_dim))   
+                                           current_edge.repeat(1, 1, embedding_dim))
 
         neighboring_nodes_feature = neighboring_feature.unsqueeze(2).repeat(1, 1, num_best_headings, 1)
         neighbor_headings_visited = all_neighbor_headings_visited.unsqueeze(2).repeat(1, 1, num_best_headings, 1)
-        embedded_action_budget = self.action_budget_embedding(action_budget).unsqueeze(2).repeat(1, 1, num_best_headings, 1)
 
         enhanced_neighbor_features = self.neighboring_node_embedding(torch.cat((neighboring_nodes_feature, neighbor_headings_visited,
-                                                                                enhanced_neighbor_best_headings,
-                                                                                embedded_action_budget), dim=-1)).reshape(batch_size, -1, embedding_dim)
+                                                                                enhanced_neighbor_best_headings), dim=-1)).reshape(batch_size, -1, embedding_dim)
         
         if all_agent_indices != None:
             all_agent_node_feature = torch.gather(enhanced_node_feature, 1,
@@ -864,7 +800,7 @@ class QNet(nn.Module):
 
     def forward(self, node_inputs, node_padding_mask, edge_mask, current_index,
                 current_edge, edge_padding_mask, frontier_distribution, headings_visited, neighbor_best_headings,
-                budget_state, action_budget,
+                budget_state,
                 all_agent_indices=None, all_agent_next_indices=None, detected_trajectories=None, trajectory_mask=None, trajectory_node_indices=None):
         enhanced_node_feature = self.encode_graph(node_inputs, node_padding_mask, edge_mask, frontier_distribution)
 
@@ -885,5 +821,5 @@ class QNet(nn.Module):
             trajectory_node_features, trajectory_mask, trajectory_node_indices)
         q_values = self.output_q(current_node_feature, enhanced_current_node_feature,
                                  enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings,
-                                 budget_state, action_budget, current_index, all_agent_indices, all_agent_next_indices)
+                                 budget_state, current_index, all_agent_indices, all_agent_next_indices)
         return q_values

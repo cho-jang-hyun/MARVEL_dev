@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '4_4_Budget_corrected'
+FOLDER_NAME = '4_6_Budget_features_experiment'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -67,7 +67,7 @@ UPDATING_MAP_SIZE = 4 * SENSOR_RANGE + 4 * NODE_RESOLUTION
 
 # training parameters
 MAX_EPISODE_STEP = 128
-BUDGET_START = 150   # budget when success rate is 0 (easy)
+BUDGET_START = 128   # budget when success rate is 0 (easy)
 BUDGET_END = 96      # budget when success rate is 1 (hard)
 BUDGET_CURRICULUM_NOISE = 8   # ±uniform noise around the curriculum target budget
 BUDGET_CURRICULUM_EMA = 0.05  # EMA smoothing for success rate tracker
@@ -77,33 +77,37 @@ MIN_BUDGET = BUDGET_END
 MAX_BUDGET = BUDGET_START
 REPLAY_SIZE = 15000
 MINIMUM_BUFFER_SIZE = 10000
-BATCH_SIZE = 256
+BATCH_SIZE = 128
 LR = 1e-5
-GAMMA = 0.99
+GAMMA = 0.995
 TAU = 0.001  # Soft update coefficient for target network (0.001 ~ 0.01)
-NUM_META_AGENT = 20
+NUM_META_AGENT = 18
 
 # reward shaping
-MERGED_NODE_UTILITY_REWARD_WEIGHT = 1
+MERGED_NODE_UTILITY_REWARD_WEIGHT = 0.85
 VISITED_BY_OTHERS_DECAY = 0.02
 VISITED_BY_OTHERS_MIN = 0.05
+LOW_UTILITY_MOVE_THRESHOLD = 0.05
+REPEATED_LOW_UTILITY_PENALTY = 0.03
+TIME_PRESSURE_WEIGHT = 0.05  # per-step cost that scales linearly as budget depletes (0 at full budget, this value at zero budget)
 
 # Gradient clipping parameters
 GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5.0)
-GRAD_CLIP_Q = 10.0      # Max gradient norm for Q networks (typical: 1.0 ~ 10.0)
+GRAD_CLIP_Q = 1.5 # Max gradient norm for Q networks (typical: 1.0 ~ 10.0)
 
 # network parameters
-NODE_INPUT_DIM = 7  # Changed from 6: added visited_by_others feature
+NODE_INPUT_DIM = 8  # Added hops_to_base/MAX_BUDGET per node
 EMBEDDING_DIM = 128
-BUDGET_FEATURE_DIM = 5
-ACTION_BUDGET_DIM = 4
+BUDGET_FEATURE_DIM = 4  # log_initial, log_remaining, remaining/initial, hops/remaining
+RETURN_SAFETY_MARGIN = 0  # extra action steps reserved before an agent must stop exploring and head home
+SIMULATE_RETURN_TO_BASE = False  # When False, skip return-to-base simulation during training (saves ~30% wall time)
 
 # Trajectory tracking parameters
 TRAJECTORY_HISTORY_LENGTH = 10  # Number of recent steps to track
 TRAJECTORY_FEATURE_DIM = 5      # (dx, dy, sin(heading), cos(heading), velocity)
 TRAJECTORY_EMBEDDING_DIM = 64   # Trajectory encoder output dimension
 MAX_DETECTED_AGENTS = N_AGENTS - 1  # Maximum number of detectable agents in FOV
-GATED_ATTENTION = True  # Use gated attention for cross attention (True: gated, False: standard residual)
+GATED_ATTENTION = True  # Apply paper-style query-dependent sigmoid gating on each attention head output
 
 # Graph parameters
 NUM_NODE_NEIGHBORS = 5
