@@ -104,7 +104,7 @@ SIMULATE_RETURN_TO_BASE = False  # When False, skip return-to-base simulation du
 
 # Trajectory tracking parameters
 TRAJECTORY_HISTORY_LENGTH = 10  # Number of recent steps to track
-TRAJECTORY_FEATURE_DIM = 5      # (dx, dy, sin(heading), cos(heading), velocity)
+TRAJECTORY_FEATURE_DIM = 5      # (dx, dy, sin(heading), cos(heading), age_since_seen)
 TRAJECTORY_EMBEDDING_DIM = 64   # Trajectory encoder output dimension
 MAX_DETECTED_AGENTS = N_AGENTS - 1  # Maximum number of detectable agents in FOV
 GATED_ATTENTION = True  # Apply paper-style query-dependent sigmoid gating on each attention head output

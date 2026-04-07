@@ -56,6 +56,13 @@ def load_compatible_state_dict(module, checkpoint_state, label):
     print(f'Loaded {label}: {len(compatible_state)} tensors, skipped {missing_or_mismatched}')
 
 
+def load_optimizer_state_if_compatible(optimizer, checkpoint_state, label):
+    try:
+        optimizer.load_state_dict(checkpoint_state)
+    except ValueError as exc:
+        print(f'Skipped {label} optimizer state due to architecture change: {exc}')
+
+
 def main():
     # Set specific GPU if GPU_ID is specified
     if USE_GPU_GLOBAL and GPU_ID is not None:
@@ -140,10 +147,10 @@ def main():
         log_alpha.requires_grad_(True)
         log_alpha_optimizer = optim.Adam([log_alpha], lr=1e-4)
 
-        global_policy_optimizer.load_state_dict(checkpoint['policy_optimizer'])
-        global_q_net1_optimizer.load_state_dict(checkpoint['q_net1_optimizer'])
-        global_q_net2_optimizer.load_state_dict(checkpoint['q_net2_optimizer'])
-        log_alpha_optimizer.load_state_dict(checkpoint['log_alpha_optimizer'])
+        load_optimizer_state_if_compatible(global_policy_optimizer, checkpoint['policy_optimizer'], 'policy')
+        load_optimizer_state_if_compatible(global_q_net1_optimizer, checkpoint['q_net1_optimizer'], 'q_net1')
+        load_optimizer_state_if_compatible(global_q_net2_optimizer, checkpoint['q_net2_optimizer'], 'q_net2')
+        load_optimizer_state_if_compatible(log_alpha_optimizer, checkpoint['log_alpha_optimizer'], 'log_alpha')
         curr_episode = checkpoint['episode']
         best_success_rate = checkpoint.get('best_success_rate', -float('inf'))
         curriculum_success_rate = checkpoint.get('curriculum_success_rate', 0.0)
@@ -299,6 +306,8 @@ def main():
                     if effective_train_algo in (4, 5):
                         critic_neighbor_best_headings = torch.stack(rollouts[46]).to(device)
                         next_critic_neighbor_best_headings = torch.stack(rollouts[47]).to(device)
+                        critic_trajectory_node_indices = torch.stack(rollouts[49]).to(device)
+                        next_critic_trajectory_node_indices = torch.stack(rollouts[51]).to(device)
 
                     # Load agent indices only when communication is enabled
                     # When USE_COMMUNICATION=False, effective_train_algo won't include agent communication
@@ -371,12 +380,12 @@ def main():
                         q_kwargs = dict(
                             detected_trajectories=detected_trajectories,
                             trajectory_mask=trajectory_mask,
-                            trajectory_node_indices=trajectory_node_indices,
+                            trajectory_node_indices=None,
                         )
                         next_q_kwargs = dict(
                             detected_trajectories=next_detected_trajectories,
                             trajectory_mask=next_trajectory_mask,
-                            trajectory_node_indices=next_trajectory_node_indices,
+                            trajectory_node_indices=None,
                         )
                     elif effective_train_algo == 3:
                         # MAAC with ground truth and communication
@@ -392,14 +401,14 @@ def main():
                             all_agent_next_indices=all_agent_next_indices,
                             detected_trajectories=detected_trajectories,
                             trajectory_mask=trajectory_mask,
-                            trajectory_node_indices=trajectory_node_indices,
+                            trajectory_node_indices=None,
                         )
                         next_q_kwargs = dict(
                             all_agent_indices=all_agent_next_indices,
                             all_agent_next_indices=next_all_agent_next_indices,
                             detected_trajectories=next_detected_trajectories,
                             trajectory_mask=next_trajectory_mask,
-                            trajectory_node_indices=next_trajectory_node_indices,
+                            trajectory_node_indices=None,
                         )
                     elif effective_train_algo == 4:
                         # Merged-belief critic only, no communication
@@ -413,12 +422,12 @@ def main():
                         q_kwargs = dict(
                             detected_trajectories=detected_trajectories,
                             trajectory_mask=trajectory_mask,
-                            trajectory_node_indices=trajectory_node_indices,
+                            trajectory_node_indices=critic_trajectory_node_indices,
                         )
                         next_q_kwargs = dict(
                             detected_trajectories=next_detected_trajectories,
                             trajectory_mask=next_trajectory_mask,
-                            trajectory_node_indices=next_trajectory_node_indices,
+                            trajectory_node_indices=next_critic_trajectory_node_indices,
                         )
                     elif effective_train_algo == 5:
                         # Merged-belief critic with communication
@@ -434,14 +443,14 @@ def main():
                             all_agent_next_indices=all_agent_next_indices,
                             detected_trajectories=detected_trajectories,
                             trajectory_mask=trajectory_mask,
-                            trajectory_node_indices=trajectory_node_indices,
+                            trajectory_node_indices=critic_trajectory_node_indices,
                         )
                         next_q_kwargs = dict(
                             all_agent_indices=all_agent_next_indices,
                             all_agent_next_indices=next_all_agent_next_indices,
                             detected_trajectories=next_detected_trajectories,
                             trajectory_mask=next_trajectory_mask,
-                            trajectory_node_indices=next_trajectory_node_indices,
+                            trajectory_node_indices=next_critic_trajectory_node_indices,
                         )
 
                     # SAC

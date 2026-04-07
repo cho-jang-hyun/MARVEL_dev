@@ -693,11 +693,11 @@ class Agent:
             # Convert to numpy array
             trajectory_array = np.array(trajectory[-seq_len:])  # Take last seq_len steps
 
-            # Extract features: (x, y, heading, velocity)
+            # Extract stored trajectory state. Velocity is stored for legacy
+            # buffer compatibility but is not used by the neural feature vector.
             x = trajectory_array[:, 0]
             y = trajectory_array[:, 1]
             heading = trajectory_array[:, 2]
-            velocity = trajectory_array[:, 3]
 
             # Find corresponding node indices for each timestep
             for t in range(seq_len):
@@ -735,13 +735,16 @@ class Agent:
             heading_sin = np.sin(heading_rad)
             heading_cos = np.cos(heading_rad)
 
-            # Normalize velocity to [0, 1]
-            velocity_norm = np.clip(velocity / (VELOCITY * NUM_SIM_STEPS), 0.0, 1.0)
+            # Recency of each sighting in [0, 1], where 0 means the current
+            # timestep and larger values mean older sightings in the history.
+            age_since_seen = (seq_len - 1 - np.arange(seq_len, dtype=np.float32)) / max(seq_len - 1, 1)
 
-            # Stack features: (dx, dy, sin(heading), cos(heading), velocity)
-            agent_traj = np.stack([dx_norm, dy_norm, heading_sin, heading_cos, velocity_norm], axis=1)
-            
-            # Zero out padded timesteps (where original x=0 and y=0)
+            # Stack features: (dx, dy, sin(heading), cos(heading), age_since_seen)
+            agent_traj = np.stack([dx_norm, dy_norm, heading_sin, heading_cos, age_since_seen], axis=1)
+
+            # Zero out padded/missing timesteps (where original x=0 and y=0).
+            # The trajectory encoder masks these rows, so age only applies to
+            # exact sightings retained in the sparse history.
             valid_steps = (x != 0) | (y != 0)
             agent_traj[~valid_steps] = 0.0
             
@@ -911,7 +914,7 @@ class Agent:
         self.episode_buffer[26] += heading_visited
 
     def save_critic_observation(self, critic_observation):
-        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, critic_neighbor_best_headings = critic_observation
+        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, critic_neighbor_best_headings, critic_trajectory_node_indices = critic_observation
         self.episode_buffer[19] += node_inputs
         self.episode_buffer[20] += node_padding_mask.bool()
         self.episode_buffer[21] += edge_mask.bool()
@@ -921,6 +924,7 @@ class Agent:
         self.episode_buffer[25] += frontier_distribution
         self.episode_buffer[26] += heading_visited
         self.episode_buffer[46] += critic_neighbor_best_headings
+        self.episode_buffer[49] += critic_trajectory_node_indices
 
     def save_next_ground_truth_observations(self, ground_truth_observation):
         self.episode_buffer[27] = copy.deepcopy(self.episode_buffer[19])[1:]
@@ -952,8 +956,9 @@ class Agent:
         self.episode_buffer[33] = copy.deepcopy(self.episode_buffer[25])[1:]
         self.episode_buffer[34] = copy.deepcopy(self.episode_buffer[26])[1:]
         self.episode_buffer[47] = copy.deepcopy(self.episode_buffer[46])[1:]
+        self.episode_buffer[51] = copy.deepcopy(self.episode_buffer[49])[1:]
 
-        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, critic_neighbor_best_headings = critic_observation
+        node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, critic_neighbor_best_headings, critic_trajectory_node_indices = critic_observation
         self.episode_buffer[27] += node_inputs
         self.episode_buffer[28] += node_padding_mask.bool()
         self.episode_buffer[29] += edge_mask.bool()
@@ -963,6 +968,7 @@ class Agent:
         self.episode_buffer[33] += frontier_distribution
         self.episode_buffer[34] += heading_visited
         self.episode_buffer[47] += critic_neighbor_best_headings
+        self.episode_buffer[51] += critic_trajectory_node_indices
 
     def save_all_indices(self, all_agent_indices):
         self.episode_buffer[35] += torch.tensor(all_agent_indices).reshape(1, -1, 1).to(self.device)

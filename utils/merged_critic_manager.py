@@ -132,6 +132,35 @@ class MergedBeliefCriticManager:
 
         return mapped_edge, local_edge_padding_mask.clone(), local_neighbor_best_headings.clone()
 
+    def _map_local_trajectory_node_indices(self, local_observation, local_node_coords):
+        trajectory_node_indices = local_observation[12]
+        mapped_indices = trajectory_node_indices.clone()
+        local_indices = trajectory_node_indices[0].detach().cpu().numpy()
+        index_lookup = self.get_index_lookup()
+
+        for agent_idx in range(local_indices.shape[0]):
+            for time_idx in range(local_indices.shape[1]):
+                local_node_index = int(local_indices[agent_idx, time_idx])
+                if local_node_index < 0 or local_node_index >= len(local_node_coords):
+                    mapped_indices[0, agent_idx, time_idx] = -1
+                    continue
+
+                local_coords = local_node_coords[local_node_index]
+                mapped_indices[0, agent_idx, time_idx] = self.get_node_index(
+                    local_coords,
+                    index_lookup=index_lookup,
+                )
+
+        return mapped_indices.to(self.device)
+
+    def _empty_trajectory_node_indices(self):
+        return torch.full(
+            (1, MAX_DETECTED_AGENTS, TRAJECTORY_HISTORY_LENGTH),
+            -1,
+            dtype=torch.long,
+            device=self.device,
+        )
+
     def _aggregate_team_visit_features(self, node_coords, team_node_managers):
         team_heading_visited = []
         team_visited_flag = []
@@ -398,7 +427,12 @@ class MergedBeliefCriticManager:
                 local_observation,
                 local_node_coords,
             )
+            critic_trajectory_node_indices = self._map_local_trajectory_node_indices(
+                local_observation,
+                local_node_coords,
+            )
         else:
+            critic_trajectory_node_indices = self._empty_trajectory_node_indices()
             current_in_edge = np.argwhere(merged_current_edge == current_index)[0][0]
             current_edge_tensor = torch.tensor(merged_current_edge).unsqueeze(0)
             k_size = current_edge_tensor.size()[-1]
@@ -430,4 +464,5 @@ class MergedBeliefCriticManager:
             node_frontier_distribution,
             node_heading_visited,
             critic_neighbor_best_headings,
+            critic_trajectory_node_indices,
         ]

@@ -62,7 +62,7 @@ USE_TRAJECTORY = True  # Enable trajectory encoder
 
 # Trajectory tracking parameters (same as parameter.py)
 TRAJECTORY_HISTORY_LENGTH = 10  # Number of recent steps to track
-TRAJECTORY_FEATURE_DIM = 5      # (dx, dy, sin(heading), cos(heading), velocity)
+TRAJECTORY_FEATURE_DIM = 5      # (dx, dy, sin(heading), cos(heading), age_since_seen)
 TRAJECTORY_EMBEDDING_DIM = 64   # Trajectory encoder output dimension
 # N_AGENTS will be determined dynamically in test, so we use max value
 MAX_DETECTED_AGENTS = 10  # Maximum number of detectable agents in FOV (conservative estimate)
