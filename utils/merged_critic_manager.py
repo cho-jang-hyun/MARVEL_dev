@@ -19,9 +19,13 @@ class MergedBeliefCriticManager:
         self.updating_map_size = UPDATING_MAP_SIZE
         self.node_manager = NodeManager(fov, sensor_range, plot=plot)
         self.map_info = None
+        self._all_node_coords_cache = None
+        self._index_lookup_cache = None
 
     def update_graph(self, map_info, robot_locations):
         self.map_info = map_info
+        self._all_node_coords_cache = None
+        self._index_lookup_cache = None
         frontiers = get_frontier_in_map(self.map_info)
         for robot_location in robot_locations:
             self.node_manager.update_graph(
@@ -32,6 +36,11 @@ class MergedBeliefCriticManager:
                 skip_far_existing_updates=True,
                 refresh_all_neighbors=False,
             )
+        self._all_node_coords_cache = self._compute_all_node_coords()
+        self._index_lookup_cache = {
+            (float(coords[0]), float(coords[1])): index
+            for index, coords in enumerate(self._all_node_coords_cache)
+        }
 
     def get_updating_map(self, location):
         updating_map_origin_x = (location[0] - self.updating_map_size / 2)
@@ -76,16 +85,23 @@ class MergedBeliefCriticManager:
         ]
         return MapInfo(updating_map, updating_map_origin_x, updating_map_origin_y, self.cell_size)
 
-    def _get_all_node_coords(self):
+    def _compute_all_node_coords(self):
         all_node_coords = [node.data.coords for node in self.node_manager.nodes_dict.__iter__()]
         return np.array(all_node_coords).reshape(-1, 2)
 
+    def _get_all_node_coords(self):
+        if self._all_node_coords_cache is None:
+            self._all_node_coords_cache = self._compute_all_node_coords()
+        return self._all_node_coords_cache
+
     def get_index_lookup(self):
-        all_node_coords = self._get_all_node_coords()
-        return {
-            (float(coords[0]), float(coords[1])): index
-            for index, coords in enumerate(all_node_coords)
-        }
+        if self._index_lookup_cache is None:
+            all_node_coords = self._get_all_node_coords()
+            self._index_lookup_cache = {
+                (float(coords[0]), float(coords[1])): index
+                for index, coords in enumerate(all_node_coords)
+            }
+        return self._index_lookup_cache
 
     def get_node_index(self, coords, index_lookup=None):
         if index_lookup is None:
@@ -261,6 +277,7 @@ class MergedBeliefCriticManager:
     def _compute_best_heading(self, node_coords, frontier_distribution, neighbor_nodes, path_coords):
         neighbor_best_headings = []
         neighbor_nodes = list(neighbor_nodes[0])
+        half_fov_bins = int((self.fov / 360) * self.num_angles_bin / 2)
         for i, neighbor in enumerate(neighbor_nodes):
             node_index = neighbor.item()
             heading_candidates = torch.zeros(self.num_heading_candidates, self.num_angles_bin)
@@ -303,9 +320,8 @@ class MergedBeliefCriticManager:
                             for j in range(self.num_heading_candidates)
                         ]
                         for j in range(self.num_heading_candidates):
-                            heading_candidates[j][
-                                int(new_indices[j] - self.fov / 2):int(new_indices[j] + self.fov / 2)
-                            ] = 1
+                            window_indices = (int(new_indices[j]) + np.arange(-half_fov_bins, half_fov_bins + 1)) % self.num_angles_bin
+                            heading_candidates[j][window_indices] = 1
                             top_n_indices[j] = new_indices[j]
                     else:
                         neighbor_list = node_data.neighbor_list[1:]
@@ -318,14 +334,14 @@ class MergedBeliefCriticManager:
                                     neighbor_coords[0] - coords[0],
                                 ) % (2 * np.pi))
                                 new_index = int(angle / 360 * self.num_angles_bin) % self.num_angles_bin
-                                heading_candidates[j][
-                                    int(new_index - self.fov / 2):int(new_index + self.fov / 2)
-                                ] = 1
+                                window_indices = (new_index + np.arange(-half_fov_bins, half_fov_bins + 1)) % self.num_angles_bin
+                                heading_candidates[j][window_indices] = 1
                                 previous_index = new_index
                                 top_n_indices[j] = new_index
                             else:
-                                heading_candidates[j][previous_index + 1] = 1
-                                top_n_indices[j] = previous_index + 1
+                                fallback_index = (previous_index + 1) % self.num_angles_bin
+                                heading_candidates[j][fallback_index] = 1
+                                top_n_indices[j] = fallback_index
                 neighbor_best_headings.append(heading_candidates)
             else:
                 neighbor_best_headings.append(heading_candidates)

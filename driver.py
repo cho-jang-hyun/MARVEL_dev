@@ -63,6 +63,13 @@ def load_optimizer_state_if_compatible(optimizer, checkpoint_state, label):
         print(f'Skipped {label} optimizer state due to architecture change: {exc}')
 
 
+def snapshot_module_state(module, target_device):
+    return {
+        key: value.detach().to(target_device).clone()
+        for key, value in module.state_dict().items()
+    }
+
+
 def main():
     # Set specific GPU if GPU_ID is specified
     if USE_GPU_GLOBAL and GPU_ID is not None:
@@ -139,7 +146,7 @@ def main():
     # load model and optimizer trained before
     if LOAD_MODEL:
         print('Loading Model...')
-        checkpoint = torch.load(model_path + '/latest.pth', map_location=device)
+        checkpoint = torch.load(load_path + '/latest.pth', map_location=device)
         load_compatible_state_dict(global_policy_net, checkpoint['policy_model'], 'policy')
         load_compatible_state_dict(global_q_net1, checkpoint['q_net1_model'], 'q_net1')
         load_compatible_state_dict(global_q_net2, checkpoint['q_net2_model'], 'q_net2')
@@ -165,11 +172,7 @@ def main():
 
     # get global networks weights
     weights_set = []
-    if device != local_device:
-        policy_weights = global_policy_net.to(local_device).state_dict()
-        global_policy_net.to(device)
-    else:
-        policy_weights = global_policy_net.to(local_device).state_dict()
+    policy_weights = snapshot_module_state(global_policy_net, local_device)
     weights_set.append(policy_weights)
 
     # distributed training if multiple GPUs available
@@ -197,6 +200,7 @@ def main():
     # initialize metric collector
     metric_name = ['travel_dist', 'success_rate', 'explored_rate']
     training_data = []
+    current_success_rate = -float('inf')
     perf_metrics = {}
     for n in metric_name:
         perf_metrics[n] = []
@@ -533,6 +537,7 @@ def main():
                         alpha_loss.item(), traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio,
                         traj_embedding_norm, traj_attention_entropy, *perf_data]
                 training_data.append(data)
+                current_success_rate = np.nanmean(perf_metrics['success_rate']) if len(perf_metrics['success_rate']) > 0 else -float('inf')
 
             # write record to tensorboard
             if len(training_data) >= SUMMARY_WINDOW:
@@ -547,15 +552,15 @@ def main():
 
             # get the updated global weights
             weights_set = []
-            if device != local_device:
-                policy_weights = global_policy_net.to(local_device).state_dict()
-                global_policy_net.to(device)
-            else:
-                policy_weights = global_policy_net.to(local_device).state_dict()
+            policy_weights = snapshot_module_state(global_policy_net, local_device)
             weights_set.append(policy_weights)
 
             # save the model
             if curr_episode % 32 == 0 or curr_episode % 1000 == 0:
+                should_save_best = current_success_rate > best_success_rate
+                if should_save_best:
+                    best_success_rate = current_success_rate
+
                 print('Saving model', end='\n')
                 checkpoint = {"policy_model": global_policy_net.state_dict(),
                               "q_net1_model": global_q_net1.state_dict(),
@@ -582,9 +587,7 @@ def main():
                     print(f'Saved checkpoint_{curr_episode}.pth')
 
                 # Save best model if performance improved
-                current_success_rate = np.nanmean(perf_metrics['success_rate']) if len(perf_metrics['success_rate']) > 0 else -float('inf')
-                if current_success_rate > best_success_rate:
-                    best_success_rate = current_success_rate
+                if should_save_best:
                     path_best = "./" + model_path + "/best.pth"
                     torch.save(checkpoint, path_best)
                     print(f'Saved best model (success_rate: {best_success_rate:.4f})')

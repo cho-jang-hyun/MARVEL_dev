@@ -501,6 +501,11 @@ class Agent:
         heading_slot = int(np.argmin(circular_distance))
 
         return waypoint_slot * self.num_heading_candidates + heading_slot
+
+    def _fill_heading_window(self, heading_candidates, candidate_index, center_index):
+        half_fov_bins = int((self.fov / 360) * self.num_angles_bin / 2)
+        window_indices = (center_index + np.arange(-half_fov_bins, half_fov_bins + 1)) % self.num_angles_bin
+        heading_candidates[candidate_index, window_indices] = 1
     
     def compute_best_heading(self, node_coords, frontier_distribution, neighbor_nodes):
         neighbor_best_headings = []
@@ -523,7 +528,7 @@ class Agent:
                         indices = (top_n_indices + i) % self.num_angles_bin
                         heading_candidates += F.one_hot(torch.tensor(indices), num_classes=self.num_angles_bin).float()
                 else:
-                    top_n_indices = np.zeros(3)
+                    top_n_indices = np.zeros(self.num_heading_candidates)
                     # Face the robot towards the A* path within 1 bin variance
                     if len(self.path_coords) > 1:
                         next_coords = self.path_coords[1]
@@ -532,30 +537,29 @@ class Agent:
                         new_index = int(angle / 360 * self.num_angles_bin) % self.num_angles_bin
                         new_indices = [(new_index + i - self.num_heading_candidates // 2) % self.num_angles_bin for i in range(self.num_heading_candidates)]
                         for l in range(self.num_heading_candidates):
-                            heading_candidates[l][int(new_indices[l] - self.fov/2):int(new_indices[l] + self.fov/2)] = 1
+                            self._fill_heading_window(heading_candidates, l, int(new_indices[l]))
                             top_n_indices[l] = new_indices[l]
                     else:
+                        neighbor_list = node_data.neighbor_list[1:]     # First node is self
+                        previous_index = 0
                         for l in range(self.num_heading_candidates):
-                            # Make the robot face the direction of neighbor nodes
-                            neighbor_list = node_data.neighbor_list[1:]     # First node is self
-                            for l in range(self.num_heading_candidates):
-                                previous_index = 0
-                                if l < len(neighbor_list):
-                                    neighbor_coords = neighbor_list[l]                                     # First node is self
-                                    angle = np.degrees(np.arctan2(neighbor_coords[1] - coords[1], 
-                                                            neighbor_coords[0] - coords[0]) % (2 * np.pi))
-                                    new_index = int(angle / 360 * self.num_angles_bin) % self.num_angles_bin
-                                    heading_candidates[l][int(new_index-self.fov/2):int(new_index+self.fov/2)] = 1
-                                    previous_index = new_index
-                                    top_n_indices[l] = new_index
-                                else:
-                                    heading_candidates[l][previous_index+1] = 1
-                                    top_n_indices[l] = previous_index+1
+                            if l < len(neighbor_list):
+                                neighbor_coords = neighbor_list[l]                                     # First node is self
+                                angle = np.degrees(np.arctan2(neighbor_coords[1] - coords[1],
+                                                        neighbor_coords[0] - coords[0]) % (2 * np.pi))
+                                new_index = int(angle / 360 * self.num_angles_bin) % self.num_angles_bin
+                                self._fill_heading_window(heading_candidates, l, new_index)
+                                previous_index = new_index
+                                top_n_indices[l] = new_index
+                            else:
+                                fallback_index = (previous_index + 1) % self.num_angles_bin
+                                heading_candidates[l][fallback_index] = 1
+                                top_n_indices[l] = fallback_index
                 neighbor_best_headings.append(heading_candidates)
                 neighbor_best_indices.append(top_n_indices)
             else:
                 neighbor_best_headings.append(heading_candidates)
-                neighbor_best_indices.append(np.zeros(3))
+                neighbor_best_indices.append(np.zeros(self.num_heading_candidates))
         neighbor_best_headings = torch.stack(neighbor_best_headings).unsqueeze(0).to(self.device)
         return neighbor_best_headings, neighbor_best_indices
     
@@ -698,29 +702,18 @@ class Agent:
             x = trajectory_array[:, 0]
             y = trajectory_array[:, 1]
             heading = trajectory_array[:, 2]
+            valid_steps = (x != 0) | (y != 0)
 
             # Find corresponding node indices for each timestep
-            for t in range(seq_len):
-                if x[t] == 0 and y[t] == 0:
-                    # Skip padded entries
-                    trajectory_node_indices[i, t] = -1
-                    continue
-
-                position = np.array([x[t], y[t]])
-
-                # Find nearest node
-                if self.node_coords is not None and len(self.node_coords) > 0:
-                    # Calculate distances to all nodes
-                    distances = np.linalg.norm(self.node_coords - position, axis=1)
-                    nearest_idx = np.argmin(distances)
-
-                    # Check if nearest node is within threshold
-                    if distances[nearest_idx] < NODE_RESOLUTION:
-                        trajectory_node_indices[i, t] = nearest_idx
-                    else:
-                        trajectory_node_indices[i, t] = -1
-                else:
-                    trajectory_node_indices[i, t] = -1
+            if self.node_coords is not None and len(self.node_coords) > 0 and valid_steps.any():
+                valid_positions = np.stack((x[valid_steps], y[valid_steps]), axis=1)
+                deltas = self.node_coords[None, :, :] - valid_positions[:, None, :]
+                distances = np.linalg.norm(deltas, axis=2)
+                nearest_idx = np.argmin(distances, axis=1)
+                nearest_distances = distances[np.arange(distances.shape[0]), nearest_idx]
+                valid_nearest = nearest_distances < NODE_RESOLUTION
+                valid_step_indices = np.flatnonzero(valid_steps)
+                trajectory_node_indices[i, valid_step_indices[valid_nearest]] = nearest_idx[valid_nearest]
 
             # Convert to relative coordinates (relative to current agent)
             dx = x - self.location[0]
@@ -745,7 +738,6 @@ class Agent:
             # Zero out padded/missing timesteps (where original x=0 and y=0).
             # The trajectory encoder masks these rows, so age only applies to
             # exact sightings retained in the sparse history.
-            valid_steps = (x != 0) | (y != 0)
             agent_traj[~valid_steps] = 0.0
             
             trajectories[i] = agent_traj

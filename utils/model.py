@@ -406,37 +406,29 @@ class PolicyNet(nn.Module):
         """
         batch_size, num_nodes, embedding_dim = enhanced_node_feature.shape
         _, max_agents, seq_len = trajectory_node_indices.shape
+        if num_nodes == 0:
+            return torch.zeros(
+                batch_size, max_agents, seq_len, embedding_dim,
+                dtype=enhanced_node_feature.dtype,
+                device=enhanced_node_feature.device,
+            )
 
-        # Initialize output tensor
-        trajectory_node_features = torch.zeros(
-            batch_size, max_agents, seq_len, embedding_dim,
-            dtype=enhanced_node_feature.dtype,
-            device=enhanced_node_feature.device
+        valid_node_mask = (
+            (trajectory_node_indices >= 0)
+            & (trajectory_node_indices < num_nodes)
+            & (~trajectory_mask.unsqueeze(-1))
+        )
+        safe_node_indices = trajectory_node_indices.clamp(min=0, max=num_nodes - 1)
+        expanded_node_feature = enhanced_node_feature.unsqueeze(1).expand(-1, max_agents, -1, -1)
+        trajectory_node_features = torch.gather(
+            expanded_node_feature,
+            2,
+            safe_node_indices.unsqueeze(-1).expand(-1, -1, -1, embedding_dim),
         )
 
-        # Process each batch
-        for b in range(batch_size):
-            for a in range(max_agents):
-                # Skip if this agent is padded
-                if trajectory_mask[b, a]:
-                    continue
-
-                for t in range(seq_len):
-                    node_idx = trajectory_node_indices[b, a, t].item()
-
-                    # Skip if invalid node index
-                    if node_idx < 0 or node_idx >= num_nodes:
-                        continue
-
-                    # Extract node embedding
-                    trajectory_node_features[b, a, t] = enhanced_node_feature[b, node_idx]
-
         # Apply FFN projection
-        # Reshape to [batch * max_agents * seq_len, embedding_dim]
-        valid_node_mask = (trajectory_node_indices >= 0) & (~trajectory_mask.unsqueeze(-1))
         traj_flat = trajectory_node_features.reshape(-1, embedding_dim)
         traj_projected = self.trajectory_node_ffn(traj_flat)
-        # Reshape back to [batch, max_agents, seq_len, embedding_dim]
         trajectory_node_features = traj_projected.reshape(batch_size, max_agents, seq_len, embedding_dim)
         trajectory_node_features = trajectory_node_features * valid_node_mask.unsqueeze(-1).float()
 
@@ -654,37 +646,29 @@ class QNet(nn.Module):
         """
         batch_size, num_nodes, embedding_dim = enhanced_node_feature.shape
         _, max_agents, seq_len = trajectory_node_indices.shape
+        if num_nodes == 0:
+            return torch.zeros(
+                batch_size, max_agents, seq_len, embedding_dim,
+                dtype=enhanced_node_feature.dtype,
+                device=enhanced_node_feature.device,
+            )
 
-        # Initialize output tensor
-        trajectory_node_features = torch.zeros(
-            batch_size, max_agents, seq_len, embedding_dim,
-            dtype=enhanced_node_feature.dtype,
-            device=enhanced_node_feature.device
+        valid_node_mask = (
+            (trajectory_node_indices >= 0)
+            & (trajectory_node_indices < num_nodes)
+            & (~trajectory_mask.unsqueeze(-1))
+        )
+        safe_node_indices = trajectory_node_indices.clamp(min=0, max=num_nodes - 1)
+        expanded_node_feature = enhanced_node_feature.unsqueeze(1).expand(-1, max_agents, -1, -1)
+        trajectory_node_features = torch.gather(
+            expanded_node_feature,
+            2,
+            safe_node_indices.unsqueeze(-1).expand(-1, -1, -1, embedding_dim),
         )
 
-        # Process each batch
-        for b in range(batch_size):
-            for a in range(max_agents):
-                # Skip if this agent is padded
-                if trajectory_mask[b, a]:
-                    continue
-
-                for t in range(seq_len):
-                    node_idx = trajectory_node_indices[b, a, t].item()
-
-                    # Skip if invalid node index
-                    if node_idx < 0 or node_idx >= num_nodes:
-                        continue
-
-                    # Extract node embedding
-                    trajectory_node_features[b, a, t] = enhanced_node_feature[b, node_idx]
-
         # Apply FFN projection
-        # Reshape to [batch * max_agents * seq_len, embedding_dim]
-        valid_node_mask = (trajectory_node_indices >= 0) & (~trajectory_mask.unsqueeze(-1))
         traj_flat = trajectory_node_features.reshape(-1, embedding_dim)
         traj_projected = self.trajectory_node_ffn(traj_flat)
-        # Reshape back to [batch, max_agents, seq_len, embedding_dim]
         trajectory_node_features = traj_projected.reshape(batch_size, max_agents, seq_len, embedding_dim)
         trajectory_node_features = trajectory_node_features * valid_node_mask.unsqueeze(-1).float()
 
