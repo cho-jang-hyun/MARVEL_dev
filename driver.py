@@ -63,6 +63,13 @@ def load_optimizer_state_if_compatible(optimizer, checkpoint_state, label):
         print(f'Skipped {label} optimizer state due to architecture change: {exc}')
 
 
+def safe_nanmean(values):
+    values = np.asarray(values, dtype=float)
+    if values.size == 0 or np.isnan(values).all():
+        return np.nan
+    return float(np.nanmean(values))
+
+
 def snapshot_module_state(module, target_device):
     return {
         key: value.detach().to(target_device).clone()
@@ -198,7 +205,7 @@ def main():
         job_list.append(meta_agent.job.remote(weights_set, curr_episode, curriculum_success_rate))
 
     # initialize metric collector
-    metric_name = ['travel_dist', 'success_rate', 'explored_rate']
+    metric_name = ['merged_travel_dist', 'travel_dist', 'success_rate', 'explored_rate']
     training_data = []
     current_success_rate = -float('inf')
     perf_metrics = {}
@@ -522,7 +529,7 @@ def main():
                 # data record to be written in tensorboard
                 perf_data = []
                 for n in metric_name:
-                    perf_data.append(np.nanmean(perf_metrics[n]))
+                    perf_data.append(safe_nanmean(perf_metrics[n]))
 
                 policy_model = dp_policy.module if hasattr(dp_policy, 'module') else dp_policy
                 trajectory_debug = getattr(getattr(policy_model, 'trajectory_encoder', None), 'latest_debug', {})
@@ -601,9 +608,12 @@ def main():
             wandb.finish(quiet=True)
 
 def write_to_tensor_board(writer, tensorboard_data, curr_episode):
-    tensorboard_data = np.array(tensorboard_data)
-    tensorboard_data = list(np.nanmean(tensorboard_data, axis=0))
-    reward, value, policy_loss, q_value_loss, entropy, policy_grad_norm, q_value_grad_norm, log_alpha, alpha_loss, traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio, traj_embedding_norm, traj_attention_entropy, travel_dist, success_rate, explored_rate = tensorboard_data
+    tensorboard_data = np.atleast_2d(np.asarray(tensorboard_data, dtype=float))
+    tensorboard_data = [
+        safe_nanmean(tensorboard_data[:, column_idx])
+        for column_idx in range(tensorboard_data.shape[1])
+    ]
+    reward, value, policy_loss, q_value_loss, entropy, policy_grad_norm, q_value_grad_norm, log_alpha, alpha_loss, traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio, traj_embedding_norm, traj_attention_entropy, merged_travel_dist, travel_dist, success_rate, explored_rate = tensorboard_data
 
     writer.add_scalar(tag='Losses/Value', scalar_value=value, global_step=curr_episode)
     writer.add_scalar(tag='Losses/Policy Loss', scalar_value=policy_loss, global_step=curr_episode)
@@ -619,6 +629,8 @@ def write_to_tensor_board(writer, tensorboard_data, curr_episode):
     writer.add_scalar(tag='Trajectory/Embedding Norm', scalar_value=traj_embedding_norm, global_step=curr_episode)
     writer.add_scalar(tag='Trajectory/Agent Attention Entropy', scalar_value=traj_attention_entropy, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Reward', scalar_value=reward, global_step=curr_episode)
+    writer.add_scalar(tag='Perf/Merged Objective Travel Distance', scalar_value=merged_travel_dist, global_step=curr_episode)
+    writer.add_scalar(tag='Perf/Full Episode Travel Distance', scalar_value=travel_dist, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Travel Distance', scalar_value=travel_dist, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Explored Rate', scalar_value=explored_rate, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Success Rate', scalar_value=success_rate, global_step=curr_episode)

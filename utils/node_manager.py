@@ -150,6 +150,12 @@ class NodeManager:
 
         return all_node_coords, utility, guidepost, occupancy, adjacent_matrix, current_index, neighbor_indices, highest_utility_angle, frontiers_distribution, heading_visited, visited_by_others, path_coords
 
+    def get_total_utility(self):
+        total_utility = 0.0
+        for node in self.nodes_dict.__iter__():
+            total_utility += float(node.data.utility)
+        return total_utility
+
     def Dijkstra(self, start):
         cache_key = (start[0], start[1])
         if cache_key in self._dijkstra_cache:

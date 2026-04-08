@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '4_8_Budget_features_experiment'
+FOLDER_NAME = '4_8_Budget_features_experiment_merged_with_incoming_and_learn_after_actions'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -37,7 +37,7 @@ USE_CONTINUOUS_SIM = True
 NUM_SIM_STEPS = 6
 VELOCITY = 1
 YAW_RATE = 35 # in degrees
-SUCCESS_THRESHOLD = 0.99  # Episode ends when explored_rate >= this value
+SUCCESS_THRESHOLD = 0.99  # Coverage-based completion threshold for mission and local return logic
 
 # Heading parameters
 FOV = 120   # in degrees
@@ -77,11 +77,11 @@ MIN_BUDGET = BUDGET_END
 MAX_BUDGET = BUDGET_START
 REPLAY_SIZE = 15000
 MINIMUM_BUFFER_SIZE = 10000
-BATCH_SIZE = 128
+BATCH_SIZE = 256
 LR = 1e-5
 GAMMA = 0.995
 TAU = 0.001  # Soft update coefficient for target network (0.001 ~ 0.01)
-NUM_META_AGENT = 18
+NUM_META_AGENT = 20
 
 # reward shaping
 MERGED_NODE_UTILITY_REWARD_WEIGHT = 0.85
@@ -90,6 +90,7 @@ VISITED_BY_OTHERS_MIN = 0.05
 LOW_UTILITY_MOVE_THRESHOLD = 0.05
 REPEATED_LOW_UTILITY_PENALTY = 0.03
 TIME_PRESSURE_WEIGHT = 0.05  # per-step cost that scales linearly as budget depletes (0 at full budget, this value at zero budget)
+MERGED_SUCCESS_BONUS = 4.0  # one-time bonus when merged explored coverage reaches SUCCESS_THRESHOLD
 
 # Gradient clipping parameters
 GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5.0)
@@ -100,7 +101,7 @@ NODE_INPUT_DIM = 8  # Added hops_to_base/MAX_BUDGET per node
 EMBEDDING_DIM = 128
 BUDGET_FEATURE_DIM = 4  # log_initial, log_remaining, remaining/initial, hops/remaining
 RETURN_SAFETY_MARGIN = 0  # extra action steps reserved before an agent must stop exploring and head home
-SIMULATE_RETURN_TO_BASE = False  # When False, skip return-to-base simulation during training (saves ~30% wall time)
+SIMULATE_RETURN_TO_BASE = True  # Returning agents are simulated while teammates still explore; once all agents are returning, the episode stops.
 
 # Trajectory tracking parameters
 TRAJECTORY_HISTORY_LENGTH = 10  # Number of recent steps to track

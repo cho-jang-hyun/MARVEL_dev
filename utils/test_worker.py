@@ -43,6 +43,7 @@ class TestWorker:
         self.scaling = 0.04
 
         self.env = Env(global_step, self.fov, self.n_agents, self.sensor_range, plot=self.save_image)
+        self.merged_node_manager = NodeManager(self.fov, self.sensor_range, utility_range, plot=self.save_image)
 
         # Create independent node managers for each agent to ensure decentralized testing
         self.robot_list = []
@@ -72,6 +73,9 @@ class TestWorker:
         self.initial_budgets = np.full(self.n_agents, BUDGET, dtype=int)
         self.remaining_budgets = self.initial_budgets.copy()
         self.returning_agents = np.zeros(self.n_agents, dtype=bool)
+        self.merged_objective_completed = False
+        self.merged_completion_travel_dist = np.nan
+        self.merged_total_utility = np.inf
 
         # Initialize individual observation maps for each agent (for visualization)
         # Each agent tracks what ONLY they have observed
@@ -85,6 +89,40 @@ class TestWorker:
                 robot_cell, self.sensor_range / CELL_SIZE, self.individual_maps[i],
                 self.env.ground_truth, self.env.angles[i], self.fov
             )
+
+    def _update_merged_graph(self):
+        frontiers = get_frontier_in_map(self.env.belief_info)
+        for robot_location in self.env.robot_locations:
+            self.merged_node_manager.update_graph(
+                robot_location,
+                frontiers,
+                self.env.belief_info,
+                self.env.belief_info,
+                skip_far_existing_updates=True,
+                refresh_all_neighbors=False,
+            )
+
+    def _get_max_travel_dist(self):
+        return max((robot.travel_dist for robot in self.robot_list), default=0.0)
+
+    def _update_objective_state(self):
+        self.merged_total_utility = float(self.merged_node_manager.get_total_utility())
+        merged_completed_this_step = (
+            not self.merged_objective_completed
+            and self.env.explored_rate >= SUCCESS_THRESHOLD
+        )
+        if merged_completed_this_step:
+            self.merged_objective_completed = True
+            self.merged_completion_travel_dist = self._get_max_travel_dist()
+        return merged_completed_this_step
+
+    def _local_objective_completed(self, robot):
+        total_free = np.sum(self.env.ground_truth == FREE)
+        if total_free <= 0:
+            return False
+        agent_map = self.env.get_agent_map_info(robot.id).map
+        agent_explored_rate = np.sum(agent_map == FREE) / total_free
+        return bool(agent_explored_rate >= SUCCESS_THRESHOLD)
 
     def _set_agent_budget_context(self, robot):
         robot.set_budget_context(
@@ -137,6 +175,8 @@ class TestWorker:
         for robot in self.robot_list:
             robot.update_planning_state()
             self._set_agent_budget_context(robot)
+        self._update_merged_graph()
+        self._update_objective_state()
         
         reach_checkpoint = False
 
@@ -150,7 +190,6 @@ class TestWorker:
 
         setpoints = [[] for _ in range(self.n_agents)]
         headings = [[] for _ in range(self.n_agents)]
-        mission_success = False
         mission_failure = False
 
         for i in range(MAX_EPISODE_STEP + BUDGET):
@@ -166,11 +205,14 @@ class TestWorker:
                     continue
 
                 if (not self.returning_agents[robot.id]) and (
-                    mission_success or self._should_force_return(robot.get_hops_to_base(), self.remaining_budgets[robot.id])
+                    self._local_objective_completed(robot)
+                    or self._should_force_return(robot.get_hops_to_base(), self.remaining_budgets[robot.id])
                 ):
                     self.returning_agents[robot.id] = True
 
                 if self.returning_agents[robot.id]:
+                    if np.all(self.returning_agents):
+                        continue
                     return_path = self._get_return_path(robot)
                     if len(return_path) == 0:
                         if not robot_at_base:
@@ -217,6 +259,10 @@ class TestWorker:
                 next_heading_index_list[robot.id] = next_heading_index
 
             if mission_failure:
+                break
+
+            if np.all(self.returning_agents):
+                done = True
                 break
 
             selected_locations = np.array(selected_locations).reshape(-1, 2)
@@ -306,6 +352,8 @@ class TestWorker:
             for robot in self.robot_list:
                 robot.update_planning_state()
                 self._set_agent_budget_context(robot)
+            self._update_merged_graph()
+            merged_completed_this_step = self._update_objective_state()
 
             max_travel_dist += np.max(dist_list)
             length_history.append(max_travel_dist)
@@ -315,20 +363,25 @@ class TestWorker:
                 trajectory_length = max([robot.travel_dist for robot in self.robot_list])
                 reach_checkpoint = True
 
-            mission_success = mission_success or (self.env.explored_rate >= SUCCESS_THRESHOLD)
+            if merged_completed_this_step:
+                self.merged_completion_travel_dist = self._get_max_travel_dist()
             if np.any(self.remaining_budgets < 0):
                 mission_failure = True
 
-            if self._all_agents_at_base() and (mission_success or np.all(self.returning_agents)) :
+            if np.all(self.returning_agents):
                 done = True
 
             if mission_failure or done:
                 break
 
         # Save metrics
-        self.perf_metrics['travel_dist'] = max([robot.travel_dist for robot in self.robot_list])
+        self.perf_metrics['travel_dist'] = self._get_max_travel_dist()
+        self.perf_metrics['merged_travel_dist'] = (
+            self.merged_completion_travel_dist
+            if self.merged_objective_completed else np.nan
+        )
         self.perf_metrics['explored_rate'] = self.env.explored_rate
-        self.perf_metrics['success_rate'] = bool(mission_success and not mission_failure)
+        self.perf_metrics['success_rate'] = bool(self.merged_objective_completed)
         if trajectory_length > 0:
             self.perf_metrics['dist_to_0_90'] = trajectory_length
         else:

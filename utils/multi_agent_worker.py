@@ -96,6 +96,9 @@ class MultiAgentWorker:
         self.returning_agents = np.zeros(self.n_agents, dtype=bool)
         self.replay_closed = np.zeros(self.n_agents, dtype=bool)
         self.low_utility_streaks = np.zeros(self.n_agents, dtype=int)
+        self.merged_objective_completed = False
+        self.merged_completion_travel_dist = np.nan
+        self.merged_total_utility = np.inf
 
     def _get_collision_free_candidate(self, robot, occupied_locations):
         occupied_keys = {
@@ -124,6 +127,28 @@ class MultiAgentWorker:
 
     def _update_merged_graph(self):
         self.merged_map_manager.update_graph(self.env.belief_info, self.env.robot_locations)
+
+    def _get_max_travel_dist(self):
+        return max((robot.travel_dist for robot in self.robot_list), default=0.0)
+
+    def _update_objective_state(self):
+        self.merged_total_utility = float(self.merged_map_manager.get_total_utility())
+        merged_completed_this_step = (
+            not self.merged_objective_completed
+            and self.env.explored_rate >= SUCCESS_THRESHOLD
+        )
+        if merged_completed_this_step:
+            self.merged_objective_completed = True
+            self.merged_completion_travel_dist = self._get_max_travel_dist()
+        return merged_completed_this_step
+
+    def _local_objective_completed(self, robot):
+        total_free = np.sum(self.env.ground_truth == FREE)
+        if total_free <= 0:
+            return False
+        agent_map = self.env.get_agent_map_info(robot.id).map
+        agent_explored_rate = np.sum(agent_map == FREE) / total_free
+        return bool(agent_explored_rate >= SUCCESS_THRESHOLD)
 
     def _append_trajectory_step(self, robot, next_location):
         prev_trajectory = self.trajectory_buffer[robot.id][-1] if len(self.trajectory_buffer[robot.id]) > 0 else None
@@ -157,18 +182,12 @@ class MultiAgentWorker:
     def _all_agents_at_base(self):
         return all(np.allclose(robot.location, self.base_locations[robot.id]) for robot in self.robot_list)
 
-    def _coverage_success_reached(self):
-        return bool(self.env.explored_rate >= SUCCESS_THRESHOLD)
-
     @staticmethod
     def _should_force_return(hops_to_base, remaining_budget):
         return hops_to_base + RETURN_SAFETY_MARGIN >= remaining_budget
 
     def _episode_success(self, mission_failure):
-        return bool(
-            self._coverage_success_reached()
-            and not mission_failure
-        )
+        return bool(self.merged_objective_completed)
 
     def _get_joint_next_index_lists(self):
         local_next_indices = [robot.current_index for robot in self.robot_list]
@@ -244,6 +263,7 @@ class MultiAgentWorker:
         for robot in self.robot_list:
             robot.update_planning_state()
         self._update_merged_graph()
+        self._update_objective_state()
         for robot in self.robot_list:
             self._set_agent_budget_context(robot)
 
@@ -256,6 +276,7 @@ class MultiAgentWorker:
             next_heading_index_list = [self._get_heading_index_towards(robot, robot.location) for robot in self.robot_list]
             observations = {}
             active_explorer_ids = []
+            merged_was_completed = self.merged_objective_completed
 
             for robot in self.robot_list:
                 self._set_agent_budget_context(robot)
@@ -263,7 +284,7 @@ class MultiAgentWorker:
                 hops_to_base = robot.get_hops_to_base()
 
                 if self.returning_agents[robot.id]:
-                    if not SIMULATE_RETURN_TO_BASE or robot_at_base:
+                    if robot_at_base:
                         continue
                     return_path = self._get_return_path(robot)
                     if len(return_path) == 0:
@@ -276,11 +297,12 @@ class MultiAgentWorker:
                     next_heading_index_list[robot.id] = self._get_heading_index_towards(robot, selected_locations[robot.id])
                     continue
 
-                if self._should_force_return(hops_to_base, self.remaining_budgets[robot.id]):
+                if (
+                    self._local_objective_completed(robot)
+                    or self._should_force_return(hops_to_base, self.remaining_budgets[robot.id])
+                ):
                     self.returning_agents[robot.id] = True
                     self._close_agent_replay(robot, team_node_managers)
-                    if not SIMULATE_RETURN_TO_BASE:
-                        continue
                     return_path = self._get_return_path(robot)
                     if len(return_path) == 0:
                         if not robot_at_base:
@@ -300,8 +322,6 @@ class MultiAgentWorker:
                 if not self._has_feasible_exploration_action(robot, observation):
                     self.returning_agents[robot.id] = True
                     self._close_agent_replay(robot, team_node_managers)
-                    if not SIMULATE_RETURN_TO_BASE:
-                        continue
                     return_path = self._get_return_path(robot)
                     if len(return_path) == 0:
                         if not robot_at_base:
@@ -498,16 +518,17 @@ class MultiAgentWorker:
                 robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
                 robot.update_planning_state()
             self._update_merged_graph()
+            merged_completed_this_step = self._update_objective_state()
             for robot in self.robot_list:
                 self._set_agent_budget_context(robot)
 
-            coverage_success_reached = self._coverage_success_reached()
             if np.any(self.remaining_budgets < 0):
                 mission_failure = True
 
-            team_reward = self.env.calculate_team_reward() - 0.5
-            if coverage_success_reached:
-                team_reward += 4
+            raw_team_reward = self.env.calculate_team_reward() - 0.5
+            team_reward = 0.0 if merged_was_completed else raw_team_reward
+            if merged_completed_this_step:
+                team_reward += MERGED_SUCCESS_BONUS
 
             curr_node_indices = np.array([robot.current_index for robot in self.robot_list])
             curr_critic_indices = None
@@ -516,10 +537,8 @@ class MultiAgentWorker:
 
             for robot_id, reward in zip(active_explorer_ids, reward_list):
                 robot = self.robot_list[robot_id]
-                # Once the team-level coverage objective is met, finish exploration and
-                # let the existing return-to-base controller close out the mission.
                 robot_should_return = (
-                    coverage_success_reached
+                    self._local_objective_completed(robot)
                     or self._should_force_return(robot.get_hops_to_base(), self.remaining_budgets[robot_id])
                 )
                 transition_done = mission_failure or robot_should_return
@@ -537,25 +556,19 @@ class MultiAgentWorker:
             if mission_failure:
                 break
 
-            # Immediately terminate episode on coverage success — no more
-            # transitions are generated, preventing low-quality wandering
-            # data from entering the replay buffer.
-            if coverage_success_reached:
-                for robot in self.robot_list:
-                    if not self.replay_closed[robot.id]:
-                        self._close_agent_replay(robot, team_node_managers)
-                break
-
             if np.all(self.returning_agents):
-                if not SIMULATE_RETURN_TO_BASE or self._all_agents_at_base():
-                    break
+                break
 
         self._finalize_open_agent_replays(team_node_managers)
         for robot in self.robot_list:
             for buffer_idx in range(len(self.episode_buffer)):
                 self.episode_buffer[buffer_idx] += robot.episode_buffer[buffer_idx]
 
-        self.perf_metrics['travel_dist'] = max([robot.travel_dist for robot in self.robot_list])
+        self.perf_metrics['travel_dist'] = self._get_max_travel_dist()
+        self.perf_metrics['merged_travel_dist'] = (
+            self.merged_completion_travel_dist
+            if self.merged_objective_completed else np.nan
+        )
         self.perf_metrics['explored_rate'] = self.env.explored_rate
         self.perf_metrics['success_rate'] = self._episode_success(mission_failure)
 

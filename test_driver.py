@@ -46,6 +46,13 @@ def load_compatible_state_dict(module, checkpoint_state, label):
     module.load_state_dict(compatible_state, strict=False)
     print(f'Loaded {label}: {len(compatible_state)} tensors, skipped {missing_or_mismatched}')
 
+
+def safe_nanmean(values):
+    values = np.asarray(values, dtype=float)
+    if values.size == 0 or np.isnan(values).all():
+        return np.nan
+    return float(np.nanmean(values))
+
 def run_test():
     device = torch.device('cuda') if EVAL_USE_GPU else torch.device('cpu')
     global_network = PolicyNet(
@@ -77,6 +84,7 @@ def run_test():
                 curr_test = 0
 
                 dist_history = []
+                merged_dist_history = []
                 explore_rate = []
                 success_rate = []
                 dist_to_0_90 = []
@@ -97,6 +105,7 @@ def run_test():
                         for job in done_jobs:
                             metrics, info = job
                             dist_history.append(metrics['travel_dist'])
+                            merged_dist_history.append(metrics.get('merged_travel_dist', np.nan))
                             explore_rate.append(metrics['explored_rate'])
                             success_rate.append(metrics['success_rate'])
                             if metrics['dist_to_0_90']:
@@ -115,6 +124,7 @@ def run_test():
                     print('|#FOV (degrees):', fov)
                     print('|#Sensor range (m):', sensor_range)
                     print('|#Average max length:', np.array(dist_history).mean())
+                    print('|#Average merged-objective length:', safe_nanmean(merged_dist_history))
                     print('|#Max max length:', np.array(dist_history).max())
                     print('|#Min max length:', np.array(dist_history).min())
                     print('|#Std max length:', np.array(dist_history).std())
@@ -132,6 +142,7 @@ def run_test():
                     f"|#FOV (degrees): {fov}",
                     f"|#Sensor range (m): {sensor_range}",
                     f"|#Average max length: {np.array(dist_history).mean()}",
+                    f"|#Average merged-objective length: {safe_nanmean(merged_dist_history)}",
                     f"|#Max max length: {np.array(dist_history).max()}",
                     f"|#Min max length: {np.array(dist_history).min()}",
                     f"|#Std max length: {np.array(dist_history).std()}",
