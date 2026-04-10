@@ -496,21 +496,19 @@ class MultiAgentWorker:
                 else:
                     self.low_utility_streaks[robot_id] = 0
 
-                repeated_low_utility_penalty = REPEATED_LOW_UTILITY_PENALTY * max(self.low_utility_streaks[robot_id] - 1, 0)
+                # repeated_low_utility_penalty = REPEATED_LOW_UTILITY_PENALTY * max(self.low_utility_streaks[robot_id] - 1, 0)
 
                 # Scale the teammate-trail penalty by the decayed recency signal.
                 trajectory_history_penalty = 0.15 * float(np.clip(node.visited_by_others, 0.0, 1.0))
 
-                budget_fraction = self.remaining_budgets[robot_id] / max(self.initial_budgets[robot_id], 1)
-                time_pressure = -TIME_PRESSURE_WEIGHT * (1.0 - budget_fraction)
+                # budget_fraction = self.remaining_budgets[robot_id] / max(self.initial_budgets[robot_id], 1)
+                # time_pressure = -TIME_PRESSURE_WEIGHT * (1.0 - budget_fraction)
 
                 reward_list.append(
-                    0.5 * utility_reward
+                    0.9 * utility_reward
                     + merged_node_utility_reward
                     + trajectory_reward
-                    - trajectory_history_penalty
-                    - repeated_low_utility_penalty
-                    + time_pressure)
+                    - trajectory_history_penalty)
                 robot.save_action(torch.tensor([executed_action_index], device=self.device))
             for robot in self.robot_list:
                 robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())

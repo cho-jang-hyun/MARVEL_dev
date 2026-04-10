@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '4_8_Budget_features_experiment_merged_with_incoming_and_learn_after_actions'
+FOLDER_NAME = '4_9_Budget_features_experiment_merged_with_incoming_and_learn_after_actions3'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -78,14 +78,14 @@ MAX_BUDGET = BUDGET_START
 REPLAY_SIZE = 15000
 MINIMUM_BUFFER_SIZE = 10000
 BATCH_SIZE = 256
-LR = 1e-5
+LR = 3e-5
 GAMMA = 0.995
-TAU = 0.001  # Soft update coefficient for target network (0.001 ~ 0.01)
+TAU = 0.003  # Soft update coefficient for target network (0.001 ~ 0.01)
 NUM_META_AGENT = 20
 
 # reward shaping
-MERGED_NODE_UTILITY_REWARD_WEIGHT = 0.85
-VISITED_BY_OTHERS_DECAY = 0.02
+MERGED_NODE_UTILITY_REWARD_WEIGHT = 0.9
+VISITED_BY_OTHERS_DECAY = 0.025
 VISITED_BY_OTHERS_MIN = 0.05
 LOW_UTILITY_MOVE_THRESHOLD = 0.05
 REPEATED_LOW_UTILITY_PENALTY = 0.03
