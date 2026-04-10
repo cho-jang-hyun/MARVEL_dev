@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '4_9_Budget_features_experiment_merged_with_incoming_and_learn_after_actions3'
+FOLDER_NAME = '4_10_Dual_critic_estimation'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -29,7 +29,7 @@ gifs_path = f'gifs/{FOLDER_NAME}' # save gif
 SUMMARY_WINDOW = 32
 LOAD_MODEL = False  # do you want to load the model trained before
 SAVE_IMG_GAP = 1000
-NUM_EPISODE_BUFFER = 52
+NUM_EPISODE_BUFFER = 54
 
 # Sim parameters
 N_AGENTS = 4
@@ -78,19 +78,21 @@ MAX_BUDGET = BUDGET_START
 REPLAY_SIZE = 15000
 MINIMUM_BUFFER_SIZE = 10000
 BATCH_SIZE = 256
-LR = 3e-5
-GAMMA = 0.995
+LR = 2e-5
+GAMMA = 0.99
 TAU = 0.003  # Soft update coefficient for target network (0.001 ~ 0.01)
 NUM_META_AGENT = 20
+POST_PHASE_REPLAY_MIN_SAMPLES = 512
+POST_PHASE_BATCH_RATIO = 0.25
 
 # reward shaping
-MERGED_NODE_UTILITY_REWARD_WEIGHT = 0.9
+MERGED_NODE_UTILITY_REWARD_WEIGHT = 0.8
 VISITED_BY_OTHERS_DECAY = 0.025
 VISITED_BY_OTHERS_MIN = 0.05
 LOW_UTILITY_MOVE_THRESHOLD = 0.05
 REPEATED_LOW_UTILITY_PENALTY = 0.03
 TIME_PRESSURE_WEIGHT = 0.05  # per-step cost that scales linearly as budget depletes (0 at full budget, this value at zero budget)
-MERGED_SUCCESS_BONUS = 4.0  # one-time bonus when merged explored coverage reaches SUCCESS_THRESHOLD
+MERGED_SUCCESS_BONUS = 6.5  # one-time bonus when merged explored coverage reaches SUCCESS_THRESHOLD
 
 # Gradient clipping parameters
 GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5.0)

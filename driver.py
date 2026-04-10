@@ -77,6 +77,286 @@ def snapshot_module_state(module, target_device):
     }
 
 
+def collect_rollouts(experience_buffer, sample_indices):
+    rollouts = []
+    for i in range(len(experience_buffer)):
+        if len(experience_buffer[i]) == 0:
+            rollouts.append([])
+        else:
+            rollouts.append([experience_buffer[i][index] for index in sample_indices])
+    return rollouts
+
+
+def sample_phase_stratified_indices(indices, phase_entries, batch_size):
+    if len(phase_entries) == 0:
+        return random.sample(indices, batch_size)
+
+    post_indices = []
+    pre_indices = []
+    for idx in indices:
+        phase_value = float(phase_entries[idx].item())
+        if phase_value > 0.5:
+            post_indices.append(idx)
+        else:
+            pre_indices.append(idx)
+
+    if len(post_indices) < POST_PHASE_REPLAY_MIN_SAMPLES or len(pre_indices) == 0:
+        return random.sample(indices, batch_size)
+
+    target_post = int(round(batch_size * POST_PHASE_BATCH_RATIO))
+    target_post = max(1, min(batch_size - 1, target_post))
+    target_pre = batch_size - target_post
+
+    if len(post_indices) >= target_post:
+        sampled_post = random.sample(post_indices, target_post)
+    else:
+        sampled_post = random.choices(post_indices, k=target_post)
+
+    if len(pre_indices) >= target_pre:
+        sampled_pre = random.sample(pre_indices, target_pre)
+    else:
+        sampled_pre = random.choices(pre_indices, k=target_pre)
+
+    sampled_indices = sampled_pre + sampled_post
+    random.shuffle(sampled_indices)
+    return sampled_indices
+
+
+def prepare_training_batch(rollouts, device, effective_train_algo):
+    batch = {}
+    batch['node_inputs'] = torch.stack(rollouts[0]).to(device)
+    batch['node_padding_mask'] = torch.stack(rollouts[1]).to(device)
+    batch['local_edge_mask'] = torch.stack(rollouts[2]).to(device)
+    batch['current_local_index'] = torch.stack(rollouts[3]).to(device)
+    batch['current_local_edge'] = torch.stack(rollouts[4]).to(device)
+    batch['local_edge_padding_mask'] = torch.stack(rollouts[5]).to(device)
+    batch['frontier_distribution'] = torch.stack(rollouts[6]).to(device)
+    batch['heading_visited'] = torch.stack(rollouts[7]).to(device)
+    batch['action'] = torch.stack(rollouts[8]).to(device)
+    batch['reward'] = torch.stack(rollouts[9]).to(device)
+    batch['done'] = torch.stack(rollouts[10]).to(device)
+    batch['next_node_inputs'] = torch.stack(rollouts[11]).to(device)
+    batch['next_node_padding_mask'] = torch.stack(rollouts[12]).to(device)
+    batch['next_local_edge_mask'] = torch.stack(rollouts[13]).to(device)
+    batch['next_current_local_index'] = torch.stack(rollouts[14]).to(device)
+    batch['next_current_local_edge'] = torch.stack(rollouts[15]).to(device)
+    batch['next_local_edge_padding_mask'] = torch.stack(rollouts[16]).to(device)
+    batch['next_frontier_distribution'] = torch.stack(rollouts[17]).to(device)
+    batch['next_heading_visited'] = torch.stack(rollouts[18]).to(device)
+    batch['neighbor_best_headings'] = torch.stack(rollouts[38]).to(device)
+    batch['next_neighbor_best_headings'] = torch.stack(rollouts[39]).to(device)
+    batch['budget_state'] = torch.stack(rollouts[48]).to(device)
+    batch['next_budget_state'] = torch.stack(rollouts[50]).to(device)
+    batch['detected_trajectories'] = torch.stack(rollouts[40]).to(device)
+    batch['trajectory_mask'] = torch.stack(rollouts[41]).to(device)
+    batch['trajectory_node_indices'] = torch.stack(rollouts[42]).to(device)
+    batch['next_detected_trajectories'] = torch.stack(rollouts[43]).to(device)
+    batch['next_trajectory_mask'] = torch.stack(rollouts[44]).to(device)
+    batch['next_trajectory_node_indices'] = torch.stack(rollouts[45]).to(device)
+
+    if len(rollouts[52]) > 0:
+        batch['critic_phase_flag'] = torch.stack(rollouts[52]).to(device)
+        batch['next_critic_phase_flag'] = torch.stack(rollouts[53]).to(device)
+    else:
+        zero_phase = torch.zeros_like(batch['done'], dtype=torch.float32, device=device)
+        batch['critic_phase_flag'] = zero_phase
+        batch['next_critic_phase_flag'] = zero_phase.clone()
+
+    batch['observation'] = [
+        batch['node_inputs'], batch['node_padding_mask'], batch['local_edge_mask'], batch['current_local_index'],
+        batch['current_local_edge'], batch['local_edge_padding_mask'], batch['frontier_distribution'], batch['heading_visited'],
+        batch['neighbor_best_headings'], batch['budget_state']
+    ]
+    batch['next_observation'] = [
+        batch['next_node_inputs'], batch['next_node_padding_mask'], batch['next_local_edge_mask'], batch['next_current_local_index'],
+        batch['next_current_local_edge'], batch['next_local_edge_padding_mask'], batch['next_frontier_distribution'],
+        batch['next_heading_visited'], batch['next_neighbor_best_headings'], batch['next_budget_state']
+    ]
+
+    batch['policy_kwargs'] = dict(
+        detected_trajectories=batch['detected_trajectories'],
+        trajectory_mask=batch['trajectory_mask'],
+        trajectory_node_indices=batch['trajectory_node_indices'],
+    )
+    batch['next_policy_kwargs'] = dict(
+        detected_trajectories=batch['next_detected_trajectories'],
+        trajectory_mask=batch['next_trajectory_mask'],
+        trajectory_node_indices=batch['next_trajectory_node_indices'],
+    )
+
+    if effective_train_algo in (2, 3, 4, 5):
+        batch['critic_node_inputs'] = torch.stack(rollouts[19]).to(device)
+        batch['critic_node_padding_mask'] = torch.stack(rollouts[20]).to(device)
+        batch['critic_edge_mask'] = torch.stack(rollouts[21]).to(device)
+        batch['critic_current_index'] = torch.stack(rollouts[22]).to(device)
+        batch['critic_current_edge'] = torch.stack(rollouts[23]).to(device)
+        batch['critic_edge_padding_mask'] = torch.stack(rollouts[24]).to(device)
+        batch['critic_frontier_distribution'] = torch.stack(rollouts[25]).to(device)
+        batch['critic_heading_visited'] = torch.stack(rollouts[26]).to(device)
+        batch['critic_next_node_inputs'] = torch.stack(rollouts[27]).to(device)
+        batch['critic_next_node_padding_mask'] = torch.stack(rollouts[28]).to(device)
+        batch['critic_next_edge_mask'] = torch.stack(rollouts[29]).to(device)
+        batch['critic_next_current_index'] = torch.stack(rollouts[30]).to(device)
+        batch['critic_next_current_edge'] = torch.stack(rollouts[31]).to(device)
+        batch['critic_next_edge_padding_mask'] = torch.stack(rollouts[32]).to(device)
+        batch['critic_next_frontier_distribution'] = torch.stack(rollouts[33]).to(device)
+        batch['critic_next_heading_visited'] = torch.stack(rollouts[34]).to(device)
+
+    if effective_train_algo in (4, 5):
+        batch['critic_neighbor_best_headings'] = torch.stack(rollouts[46]).to(device)
+        batch['next_critic_neighbor_best_headings'] = torch.stack(rollouts[47]).to(device)
+        batch['critic_trajectory_node_indices'] = torch.stack(rollouts[49]).to(device)
+        batch['next_critic_trajectory_node_indices'] = torch.stack(rollouts[51]).to(device)
+
+    if effective_train_algo in (1, 3, 5):
+        batch['all_agent_indices'] = torch.stack(rollouts[35]).to(device)
+        batch['all_agent_next_indices'] = torch.stack(rollouts[36]).to(device)
+        batch['next_all_agent_next_indices'] = torch.stack(rollouts[37]).to(device)
+
+    if effective_train_algo == 0:
+        batch['state'] = batch['observation']
+        batch['next_state'] = batch['next_observation']
+        batch['q_kwargs'] = dict(
+            phase_flag=batch['critic_phase_flag'],
+            detected_trajectories=batch['detected_trajectories'],
+            trajectory_mask=batch['trajectory_mask'],
+            trajectory_node_indices=batch['trajectory_node_indices'],
+        )
+        batch['next_q_kwargs'] = dict(
+            phase_flag=batch['next_critic_phase_flag'],
+            detected_trajectories=batch['next_detected_trajectories'],
+            trajectory_mask=batch['next_trajectory_mask'],
+            trajectory_node_indices=batch['next_trajectory_node_indices'],
+        )
+    elif effective_train_algo == 1:
+        batch['state'] = batch['observation']
+        batch['next_state'] = batch['next_observation']
+        batch['q_kwargs'] = dict(
+            all_agent_indices=batch['all_agent_indices'],
+            all_agent_next_indices=batch['all_agent_next_indices'],
+            phase_flag=batch['critic_phase_flag'],
+            detected_trajectories=batch['detected_trajectories'],
+            trajectory_mask=batch['trajectory_mask'],
+            trajectory_node_indices=batch['trajectory_node_indices'],
+        )
+        batch['next_q_kwargs'] = dict(
+            all_agent_indices=batch['all_agent_next_indices'],
+            all_agent_next_indices=batch['next_all_agent_next_indices'],
+            phase_flag=batch['next_critic_phase_flag'],
+            detected_trajectories=batch['next_detected_trajectories'],
+            trajectory_mask=batch['next_trajectory_mask'],
+            trajectory_node_indices=batch['next_trajectory_node_indices'],
+        )
+    elif effective_train_algo == 2:
+        batch['state'] = [
+            batch['critic_node_inputs'], batch['critic_node_padding_mask'], batch['critic_edge_mask'], batch['critic_current_index'],
+            batch['critic_current_edge'], batch['critic_edge_padding_mask'], batch['critic_frontier_distribution'], batch['critic_heading_visited'],
+            batch['neighbor_best_headings'], batch['budget_state']
+        ]
+        batch['next_state'] = [
+            batch['critic_next_node_inputs'], batch['critic_next_node_padding_mask'], batch['critic_next_edge_mask'],
+            batch['critic_next_current_index'], batch['critic_next_current_edge'], batch['critic_next_edge_padding_mask'],
+            batch['critic_next_frontier_distribution'], batch['critic_next_heading_visited'], batch['next_neighbor_best_headings'],
+            batch['next_budget_state']
+        ]
+        batch['q_kwargs'] = dict(
+            phase_flag=batch['critic_phase_flag'],
+            detected_trajectories=batch['detected_trajectories'],
+            trajectory_mask=batch['trajectory_mask'],
+            trajectory_node_indices=None,
+        )
+        batch['next_q_kwargs'] = dict(
+            phase_flag=batch['next_critic_phase_flag'],
+            detected_trajectories=batch['next_detected_trajectories'],
+            trajectory_mask=batch['next_trajectory_mask'],
+            trajectory_node_indices=None,
+        )
+    elif effective_train_algo == 3:
+        batch['state'] = [
+            batch['critic_node_inputs'], batch['critic_node_padding_mask'], batch['critic_edge_mask'], batch['critic_current_index'],
+            batch['critic_current_edge'], batch['critic_edge_padding_mask'], batch['critic_frontier_distribution'], batch['critic_heading_visited'],
+            batch['neighbor_best_headings'], batch['budget_state']
+        ]
+        batch['next_state'] = [
+            batch['critic_next_node_inputs'], batch['critic_next_node_padding_mask'], batch['critic_next_edge_mask'],
+            batch['critic_next_current_index'], batch['critic_next_current_edge'], batch['critic_next_edge_padding_mask'],
+            batch['critic_next_frontier_distribution'], batch['critic_next_heading_visited'], batch['next_neighbor_best_headings'],
+            batch['next_budget_state']
+        ]
+        batch['q_kwargs'] = dict(
+            all_agent_indices=batch['all_agent_indices'],
+            all_agent_next_indices=batch['all_agent_next_indices'],
+            phase_flag=batch['critic_phase_flag'],
+            detected_trajectories=batch['detected_trajectories'],
+            trajectory_mask=batch['trajectory_mask'],
+            trajectory_node_indices=None,
+        )
+        batch['next_q_kwargs'] = dict(
+            all_agent_indices=batch['all_agent_next_indices'],
+            all_agent_next_indices=batch['next_all_agent_next_indices'],
+            phase_flag=batch['next_critic_phase_flag'],
+            detected_trajectories=batch['next_detected_trajectories'],
+            trajectory_mask=batch['next_trajectory_mask'],
+            trajectory_node_indices=None,
+        )
+    elif effective_train_algo == 4:
+        batch['state'] = [
+            batch['critic_node_inputs'], batch['critic_node_padding_mask'], batch['critic_edge_mask'], batch['critic_current_index'],
+            batch['critic_current_edge'], batch['critic_edge_padding_mask'], batch['critic_frontier_distribution'], batch['critic_heading_visited'],
+            batch['critic_neighbor_best_headings'], batch['budget_state']
+        ]
+        batch['next_state'] = [
+            batch['critic_next_node_inputs'], batch['critic_next_node_padding_mask'], batch['critic_next_edge_mask'],
+            batch['critic_next_current_index'], batch['critic_next_current_edge'], batch['critic_next_edge_padding_mask'],
+            batch['critic_next_frontier_distribution'], batch['critic_next_heading_visited'], batch['next_critic_neighbor_best_headings'],
+            batch['next_budget_state']
+        ]
+        batch['q_kwargs'] = dict(
+            phase_flag=batch['critic_phase_flag'],
+            detected_trajectories=batch['detected_trajectories'],
+            trajectory_mask=batch['trajectory_mask'],
+            trajectory_node_indices=batch['critic_trajectory_node_indices'],
+        )
+        batch['next_q_kwargs'] = dict(
+            phase_flag=batch['next_critic_phase_flag'],
+            detected_trajectories=batch['next_detected_trajectories'],
+            trajectory_mask=batch['next_trajectory_mask'],
+            trajectory_node_indices=batch['next_critic_trajectory_node_indices'],
+        )
+    elif effective_train_algo == 5:
+        batch['state'] = [
+            batch['critic_node_inputs'], batch['critic_node_padding_mask'], batch['critic_edge_mask'], batch['critic_current_index'],
+            batch['critic_current_edge'], batch['critic_edge_padding_mask'], batch['critic_frontier_distribution'], batch['critic_heading_visited'],
+            batch['critic_neighbor_best_headings'], batch['budget_state']
+        ]
+        batch['next_state'] = [
+            batch['critic_next_node_inputs'], batch['critic_next_node_padding_mask'], batch['critic_next_edge_mask'],
+            batch['critic_next_current_index'], batch['critic_next_current_edge'], batch['critic_next_edge_padding_mask'],
+            batch['critic_next_frontier_distribution'], batch['critic_next_heading_visited'], batch['next_critic_neighbor_best_headings'],
+            batch['next_budget_state']
+        ]
+        batch['q_kwargs'] = dict(
+            all_agent_indices=batch['all_agent_indices'],
+            all_agent_next_indices=batch['all_agent_next_indices'],
+            phase_flag=batch['critic_phase_flag'],
+            detected_trajectories=batch['detected_trajectories'],
+            trajectory_mask=batch['trajectory_mask'],
+            trajectory_node_indices=batch['critic_trajectory_node_indices'],
+        )
+        batch['next_q_kwargs'] = dict(
+            all_agent_indices=batch['all_agent_next_indices'],
+            all_agent_next_indices=batch['next_all_agent_next_indices'],
+            phase_flag=batch['next_critic_phase_flag'],
+            detected_trajectories=batch['next_detected_trajectories'],
+            trajectory_mask=batch['next_trajectory_mask'],
+            trajectory_node_indices=batch['next_critic_trajectory_node_indices'],
+        )
+    else:
+        raise ValueError(f"Unsupported effective_train_algo: {effective_train_algo}")
+
+    return batch
+
+
 def main():
     # Set specific GPU if GPU_ID is specified
     if USE_GPU_GLOBAL and GPU_ID is not None:
@@ -254,223 +534,25 @@ def main():
 
                 # training for n times each step
                 for j in range(4):
-                    # randomly sample a batch data
-                    sample_indices = random.sample(indices, BATCH_SIZE)
-                    rollouts = []
-                    for i in range(len(experience_buffer)):
-                        # Skip empty buffers (e.g., agent indices when USE_COMMUNICATION=False)
-                        if len(experience_buffer[i]) == 0:
-                            rollouts.append([])
-                        else:
-                            rollouts.append([experience_buffer[i][index] for index in sample_indices])
+                    actor_sample_indices = random.sample(indices, BATCH_SIZE)
+                    actor_rollouts = collect_rollouts(experience_buffer, actor_sample_indices)
+                    actor_batch = prepare_training_batch(actor_rollouts, device, effective_train_algo)
 
-                    # stack batch data to tensors
-                    node_inputs = torch.stack(rollouts[0]).to(device)
-                    node_padding_mask = torch.stack(rollouts[1]).to(device)
-                    local_edge_mask = torch.stack(rollouts[2]).to(device)
-                    current_local_index = torch.stack(rollouts[3]).to(device)
-                    current_local_edge = torch.stack(rollouts[4]).to(device)
-                    local_edge_padding_mask = torch.stack(rollouts[5]).to(device)
-                    frontier_distribution = torch.stack(rollouts[6]).to(device)
-                    heading_visited = torch.stack(rollouts[7]).to(device)
-                    action = torch.stack(rollouts[8]).to(device)
-                    reward = torch.stack(rollouts[9]).to(device)
-                    done = torch.stack(rollouts[10]).to(device)
-                    next_node_inputs = torch.stack(rollouts[11]).to(device)
-                    next_node_padding_mask = torch.stack(rollouts[12]).to(device)
-                    next_local_edge_mask = torch.stack(rollouts[13]).to(device)
-                    next_current_local_index = torch.stack(rollouts[14]).to(device)
-                    next_current_local_edge = torch.stack(rollouts[15]).to(device)
-                    next_local_edge_padding_mask = torch.stack(rollouts[16]).to(device)
-                    next_frontier_distribution = torch.stack(rollouts[17]).to(device)
-                    next_heading_visited = torch.stack(rollouts[18]).to(device)
-                    neighbor_best_headings = torch.stack(rollouts[38]).to(device)
-                    next_neighbor_best_headings = torch.stack(rollouts[39]).to(device)
-                    budget_state = torch.stack(rollouts[48]).to(device)
-                    next_budget_state = torch.stack(rollouts[50]).to(device)
-                    detected_trajectories = torch.stack(rollouts[40]).to(device)
-                    trajectory_mask = torch.stack(rollouts[41]).to(device)
-                    trajectory_node_indices = torch.stack(rollouts[42]).to(device)
-                    next_detected_trajectories = torch.stack(rollouts[43]).to(device)
-                    next_trajectory_mask = torch.stack(rollouts[44]).to(device)
-                    next_trajectory_node_indices = torch.stack(rollouts[45]).to(device)
-
-                    # Load ground truth data if needed
-                    if effective_train_algo in (2, 3, 4, 5):
-                        critic_node_inputs = torch.stack(rollouts[19]).to(device)
-                        critic_node_padding_mask = torch.stack(rollouts[20]).to(device)
-                        critic_edge_mask = torch.stack(rollouts[21]).to(device)
-                        critic_current_index = torch.stack(rollouts[22]).to(device)
-                        critic_current_edge = torch.stack(rollouts[23]).to(device)
-                        critic_edge_padding_mask = torch.stack(rollouts[24]).to(device)
-                        critic_frontier_distribution = torch.stack(rollouts[25]).to(device)
-                        critic_heading_visited = torch.stack(rollouts[26]).to(device)
-                        critic_next_node_inputs = torch.stack(rollouts[27]).to(device)
-                        critic_next_node_padding_mask = torch.stack(rollouts[28]).to(device)
-                        critic_next_edge_mask = torch.stack(rollouts[29]).to(device)
-                        critic_next_current_index = torch.stack(rollouts[30]).to(device)
-                        critic_next_current_edge = torch.stack(rollouts[31]).to(device)
-                        critic_next_edge_padding_mask = torch.stack(rollouts[32]).to(device)
-                        critic_next_frontier_distribution = torch.stack(rollouts[33]).to(device)
-                        critic_next_heading_visited = torch.stack(rollouts[34]).to(device)
-
-                    if effective_train_algo in (4, 5):
-                        critic_neighbor_best_headings = torch.stack(rollouts[46]).to(device)
-                        next_critic_neighbor_best_headings = torch.stack(rollouts[47]).to(device)
-                        critic_trajectory_node_indices = torch.stack(rollouts[49]).to(device)
-                        next_critic_trajectory_node_indices = torch.stack(rollouts[51]).to(device)
-
-                    # Load agent indices only when communication is enabled
-                    # When USE_COMMUNICATION=False, effective_train_algo won't include agent communication
-                    if effective_train_algo in (1, 3, 5):
-                        all_agent_indices = torch.stack(rollouts[35]).to(device)
-                        all_agent_next_indices = torch.stack(rollouts[36]).to(device)
-                        next_all_agent_next_indices = torch.stack(rollouts[37]).to(device)
-
-                    observation = [node_inputs, node_padding_mask, local_edge_mask, current_local_index,
-                                   current_local_edge, local_edge_padding_mask, frontier_distribution, heading_visited,
-                                   neighbor_best_headings, budget_state]
-                    next_observation = [next_node_inputs, next_node_padding_mask, next_local_edge_mask,
-                                        next_current_local_index, next_current_local_edge, next_local_edge_padding_mask,
-                                        next_frontier_distribution, next_heading_visited, next_neighbor_best_headings,
-                                        next_budget_state]
-
-                    policy_kwargs = dict(
-                        detected_trajectories=detected_trajectories,
-                        trajectory_mask=trajectory_mask,
-                        trajectory_node_indices=trajectory_node_indices,
+                    critic_sample_indices = sample_phase_stratified_indices(
+                        indices,
+                        experience_buffer[52] if len(experience_buffer) > 52 else [],
+                        BATCH_SIZE,
                     )
-                    next_policy_kwargs = dict(
-                        detected_trajectories=next_detected_trajectories,
-                        trajectory_mask=next_trajectory_mask,
-                        trajectory_node_indices=next_trajectory_node_indices,
-                    )
-
-                    # Construct state based on effective_train_algo (respects USE_COMMUNICATION setting)
-                    if effective_train_algo == 0:
-                        # SAC: observation only, no communication
-                        state = observation
-                        next_state = next_observation
-                        q_kwargs = dict(
-                            detected_trajectories=detected_trajectories,
-                            trajectory_mask=trajectory_mask,
-                            trajectory_node_indices=trajectory_node_indices,
-                        )
-                        next_q_kwargs = dict(
-                            detected_trajectories=next_detected_trajectories,
-                            trajectory_mask=next_trajectory_mask,
-                            trajectory_node_indices=next_trajectory_node_indices,
-                        )
-                    elif effective_train_algo == 1:
-                        # MAAC with communication: observation + agent indices
-                        state = observation
-                        next_state = next_observation
-                        q_kwargs = dict(
-                            all_agent_indices=all_agent_indices,
-                            all_agent_next_indices=all_agent_next_indices,
-                            detected_trajectories=detected_trajectories,
-                            trajectory_mask=trajectory_mask,
-                            trajectory_node_indices=trajectory_node_indices,
-                        )
-                        next_q_kwargs = dict(
-                            all_agent_indices=all_agent_next_indices,
-                            all_agent_next_indices=next_all_agent_next_indices,
-                            detected_trajectories=next_detected_trajectories,
-                            trajectory_mask=next_trajectory_mask,
-                            trajectory_node_indices=next_trajectory_node_indices,
-                        )
-                    elif effective_train_algo == 2:
-                        # Ground truth only, no communication
-                        state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
-                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited,
-                                 neighbor_best_headings, budget_state]
-                        next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
-                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask,
-                                      critic_next_frontier_distribution, critic_next_heading_visited, next_neighbor_best_headings,
-                                      next_budget_state]
-                        q_kwargs = dict(
-                            detected_trajectories=detected_trajectories,
-                            trajectory_mask=trajectory_mask,
-                            trajectory_node_indices=None,
-                        )
-                        next_q_kwargs = dict(
-                            detected_trajectories=next_detected_trajectories,
-                            trajectory_mask=next_trajectory_mask,
-                            trajectory_node_indices=None,
-                        )
-                    elif effective_train_algo == 3:
-                        # MAAC with ground truth and communication
-                        state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
-                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited,
-                                 neighbor_best_headings, budget_state]
-                        next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
-                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask,
-                                      critic_next_frontier_distribution, critic_next_heading_visited, next_neighbor_best_headings,
-                                      next_budget_state]
-                        q_kwargs = dict(
-                            all_agent_indices=all_agent_indices,
-                            all_agent_next_indices=all_agent_next_indices,
-                            detected_trajectories=detected_trajectories,
-                            trajectory_mask=trajectory_mask,
-                            trajectory_node_indices=None,
-                        )
-                        next_q_kwargs = dict(
-                            all_agent_indices=all_agent_next_indices,
-                            all_agent_next_indices=next_all_agent_next_indices,
-                            detected_trajectories=next_detected_trajectories,
-                            trajectory_mask=next_trajectory_mask,
-                            trajectory_node_indices=None,
-                        )
-                    elif effective_train_algo == 4:
-                        # Merged-belief critic only, no communication
-                        state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
-                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited,
-                                 critic_neighbor_best_headings, budget_state]
-                        next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
-                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask,
-                                      critic_next_frontier_distribution, critic_next_heading_visited, next_critic_neighbor_best_headings,
-                                      next_budget_state]
-                        q_kwargs = dict(
-                            detected_trajectories=detected_trajectories,
-                            trajectory_mask=trajectory_mask,
-                            trajectory_node_indices=critic_trajectory_node_indices,
-                        )
-                        next_q_kwargs = dict(
-                            detected_trajectories=next_detected_trajectories,
-                            trajectory_mask=next_trajectory_mask,
-                            trajectory_node_indices=next_critic_trajectory_node_indices,
-                        )
-                    elif effective_train_algo == 5:
-                        # Merged-belief critic with communication
-                        state = [critic_node_inputs, critic_node_padding_mask, critic_edge_mask, critic_current_index,
-                                 critic_current_edge, critic_edge_padding_mask, critic_frontier_distribution, critic_heading_visited,
-                                 critic_neighbor_best_headings, budget_state]
-                        next_state = [critic_next_node_inputs, critic_next_node_padding_mask, critic_next_edge_mask,
-                                      critic_next_current_index, critic_next_current_edge, critic_next_edge_padding_mask,
-                                      critic_next_frontier_distribution, critic_next_heading_visited, next_critic_neighbor_best_headings,
-                                      next_budget_state]
-                        q_kwargs = dict(
-                            all_agent_indices=all_agent_indices,
-                            all_agent_next_indices=all_agent_next_indices,
-                            detected_trajectories=detected_trajectories,
-                            trajectory_mask=trajectory_mask,
-                            trajectory_node_indices=critic_trajectory_node_indices,
-                        )
-                        next_q_kwargs = dict(
-                            all_agent_indices=all_agent_next_indices,
-                            all_agent_next_indices=next_all_agent_next_indices,
-                            detected_trajectories=next_detected_trajectories,
-                            trajectory_mask=next_trajectory_mask,
-                            trajectory_node_indices=next_critic_trajectory_node_indices,
-                        )
+                    critic_rollouts = collect_rollouts(experience_buffer, critic_sample_indices)
+                    critic_batch = prepare_training_batch(critic_rollouts, device, effective_train_algo)
 
                     # SAC
                     with torch.no_grad():
-                        q_values1 = dp_q_net1(*state, **q_kwargs)
-                        q_values2 = dp_q_net2(*state, **q_kwargs)
+                        q_values1 = dp_q_net1(*actor_batch['state'], **actor_batch['q_kwargs'])
+                        q_values2 = dp_q_net2(*actor_batch['state'], **actor_batch['q_kwargs'])
                         q_values = torch.min(q_values1, q_values2)
 
-                    logp = dp_policy(*observation, **policy_kwargs)
+                    logp = dp_policy(*actor_batch['observation'], **actor_batch['policy_kwargs'])
                     policy_loss = torch.sum(
                         (logp.exp().unsqueeze(2) * (log_alpha.exp().detach() * logp.unsqueeze(2) - q_values.detach())),
                         dim=1).mean()
@@ -482,19 +564,19 @@ def main():
                     global_policy_optimizer.step()
 
                     with torch.no_grad():
-                        next_logp = dp_policy(*next_observation, **next_policy_kwargs)
-                        next_q_values1 = dp_target_q_net1(*next_state, **next_q_kwargs)
-                        next_q_values2 = dp_target_q_net2(*next_state, **next_q_kwargs)
+                        next_logp = dp_policy(*critic_batch['next_observation'], **critic_batch['next_policy_kwargs'])
+                        next_q_values1 = dp_target_q_net1(*critic_batch['next_state'], **critic_batch['next_q_kwargs'])
+                        next_q_values2 = dp_target_q_net2(*critic_batch['next_state'], **critic_batch['next_q_kwargs'])
                         next_q_values = torch.min(next_q_values1, next_q_values2)
                         value_prime = torch.sum(
                             next_logp.unsqueeze(2).exp() * (next_q_values - log_alpha.exp() * next_logp.unsqueeze(2)),
                             dim=1).unsqueeze(1)
-                        target_q_batch = reward + GAMMA * (1 - done) * value_prime
+                        target_q_batch = critic_batch['reward'] + GAMMA * (1 - critic_batch['done']) * value_prime
 
                     mse_loss = nn.MSELoss()
 
-                    q_values1 = dp_q_net1(*state, **q_kwargs)
-                    q1 = torch.gather(q_values1, 1, action)
+                    q_values1 = dp_q_net1(*critic_batch['state'], **critic_batch['q_kwargs'])
+                    q1 = torch.gather(q_values1, 1, critic_batch['action'])
                     q1_loss = mse_loss(q1, target_q_batch.detach()).mean()
                     global_q_net1_optimizer.zero_grad()
                     q1_loss.backward()
@@ -502,8 +584,8 @@ def main():
                                                                  norm_type=2)
                     global_q_net1_optimizer.step()
 
-                    q_values2 = dp_q_net2(*state, **q_kwargs)
-                    q2 = torch.gather(q_values2, 1, action)
+                    q_values2 = dp_q_net2(*critic_batch['state'], **critic_batch['q_kwargs'])
+                    q2 = torch.gather(q_values2, 1, critic_batch['action'])
                     q2_loss = mse_loss(q2, target_q_batch.detach()).mean()
                     global_q_net2_optimizer.zero_grad()
                     q2_loss.backward()
@@ -539,10 +621,38 @@ def main():
                 traj_embedding_norm = float(trajectory_debug.get('embedding_norm', torch.tensor(0.0)).item())
                 traj_attention_entropy = float(trajectory_debug.get('agent_attention_entropy', torch.tensor(0.0)).item())
 
-                data = [reward.mean().item(), value_prime.mean().item(), policy_loss.item(), q1_loss.item(),
+                critic_phase_post_ratio = 0.0
+                critic_next_phase_post_ratio = 0.0
+                critic_pre_q_mean = 0.0
+                critic_post_q_mean = 0.0
+                critic_active_q_mean = 0.0
+                critic_head_gap = 0.0
+                if effective_train_algo in (2, 3, 4, 5):
+                    critic_model = dp_q_net1.module if hasattr(dp_q_net1, 'module') else dp_q_net1
+                    with torch.no_grad():
+                        q_pre_debug, q_post_debug = critic_model(
+                            *critic_batch['state'],
+                            return_both_heads=True,
+                            **critic_batch['q_kwargs'],
+                        )
+                        selected_q_pre = torch.gather(q_pre_debug, 1, critic_batch['action'])
+                        selected_q_post = torch.gather(q_post_debug, 1, critic_batch['action'])
+                        phase_mask = critic_batch['critic_phase_flag'].reshape(critic_batch['critic_phase_flag'].size(0), 1, 1).float()
+                        selected_active_q = (1.0 - phase_mask) * selected_q_pre + phase_mask * selected_q_post
+
+                    critic_phase_post_ratio = float(critic_batch['critic_phase_flag'].float().mean().item())
+                    critic_next_phase_post_ratio = float(critic_batch['next_critic_phase_flag'].float().mean().item())
+                    critic_pre_q_mean = float(selected_q_pre.mean().item())
+                    critic_post_q_mean = float(selected_q_post.mean().item())
+                    critic_active_q_mean = float(selected_active_q.mean().item())
+                    critic_head_gap = float((selected_q_post - selected_q_pre).abs().mean().item())
+
+                data = [critic_batch['reward'].mean().item(), value_prime.mean().item(), policy_loss.item(), q1_loss.item(),
                         entropy.mean().item(), policy_grad_norm.item(), q_grad_norm.item(), log_alpha.item(),
                         alpha_loss.item(), traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio,
-                        traj_embedding_norm, traj_attention_entropy, *perf_data]
+                        traj_embedding_norm, traj_attention_entropy, critic_phase_post_ratio,
+                        critic_next_phase_post_ratio, critic_pre_q_mean, critic_post_q_mean,
+                        critic_active_q_mean, critic_head_gap, *perf_data]
                 training_data.append(data)
                 current_success_rate = np.nanmean(perf_metrics['success_rate']) if len(perf_metrics['success_rate']) > 0 else -float('inf')
 
@@ -613,7 +723,7 @@ def write_to_tensor_board(writer, tensorboard_data, curr_episode):
         safe_nanmean(tensorboard_data[:, column_idx])
         for column_idx in range(tensorboard_data.shape[1])
     ]
-    reward, value, policy_loss, q_value_loss, entropy, policy_grad_norm, q_value_grad_norm, log_alpha, alpha_loss, traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio, traj_embedding_norm, traj_attention_entropy, merged_travel_dist, travel_dist, success_rate, explored_rate = tensorboard_data
+    reward, value, policy_loss, q_value_loss, entropy, policy_grad_norm, q_value_grad_norm, log_alpha, alpha_loss, traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio, traj_embedding_norm, traj_attention_entropy, critic_phase_post_ratio, critic_next_phase_post_ratio, critic_pre_q_mean, critic_post_q_mean, critic_active_q_mean, critic_head_gap, merged_travel_dist, travel_dist, success_rate, explored_rate = tensorboard_data
 
     writer.add_scalar(tag='Losses/Value', scalar_value=value, global_step=curr_episode)
     writer.add_scalar(tag='Losses/Policy Loss', scalar_value=policy_loss, global_step=curr_episode)
@@ -628,6 +738,12 @@ def write_to_tensor_board(writer, tensorboard_data, curr_episode):
     writer.add_scalar(tag='Trajectory/Valid Timestep Ratio', scalar_value=traj_valid_timestep_ratio, global_step=curr_episode)
     writer.add_scalar(tag='Trajectory/Embedding Norm', scalar_value=traj_embedding_norm, global_step=curr_episode)
     writer.add_scalar(tag='Trajectory/Agent Attention Entropy', scalar_value=traj_attention_entropy, global_step=curr_episode)
+    writer.add_scalar(tag='Critic/Phase Post Ratio', scalar_value=critic_phase_post_ratio, global_step=curr_episode)
+    writer.add_scalar(tag='Critic/Next Phase Post Ratio', scalar_value=critic_next_phase_post_ratio, global_step=curr_episode)
+    writer.add_scalar(tag='Critic/Selected Pre Head Q Mean', scalar_value=critic_pre_q_mean, global_step=curr_episode)
+    writer.add_scalar(tag='Critic/Selected Post Head Q Mean', scalar_value=critic_post_q_mean, global_step=curr_episode)
+    writer.add_scalar(tag='Critic/Selected Active Head Q Mean', scalar_value=critic_active_q_mean, global_step=curr_episode)
+    writer.add_scalar(tag='Critic/Selected Head Gap', scalar_value=critic_head_gap, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Reward', scalar_value=reward, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Merged Objective Travel Distance', scalar_value=merged_travel_dist, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Full Episode Travel Distance', scalar_value=travel_dist, global_step=curr_episode)

@@ -4,6 +4,12 @@ import math
 import numpy as np
 from parameter import BUDGET_FEATURE_DIM
 
+
+def _clone_linear_weights(target_layer, source_layer):
+    target_layer.weight.data.copy_(source_layer.weight.data)
+    if source_layer.bias is not None and target_layer.bias is not None:
+        target_layer.bias.data.copy_(source_layer.bias.data)
+
 class SingleHeadAttention(nn.Module):
     def __init__(self, embedding_dim):
         super(SingleHeadAttention, self).__init__()
@@ -612,10 +618,17 @@ class QNet(nn.Module):
         if train_algo in (1, 3, 5):
             self.agent_decoder = Decoder(embedding_dim=embedding_dim, n_head=4, n_layer=1, gated_attention=gated_attention)
             self.all_agent_embedding = nn.Linear(embedding_dim * 2, embedding_dim)
-
-            self.q_values_layer = nn.Linear(embedding_dim * 3, 1)
+            q_input_dim = embedding_dim * 3
         else:
-            self.q_values_layer = nn.Linear(embedding_dim * 2, 1)
+            q_input_dim = embedding_dim * 2
+
+        # Critic-only phase split:
+        # use the true environment completion flag as a hard selector between
+        # pre-success and post-success Q heads. This reduces target interference
+        # without exposing privileged merged-map information to the actor.
+        self.q_values_layer_pre = nn.Linear(q_input_dim, 1)
+        self.q_values_layer_post = nn.Linear(q_input_dim, 1)
+        _clone_linear_weights(self.q_values_layer_post, self.q_values_layer_pre)
 
 
     def encode_graph(self, node_inputs, node_padding_mask, edge_mask, frontier_distribution):
@@ -735,8 +748,8 @@ class QNet(nn.Module):
 
     def output_q(self, current_node_feature, enhanced_current_node_feature, enhanced_node_feature,
                  current_edge, edge_padding_mask, headings_visited, neighbor_best_headings, budget_state,
-                 current_index, all_agent_indices, all_agent_next_indices,
-                 trajectory_tokens=None, trajectory_token_mask=None):
+                 current_index, all_agent_indices, all_agent_next_indices, phase_flag=None,
+                 trajectory_tokens=None, trajectory_token_mask=None, return_both_heads=False):
         embedding_dim = enhanced_node_feature.size()[2]
         num_best_headings = neighbor_best_headings.size()[2]
         batch_size = enhanced_node_feature.size()[0]
@@ -776,16 +789,26 @@ class QNet(nn.Module):
             agent_mask = all_agent_indices == current_index
             global_state_action_feature, _ = self.agent_decoder(current_state_feature, all_agent_action_features, agent_mask)
             action_features = torch.cat((current_state_feature.repeat(1, enhanced_neighbor_features.size()[1], 1), enhanced_neighbor_features, global_state_action_feature.repeat(1, enhanced_neighbor_features.size()[1], 1)), dim=-1)
-            q_values = self.q_values_layer(action_features)
         else:
             action_features = torch.cat((current_state_feature.repeat(1, enhanced_neighbor_features.size()[1], 1), enhanced_neighbor_features), dim=-1)
-            q_values = self.q_values_layer(action_features)
+
+        q_values_pre = self.q_values_layer_pre(action_features)
+        q_values_post = self.q_values_layer_post(action_features)
+        if return_both_heads:
+            return q_values_pre, q_values_post
+        if phase_flag is None:
+            return q_values_pre
+
+        phase_mask = phase_flag.reshape(phase_flag.size(0), 1, 1).float()
+        q_values = (1.0 - phase_mask) * q_values_pre + phase_mask * q_values_post
         return q_values
 
     def forward(self, node_inputs, node_padding_mask, edge_mask, current_index,
                 current_edge, edge_padding_mask, frontier_distribution, headings_visited, neighbor_best_headings,
                 budget_state,
-                all_agent_indices=None, all_agent_next_indices=None, detected_trajectories=None, trajectory_mask=None, trajectory_node_indices=None):
+                all_agent_indices=None, all_agent_next_indices=None, phase_flag=None,
+                detected_trajectories=None, trajectory_mask=None, trajectory_node_indices=None,
+                return_both_heads=False):
         enhanced_node_feature = self.encode_graph(node_inputs, node_padding_mask, edge_mask, frontier_distribution)
 
         trajectory_tokens, trajectory_token_mask = self.encode_trajectory_context(
@@ -799,6 +822,6 @@ class QNet(nn.Module):
             enhanced_node_feature, current_index, node_padding_mask)
         q_values = self.output_q(current_node_feature, enhanced_current_node_feature,
                                  enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings,
-                                 budget_state, current_index, all_agent_indices, all_agent_next_indices,
-                                 trajectory_tokens, trajectory_token_mask)
+                                 budget_state, current_index, all_agent_indices, all_agent_next_indices, phase_flag,
+                                 trajectory_tokens, trajectory_token_mask, return_both_heads=return_both_heads)
         return q_values

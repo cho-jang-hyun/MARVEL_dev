@@ -97,7 +97,7 @@ class MultiAgentWorker:
         self.replay_closed = np.zeros(self.n_agents, dtype=bool)
         self.low_utility_streaks = np.zeros(self.n_agents, dtype=int)
         self.merged_objective_completed = False
-        self.merged_completion_travel_dist = np.nan
+        self.merged_completion_travel_dist = None
         self.merged_total_utility = np.inf
 
     def _get_collision_free_candidate(self, robot, occupied_locations):
@@ -135,7 +135,7 @@ class MultiAgentWorker:
         self.merged_total_utility = float(self.merged_map_manager.get_total_utility())
         merged_completed_this_step = (
             not self.merged_objective_completed
-            and self.env.explored_rate >= SUCCESS_THRESHOLD
+            and self.env.explored_rate > SUCCESS_THRESHOLD
         )
         if merged_completed_this_step:
             self.merged_objective_completed = True
@@ -148,7 +148,7 @@ class MultiAgentWorker:
             return False
         agent_map = self.env.get_agent_map_info(robot.id).map
         agent_explored_rate = np.sum(agent_map == FREE) / total_free
-        return bool(agent_explored_rate >= SUCCESS_THRESHOLD)
+        return bool(agent_explored_rate > SUCCESS_THRESHOLD)
 
     def _append_trajectory_step(self, robot, next_location):
         prev_trajectory = self.trajectory_buffer[robot.id][-1] if len(self.trajectory_buffer[robot.id]) > 0 else None
@@ -196,7 +196,7 @@ class MultiAgentWorker:
             critic_next_indices = [self.merged_critic_manager.get_node_index(robot.location) for robot in self.robot_list]
         return local_next_indices, critic_next_indices
 
-    def _close_agent_replay(self, robot, team_node_managers):
+    def _close_agent_replay(self, robot, team_node_managers, next_phase_flag=None):
         if self.replay_closed[robot.id] or len(robot.episode_buffer[0]) == 0:
             self.replay_closed[robot.id] = True
             return
@@ -212,6 +212,9 @@ class MultiAgentWorker:
             joint_next_index_list = critic_next_indices
         robot.save_next_observations(observation, joint_next_index_list)
 
+        if next_phase_flag is None:
+            next_phase_flag = float(self.merged_objective_completed)
+
         if self.use_merged_critic:
             critic_observation = self.merged_critic_manager.get_critic_observation(
                 robot.location,
@@ -223,10 +226,10 @@ class MultiAgentWorker:
                 local_node_coords=robot.node_coords,
                 base_location=self.base_locations[robot.id],
             )
-            robot.save_next_critic_observations(critic_observation)
+            robot.save_next_critic_observations(critic_observation, next_critic_phase_flag=next_phase_flag)
         else:
             ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, base_location=self.base_locations[robot.id])
-            robot.save_next_ground_truth_observations(ground_truth_observation)
+            robot.save_next_ground_truth_observations(ground_truth_observation, next_critic_phase_flag=next_phase_flag)
 
         self.replay_closed[robot.id] = True
 
@@ -277,6 +280,7 @@ class MultiAgentWorker:
             observations = {}
             active_explorer_ids = []
             merged_was_completed = self.merged_objective_completed
+            current_phase_flag = float(merged_was_completed)
 
             for robot in self.robot_list:
                 self._set_agent_budget_context(robot)
@@ -302,7 +306,7 @@ class MultiAgentWorker:
                     or self._should_force_return(hops_to_base, self.remaining_budgets[robot.id])
                 ):
                     self.returning_agents[robot.id] = True
-                    self._close_agent_replay(robot, team_node_managers)
+                    self._close_agent_replay(robot, team_node_managers, next_phase_flag=current_phase_flag)
                     return_path = self._get_return_path(robot)
                     if len(return_path) == 0:
                         if not robot_at_base:
@@ -321,7 +325,7 @@ class MultiAgentWorker:
 
                 if not self._has_feasible_exploration_action(robot, observation):
                     self.returning_agents[robot.id] = True
-                    self._close_agent_replay(robot, team_node_managers)
+                    self._close_agent_replay(robot, team_node_managers, next_phase_flag=current_phase_flag)
                     return_path = self._get_return_path(robot)
                     if len(return_path) == 0:
                         if not robot_at_base:
@@ -358,10 +362,10 @@ class MultiAgentWorker:
                         base_location=self.base_locations[robot.id],
                     )
                     robot.current_critic_index = critic_observation[3][0, 0, 0].item()
-                    robot.save_critic_observation(critic_observation)
+                    robot.save_critic_observation(critic_observation, critic_phase_flag=current_phase_flag)
                 else:
                     ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, base_location=self.base_locations[robot.id])
-                    robot.save_ground_truth_observation(ground_truth_observation)
+                    robot.save_ground_truth_observation(ground_truth_observation, critic_phase_flag=current_phase_flag)
 
                 next_location, _, _, next_heading_index = robot.select_next_waypoint(observation)
                 selected_locations[robot_id] = next_location.copy()
@@ -505,7 +509,7 @@ class MultiAgentWorker:
                 # time_pressure = -TIME_PRESSURE_WEIGHT * (1.0 - budget_fraction)
 
                 reward_list.append(
-                    0.9 * utility_reward
+                    utility_reward
                     + merged_node_utility_reward
                     + trajectory_reward
                     - trajectory_history_penalty)
@@ -517,6 +521,7 @@ class MultiAgentWorker:
                 robot.update_planning_state()
             self._update_merged_graph()
             merged_completed_this_step = self._update_objective_state()
+            next_phase_flag = float(self.merged_objective_completed)
             for robot in self.robot_list:
                 self._set_agent_budget_context(robot)
 
@@ -549,7 +554,7 @@ class MultiAgentWorker:
                 robot.save_done(transition_done)
                 if robot_should_return:
                     self.returning_agents[robot_id] = True
-                    self._close_agent_replay(robot, team_node_managers)
+                    self._close_agent_replay(robot, team_node_managers, next_phase_flag=next_phase_flag)
 
             if mission_failure:
                 break
@@ -562,10 +567,11 @@ class MultiAgentWorker:
             for buffer_idx in range(len(self.episode_buffer)):
                 self.episode_buffer[buffer_idx] += robot.episode_buffer[buffer_idx]
 
-        self.perf_metrics['travel_dist'] = self._get_max_travel_dist()
+        final_travel_dist = self._get_max_travel_dist()
+        self.perf_metrics['travel_dist'] = final_travel_dist
         self.perf_metrics['merged_travel_dist'] = (
             self.merged_completion_travel_dist
-            if self.merged_objective_completed else np.nan
+            if self.merged_completion_travel_dist is not None else final_travel_dist
         )
         self.perf_metrics['explored_rate'] = self.env.explored_rate
         self.perf_metrics['success_rate'] = self._episode_success(mission_failure)

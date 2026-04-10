@@ -74,7 +74,7 @@ class TestWorker:
         self.remaining_budgets = self.initial_budgets.copy()
         self.returning_agents = np.zeros(self.n_agents, dtype=bool)
         self.merged_objective_completed = False
-        self.merged_completion_travel_dist = np.nan
+        self.merged_completion_travel_dist = None
         self.merged_total_utility = np.inf
 
         # Initialize individual observation maps for each agent (for visualization)
@@ -109,7 +109,7 @@ class TestWorker:
         self.merged_total_utility = float(self.merged_node_manager.get_total_utility())
         merged_completed_this_step = (
             not self.merged_objective_completed
-            and self.env.explored_rate >= SUCCESS_THRESHOLD
+            and self.env.explored_rate > SUCCESS_THRESHOLD
         )
         if merged_completed_this_step:
             self.merged_objective_completed = True
@@ -122,7 +122,7 @@ class TestWorker:
             return False
         agent_map = self.env.get_agent_map_info(robot.id).map
         agent_explored_rate = np.sum(agent_map == FREE) / total_free
-        return bool(agent_explored_rate >= SUCCESS_THRESHOLD)
+        return bool(agent_explored_rate > SUCCESS_THRESHOLD)
 
     def _set_agent_budget_context(self, robot):
         robot.set_budget_context(
@@ -375,10 +375,11 @@ class TestWorker:
                 break
 
         # Save metrics
-        self.perf_metrics['travel_dist'] = self._get_max_travel_dist()
+        final_travel_dist = self._get_max_travel_dist()
+        self.perf_metrics['travel_dist'] = final_travel_dist
         self.perf_metrics['merged_travel_dist'] = (
             self.merged_completion_travel_dist
-            if self.merged_objective_completed else np.nan
+            if self.merged_completion_travel_dist is not None else final_travel_dist
         )
         self.perf_metrics['explored_rate'] = self.env.explored_rate
         self.perf_metrics['success_rate'] = bool(self.merged_objective_completed)
