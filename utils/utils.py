@@ -1,13 +1,14 @@
 import numpy as np
 import imageio
 import os
+import shutil
 import subprocess
-import tempfile
 from skimage.morphology import label
 
 from parameter import *
 
 DEFAULT_VIDEO_FPS = 10
+FFMPEG_CANDIDATES = ['/usr/bin/ffmpeg', 'ffmpeg']
 
 
 def get_cell_position_from_coords(coords, map_info, check_negative=True):
@@ -244,24 +245,80 @@ def _prepare_video_frame(image):
     return np.ascontiguousarray(image)
 
 
-def _write_mp4(output_path, frame_files, fps=DEFAULT_VIDEO_FPS):
-    output_dir = os.path.dirname(output_path) or '.'
-    with tempfile.TemporaryDirectory(prefix='mp4_frames_', dir=output_dir) as tmp_dir:
-        for idx, frame in enumerate(frame_files):
-            image = imageio.imread(frame)
-            prepared_frame = _prepare_video_frame(image)
-            imageio.imwrite(os.path.join(tmp_dir, f'frame_{idx:06d}.png'), prepared_frame)
+def _ffmpeg_supports_encoder(ffmpeg_bin, encoder_name):
+    try:
+        result = subprocess.run(
+            [ffmpeg_bin, '-encoders'],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return False
+    return encoder_name in result.stdout
 
-        command = [
-            'ffmpeg',
-            '-y',
-            '-framerate', str(fps),
-            '-i', os.path.join(tmp_dir, 'frame_%06d.png'),
-            '-c:v', 'mpeg4',
-            '-pix_fmt', 'yuv420p',
-            output_path,
-        ]
-        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+def _resolve_ffmpeg_bin():
+    for candidate in FFMPEG_CANDIDATES:
+        resolved = candidate
+        if os.path.basename(candidate) == candidate:
+            resolved = shutil.which(candidate)
+        if not resolved:
+            continue
+        if _ffmpeg_supports_encoder(resolved, 'libx264'):
+            return resolved
+    for candidate in FFMPEG_CANDIDATES:
+        resolved = candidate
+        if os.path.basename(candidate) == candidate:
+            resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    raise RuntimeError('No ffmpeg binary found for MP4 export')
+
+
+def _write_mp4(output_path, frame_files, fps=DEFAULT_VIDEO_FPS):
+    if not frame_files:
+        raise RuntimeError('No frame files provided for MP4 export')
+
+    first_frame = _prepare_video_frame(imageio.imread(frame_files[0]))
+    height, width = first_frame.shape[:2]
+    ffmpeg_bin = _resolve_ffmpeg_bin()
+
+    command = [
+        ffmpeg_bin,
+        '-y',
+        '-f', 'rawvideo',
+        '-pix_fmt', 'rgb24',
+        '-s', f'{width}x{height}',
+        '-r', str(fps),
+        '-i', '-',
+        '-an',
+        '-c:v', 'libx264',
+        '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
+        output_path,
+    ]
+
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        process.stdin.write(first_frame.tobytes())
+        for frame_path in frame_files[1:]:
+            prepared_frame = _prepare_video_frame(imageio.imread(frame_path))
+            if prepared_frame.shape[:2] != (height, width):
+                raise RuntimeError(
+                    f'Inconsistent frame size for MP4 export: expected {(width, height)}, got '
+                    f'{(prepared_frame.shape[1], prepared_frame.shape[0])} from {frame_path}'
+                )
+            process.stdin.write(prepared_frame.tobytes())
+        process.stdin.close()
+        stderr = process.stderr.read()
+        process.wait()
+        if process.returncode != 0:
+            raise RuntimeError(stderr.decode('utf-8', errors='replace'))
+    finally:
+        if process.poll() is None:
+            process.kill()
 
 
 def make_video(path, n, frame_files, rate):
