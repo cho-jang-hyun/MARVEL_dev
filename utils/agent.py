@@ -282,6 +282,34 @@ class Agent:
     def get_path_to_base(self, start_location=None):
         return self._get_path_to_base(start_location=start_location)
 
+    def get_distance_to_base(self, start_location=None, base_dist_dict=None):
+        if self.base_location is None:
+            return 0.0
+
+        if start_location is None:
+            start_location = self.location
+
+        start_location = np.asarray(start_location, dtype=float)
+        if np.allclose(start_location, self.base_location):
+            return 0.0
+
+        start_key = (float(start_location[0]), float(start_location[1]))
+        base_key = (float(self.base_location[0]), float(self.base_location[1]))
+        if self.node_manager.nodes_dict.find(start_key) is None:
+            return float('inf')
+        if self.node_manager.nodes_dict.find(base_key) is None:
+            return float('inf')
+
+        if base_dist_dict is not None:
+            distance = base_dist_dict.get(start_key)
+            if distance is not None:
+                return float(distance)
+
+        _, distance = self.node_manager.a_star(start_location, self.base_location)
+        if distance >= 1e8:
+            return float('inf')
+        return float(distance)
+
     def get_hops_to_base(self, start_location=None):
         if self.base_location is None:
             return 0
@@ -296,37 +324,37 @@ class Agent:
         scale = max(float(MAX_BUDGET), float(self.initial_budget), 1.0)
         return np.log1p(max(float(value), 0.0)) / np.log1p(scale)
 
-    def _build_budget_features(self, hop_dict=None):
+    def _build_budget_features(self, base_dist_dict=None):
         initial_budget = max(float(self.initial_budget), 1.0)
         remaining_budget = max(float(self.remaining_budget), 0.0)
 
-        if self.base_location is None or hop_dict is None:
-            hops_to_base = 0.0
+        if self.base_location is None or base_dist_dict is None:
+            distance_to_base = 0.0
         else:
-            current_hops = self.get_hops_to_base()
-            hops_to_base = current_hops if current_hops < int(1e6) else remaining_budget + 1.0
+            current_distance = self.get_distance_to_base(base_dist_dict=base_dist_dict)
+            distance_to_base = current_distance if np.isfinite(current_distance) else remaining_budget + 1.0
 
-        hops_over_remaining = min(hops_to_base / max(remaining_budget, 1.0), 2.0)
+        distance_over_remaining = min(distance_to_base / max(remaining_budget, 1.0), 2.0)
         budget_state = np.array([
             self._normalize_budget_log(initial_budget),
             self._normalize_budget_log(remaining_budget),
             remaining_budget / initial_budget,
-            hops_over_remaining,
+            distance_over_remaining,
         ], dtype=np.float32)
 
         return torch.FloatTensor(budget_state).unsqueeze(0).to(self.device)
 
-    def _build_node_hops(self, n_node, hop_dict):
-        """Return normalised hops-to-base for every node (shape [n_node, 1])."""
-        node_hops = np.zeros((n_node, 1), dtype=np.float32)
-        if hop_dict is None or self.base_location is None:
-            return node_hops
-        scale = max(float(MAX_BUDGET), 1.0)
+    def _build_node_base_distances(self, n_node, base_dist_dict):
+        """Return normalised shortest-path distance-to-base for every node (shape [n_node, 1])."""
+        node_distances = np.zeros((n_node, 1), dtype=np.float32)
+        if base_dist_dict is None or self.base_location is None:
+            return node_distances
+        scale = max(float(MAX_BUDGET), float(self.initial_budget), 1.0)
         for i, coord in enumerate(self.node_coords):
             key = (coord[0], coord[1])
-            h = hop_dict.get(key, int(1e6))
-            node_hops[i, 0] = min(h / scale, 2.0) if h < int(1e6) else 2.0
-        return node_hops
+            distance = base_dist_dict.get(key, float('inf'))
+            node_distances[i, 0] = min(distance / scale, 2.0) if np.isfinite(distance) else 2.0
+        return node_distances
 
     def get_observation(self, pad=True, robot_locations=None, trajectory_buffer=None):
         node_coords = self.node_coords
@@ -367,12 +395,16 @@ class Agent:
 
             detected_trajectories, trajectory_mask, trajectory_node_indices = self._get_detected_trajectories()
 
-        # BFS from base once — shared by node hop features and budget state
-        hop_dict = self.node_manager.hop_distances_from(self.base_location) if self.base_location is not None else None
-        node_hops = self._build_node_hops(n_node, hop_dict)
+        # Shortest-path distances from base are shared by node budget features and budget state.
+        base_dist_dict = None
+        if self.base_location is not None:
+            base_key = (float(self.base_location[0]), float(self.base_location[1]))
+            if self.node_manager.nodes_dict.find(base_key) is not None:
+                base_dist_dict, _ = self.node_manager.Dijkstra(self.base_location)
+        node_base_distances = self._build_node_base_distances(n_node, base_dist_dict)
 
         # visited_by_others is already 0 or 1, no normalization needed
-        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_hops), axis=1)
+        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_base_distances), axis=1)
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
         all_node_frontier_distribution = torch.Tensor(node_frontier_distribution).unsqueeze(0).to(self.device)
         node_heading_visited = torch.Tensor(node_heading_visited).unsqueeze(0).to(self.device)
@@ -399,7 +431,7 @@ class Agent:
             edge_mask = padding(edge_mask)
 
         current_in_edge = np.argwhere(current_edge == self.current_index)[0][0]
-        budget_state = self._build_budget_features(hop_dict=hop_dict)
+        budget_state = self._build_budget_features(base_dist_dict=base_dist_dict)
         current_edge = torch.tensor(current_edge).unsqueeze(0)
         k_size = current_edge.size()[-1]
         if pad:

@@ -1,9 +1,13 @@
 import numpy as np
 import imageio
 import os
+import subprocess
+import tempfile
 from skimage.morphology import label
 
 from parameter import *
+
+DEFAULT_VIDEO_FPS = 10
 
 
 def get_cell_position_from_coords(coords, map_info, check_negative=True):
@@ -225,22 +229,55 @@ def check_collision(start, end, map_info, allow_unknown=False):
     return False
 
 
-def make_gif(path, n, frame_files, rate):
-    with imageio.get_writer('{}/{}_explored_rate_{:.4g}.gif'.format(path, n, rate), mode='I', duration=1) as writer:
-        for frame in frame_files:
+def _prepare_video_frame(image):
+    if image.ndim == 2:
+        image = np.stack([image] * 3, axis=-1)
+    elif image.ndim == 3 and image.shape[2] == 4:
+        image = image[:, :, :3]
+
+    height, width = image.shape[:2]
+    pad_height = height % 2
+    pad_width = width % 2
+    if pad_height or pad_width:
+        image = np.pad(image, ((0, pad_height), (0, pad_width), (0, 0)), mode='edge')
+
+    return np.ascontiguousarray(image)
+
+
+def _write_mp4(output_path, frame_files, fps=DEFAULT_VIDEO_FPS):
+    output_dir = os.path.dirname(output_path) or '.'
+    with tempfile.TemporaryDirectory(prefix='mp4_frames_', dir=output_dir) as tmp_dir:
+        for idx, frame in enumerate(frame_files):
             image = imageio.imread(frame)
-            writer.append_data(image)
-    print('gif complete\n')
+            prepared_frame = _prepare_video_frame(image)
+            imageio.imwrite(os.path.join(tmp_dir, f'frame_{idx:06d}.png'), prepared_frame)
+
+        command = [
+            'ffmpeg',
+            '-y',
+            '-framerate', str(fps),
+            '-i', os.path.join(tmp_dir, 'frame_%06d.png'),
+            '-c:v', 'mpeg4',
+            '-pix_fmt', 'yuv420p',
+            output_path,
+        ]
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def make_video(path, n, frame_files, rate):
+    output_path = '{}/{}_explored_rate_{:.4g}.mp4'.format(path, n, rate)
+    _write_mp4(output_path, frame_files, fps=DEFAULT_VIDEO_FPS)
+    print('mp4 complete\n')
 
     for filename in frame_files[:-1]:
         os.remove(filename)
 
-def make_gif_test(path, n, frame_files, rate, n_agents, fov, sensor_range):
-    with imageio.get_writer('{}/{}_{}_{}_{}_explored_rate_{:.4g}.gif'.format(path, n, n_agents, fov, sensor_range, rate), mode='I', duration=1) as writer:
-        for frame in frame_files:
-            image = imageio.imread(frame)
-            writer.append_data(image)
-    print('gif complete\n')
+
+def make_video_test(path, n, frame_files, rate, n_agents, fov, sensor_range):
+    output_path = '{}/{}_{}_{}_{}_explored_rate_{:.4g}.mp4'.format(path, n, n_agents, fov, sensor_range, rate)
+    _write_mp4(output_path, frame_files, fps=DEFAULT_VIDEO_FPS)
+    print('mp4 complete\n')
+
     for filename in frame_files[:-1]:
         os.remove(filename)
 
@@ -256,4 +293,3 @@ class MapInfo:
         self.map = map
         self.map_origin_x = map_origin_x
         self.map_origin_y = map_origin_y
-

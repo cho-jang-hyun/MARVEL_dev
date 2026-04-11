@@ -70,7 +70,7 @@ class TestWorker:
                 0.0
             ))
         self.base_locations = self.env.robot_locations.copy()
-        self.initial_budgets = np.full(self.n_agents, BUDGET, dtype=int)
+        self.initial_budgets = np.full(self.n_agents, BUDGET, dtype=float)
         self.remaining_budgets = self.initial_budgets.copy()
         self.returning_agents = np.zeros(self.n_agents, dtype=bool)
         self.merged_objective_completed = False
@@ -165,8 +165,14 @@ class TestWorker:
         return all(np.allclose(robot.location, self.base_locations[robot.id]) for robot in self.robot_list)
 
     @staticmethod
-    def _should_force_return(hops_to_base, remaining_budget):
-        return hops_to_base + RETURN_SAFETY_MARGIN >= remaining_budget
+    def _should_force_return(distance_to_base, remaining_budget):
+        return distance_to_base + RETURN_SAFETY_MARGIN >= remaining_budget
+
+    @staticmethod
+    def _budget_to_decision_steps(budget_value):
+        if BUDGET_TIMESTEP_METERS <= 0:
+            return 0
+        return int(np.ceil(max(float(budget_value), 0.0) / BUDGET_TIMESTEP_METERS))
 
     def run_episode(self):
         done = False
@@ -192,7 +198,7 @@ class TestWorker:
         headings = [[] for _ in range(self.n_agents)]
         mission_failure = False
 
-        for i in range(MAX_EPISODE_STEP + BUDGET):
+        for i in range(MAX_EPISODE_STEP + self._budget_to_decision_steps(np.max(self.initial_budgets))):
             # print(' Current timestep: {}/{}'.format(i, MAX_EPISODE_STEP))
             selected_locations = [robot.location.copy() for robot in self.robot_list]
             dist_list = [0.0 for _ in range(self.n_agents)]
@@ -206,7 +212,7 @@ class TestWorker:
 
                 if (not self.returning_agents[robot.id]) and (
                     self._local_objective_completed(robot)
-                    or self._should_force_return(robot.get_hops_to_base(), self.remaining_budgets[robot.id])
+                    or self._should_force_return(robot.get_distance_to_base(), self.remaining_budgets[robot.id])
                 ):
                     self.returning_agents[robot.id] = True
 
@@ -340,8 +346,9 @@ class TestWorker:
 
             for robot, next_location, next_node_index in zip(self.robot_list, selected_locations, next_node_index_list):
                 self.env.final_sim_step(next_location, robot.id)
-                if not np.allclose(next_location, robot.location):
-                    self.remaining_budgets[robot.id] -= 1
+                traveled_distance = float(np.linalg.norm(next_location - robot.location))
+                if traveled_distance > 0.0:
+                    self.remaining_budgets[robot.id] -= traveled_distance
                 self._append_trajectory_step(robot, next_location)
 
                 robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
@@ -391,10 +398,10 @@ class TestWorker:
         self.perf_metrics['explored_rate_history'] = explored_rate_history
         self.perf_metrics['overlap_ratio_history'] = overlap_ratio_history
     
-        # Save gif
+        # Save episode video.
         if self.save_image:
             pass
-            make_gif_test(gifs_path, self.global_step, self.env.frame_files, self.env.explored_rate, self.n_agents, self.fov, self.sensor_range)
+            make_video_test(gifs_path, self.global_step, self.env.frame_files, self.env.explored_rate, self.n_agents, self.fov, self.sensor_range)
 
     def smooth_heading_change(self, prev_heading, heading, steps=10):
         prev_heading = prev_heading % 360

@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '4_10_Dual_critic_estimation'
+FOLDER_NAME = '4_10_Dual_critic_estimation_metric'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -67,9 +67,13 @@ UPDATING_MAP_SIZE = 4 * SENSOR_RANGE + 4 * NODE_RESOLUTION
 
 # training parameters
 MAX_EPISODE_STEP = 128
-BUDGET_START = 128   # budget when success rate is 0 (easy)
-BUDGET_END = 96      # budget when success rate is 1 (hard)
-BUDGET_CURRICULUM_NOISE = 8   # ±uniform noise around the curriculum target budget
+BUDGET_TIMESTEP_METERS = 8.0
+BUDGET_START_TIMESTEPS = 128
+BUDGET_END_TIMESTEPS = 96
+BUDGET_CURRICULUM_NOISE_TIMESTEPS = 8
+BUDGET_START = BUDGET_START_TIMESTEPS * BUDGET_TIMESTEP_METERS   # budget when success rate is 0 (easy), in meters
+BUDGET_END = BUDGET_END_TIMESTEPS * BUDGET_TIMESTEP_METERS       # budget when success rate is 1 (hard), in meters
+BUDGET_CURRICULUM_NOISE = BUDGET_CURRICULUM_NOISE_TIMESTEPS * BUDGET_TIMESTEP_METERS   # ±uniform noise around the curriculum target budget, in meters
 BUDGET_CURRICULUM_EMA = 0.05  # EMA smoothing for success rate tracker
 BUDGET_CURRICULUM_UNIFORM_P = 0.15  # probability of ignoring curriculum and sampling uniformly (prevents forgetting)
 BUDGET = BUDGET_START
@@ -99,10 +103,10 @@ GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5
 GRAD_CLIP_Q = 1.5 # Max gradient norm for Q networks (typical: 1.0 ~ 10.0)
 
 # network parameters
-NODE_INPUT_DIM = 8  # Added hops_to_base/MAX_BUDGET per node
+NODE_INPUT_DIM = 8  # Added distance_to_base/MAX_BUDGET per node
 EMBEDDING_DIM = 128
-BUDGET_FEATURE_DIM = 4  # log_initial, log_remaining, remaining/initial, hops/remaining
-RETURN_SAFETY_MARGIN = 0  # extra action steps reserved before an agent must stop exploring and head home
+BUDGET_FEATURE_DIM = 4  # log_initial_m, log_remaining_m, remaining/initial, distance_to_base/remaining
+RETURN_SAFETY_MARGIN = 0.0  # extra meters reserved before an agent must stop exploring and head home
 SIMULATE_RETURN_TO_BASE = True  # Returning agents are simulated while teammates still explore; once all agents are returning, the episode stops.
 
 # Trajectory tracking parameters

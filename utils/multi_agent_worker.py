@@ -115,7 +115,16 @@ class MultiAgentWorker:
         return None, None
 
     def _sample_initial_budgets(self, curriculum_success_rate=0.0):
-        return np.full(self.n_agents, BUDGET_START, dtype=int)
+        success_rate = float(np.clip(curriculum_success_rate, 0.0, 1.0))
+        target_budget = BUDGET_END + (BUDGET_START - BUDGET_END) * (1.0 - success_rate)
+
+        if np.random.random() < BUDGET_CURRICULUM_UNIFORM_P:
+            sampled_budgets = np.random.uniform(BUDGET_END, BUDGET_START, size=self.n_agents)
+        else:
+            noise = np.random.uniform(-BUDGET_CURRICULUM_NOISE, BUDGET_CURRICULUM_NOISE, size=self.n_agents)
+            sampled_budgets = target_budget + noise
+
+        return np.clip(sampled_budgets, BUDGET_END, BUDGET_START).astype(float)
 
     def _set_agent_budget_context(self, robot):
         robot.set_budget_context(
@@ -183,8 +192,14 @@ class MultiAgentWorker:
         return all(np.allclose(robot.location, self.base_locations[robot.id]) for robot in self.robot_list)
 
     @staticmethod
-    def _should_force_return(hops_to_base, remaining_budget):
-        return hops_to_base + RETURN_SAFETY_MARGIN >= remaining_budget
+    def _should_force_return(distance_to_base, remaining_budget):
+        return distance_to_base + RETURN_SAFETY_MARGIN >= remaining_budget
+
+    @staticmethod
+    def _budget_to_decision_steps(budget_value):
+        if BUDGET_TIMESTEP_METERS <= 0:
+            return 0
+        return int(np.ceil(max(float(budget_value), 0.0) / BUDGET_TIMESTEP_METERS))
 
     def _episode_success(self, mission_failure):
         return bool(self.merged_objective_completed)
@@ -271,7 +286,7 @@ class MultiAgentWorker:
             self._set_agent_budget_context(robot)
 
         mission_failure = False
-        max_decision_steps = MAX_EPISODE_STEP + int(np.max(self.initial_budgets))
+        max_decision_steps = MAX_EPISODE_STEP + self._budget_to_decision_steps(np.max(self.initial_budgets))
 
         for i in range(max_decision_steps):
             selected_locations = [robot.location.copy() for robot in self.robot_list]
@@ -285,7 +300,7 @@ class MultiAgentWorker:
             for robot in self.robot_list:
                 self._set_agent_budget_context(robot)
                 robot_at_base = np.allclose(robot.location, self.base_locations[robot.id])
-                hops_to_base = robot.get_hops_to_base()
+                distance_to_base = robot.get_distance_to_base()
 
                 if self.returning_agents[robot.id]:
                     if robot_at_base:
@@ -303,7 +318,7 @@ class MultiAgentWorker:
 
                 if (
                     self._local_objective_completed(robot)
-                    or self._should_force_return(hops_to_base, self.remaining_budgets[robot.id])
+                    or self._should_force_return(distance_to_base, self.remaining_budgets[robot.id])
                 ):
                     self.returning_agents[robot.id] = True
                     self._close_agent_replay(robot, team_node_managers, next_phase_flag=current_phase_flag)
@@ -439,8 +454,9 @@ class MultiAgentWorker:
             previous_locations = [robot.location.copy() for robot in self.robot_list]
             for robot, next_location in zip(self.robot_list, selected_locations):
                 self.env.final_sim_step(next_location, robot.id)
-                if not np.allclose(previous_locations[robot.id], next_location):
-                    self.remaining_budgets[robot.id] -= 1
+                traveled_distance = float(np.linalg.norm(previous_locations[robot.id] - next_location))
+                if traveled_distance > 0.0:
+                    self.remaining_budgets[robot.id] -= traveled_distance
 
             reward_list = []
             # Collect robot headings for overlap reward calculation
@@ -542,7 +558,7 @@ class MultiAgentWorker:
                 robot = self.robot_list[robot_id]
                 robot_should_return = (
                     self._local_objective_completed(robot)
-                    or self._should_force_return(robot.get_hops_to_base(), self.remaining_budgets[robot_id])
+                    or self._should_force_return(robot.get_distance_to_base(), self.remaining_budgets[robot_id])
                 )
                 transition_done = mission_failure or robot_should_return
                 robot.save_reward(reward + team_reward)
@@ -576,9 +592,9 @@ class MultiAgentWorker:
         self.perf_metrics['explored_rate'] = self.env.explored_rate
         self.perf_metrics['success_rate'] = self._episode_success(mission_failure)
 
-        # save gif
+        # Save episode video.
         if self.save_image:
-            make_gif(gifs_path, self.global_step, self.env.frame_files, self.env.explored_rate)
+            make_video(gifs_path, self.global_step, self.env.frame_files, self.env.explored_rate)
 
     def smooth_heading_change(self, prev_heading, heading, steps=10):
         # Ensure both angles are in the range [0, 360)
@@ -1026,9 +1042,9 @@ class MultiAgentWorker:
                 color=c,
             )
 
-            # Budget loading bar (below each agent subplot)
-            initial_budget = max(int(self.initial_budgets[robot.id]), 1) if hasattr(self, 'initial_budgets') else max(BUDGET, 1)
-            remaining = int(max(self.remaining_budgets[robot.id], 0)) if hasattr(self, 'remaining_budgets') else BUDGET
+            # Budget loading bar (below each agent subplot), expressed in meters.
+            initial_budget = max(float(self.initial_budgets[robot.id]), 1.0) if hasattr(self, 'initial_budgets') else max(float(BUDGET), 1.0)
+            remaining = float(max(self.remaining_budgets[robot.id], 0.0)) if hasattr(self, 'remaining_budgets') else float(BUDGET)
             fraction_remaining = remaining / initial_budget
             if fraction_remaining > 0.5:
                 bar_color = '#2ecc71'   # green  — high budget
@@ -1046,7 +1062,7 @@ class MultiAgentWorker:
             agent_ax.add_patch(bar_fg)
             agent_ax.text(
                 0.5, 0.975,
-                f'{remaining}/{initial_budget} budget{" | return" if hasattr(self, "returning_agents") and self.returning_agents[robot.id] else ""}',
+                f'{remaining:.1f}/{initial_budget:.1f} m{" | return" if hasattr(self, "returning_agents") and self.returning_agents[robot.id] else ""}',
                 transform=agent_ax.transAxes,
                 fontsize=6.5, ha='center', va='center',
                 fontweight='bold', color='#1a1a1a',

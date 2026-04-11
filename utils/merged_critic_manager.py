@@ -395,14 +395,16 @@ class MergedBeliefCriticManager:
             (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin
         )
 
-        node_hops = np.zeros((n_node, 1), dtype=np.float32)
+        node_base_distances = np.zeros((n_node, 1), dtype=np.float32)
         if base_location is not None:
-            hop_dict = self.node_manager.hop_distances_from(base_location)
-            scale = max(float(MAX_BUDGET), 1.0)
-            for i, coords in enumerate(node_coords):
-                key = (coords[0], coords[1])
-                h = hop_dict.get(key, int(1e6))
-                node_hops[i, 0] = min(h / scale, 2.0) if h < int(1e6) else 2.0
+            base_key = (float(base_location[0]), float(base_location[1]))
+            if self.node_manager.nodes_dict.find(base_key) is not None:
+                dist_dict, _ = self.node_manager.Dijkstra(base_location)
+                scale = max(float(MAX_BUDGET), 1.0)
+                for i, coords in enumerate(node_coords):
+                    key = (coords[0], coords[1])
+                    distance = dist_dict.get(key, float('inf'))
+                    node_base_distances[i, 0] = min(distance / scale, 2.0) if np.isfinite(distance) else 2.0
 
         node_inputs = np.concatenate((
             all_node_coords,
@@ -411,7 +413,7 @@ class MergedBeliefCriticManager:
             node_occupancy,
             node_highest_utility_angles,
             node_team_visited,
-            node_hops,
+            node_base_distances,
             node_other_agents_explored,
         ), axis=1)
 

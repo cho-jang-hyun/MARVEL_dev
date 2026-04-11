@@ -26,7 +26,9 @@ NUM_TEST = 100
 USE_CONTINUOUS_SIM = True
 NUM_SIM_STEPS = 6
 MAX_EPISODE_STEP = 128
-BUDGET = MAX_EPISODE_STEP
+BUDGET_TIMESTEP_METERS = 8.0
+BUDGET_TIMESTEPS = MAX_EPISODE_STEP
+BUDGET = BUDGET_TIMESTEPS * BUDGET_TIMESTEP_METERS
 VELOCITY = 1
 YAW_RATE = 35 # in degrees
 
@@ -55,9 +57,9 @@ NUM_META_AGENT = 10
 INITIAL_EXPLORED_RATE = 0.90
 
 # Network parameters
-NODE_INPUT_DIM = 8  # Added hops_to_base/MAX_BUDGET per node
+NODE_INPUT_DIM = 8  # Added distance_to_base/MAX_BUDGET per node
 EMBEDDING_DIM = 128
-BUDGET_FEATURE_DIM = 4  # log_initial, log_remaining, remaining/initial, hops/remaining
+BUDGET_FEATURE_DIM = 4  # log_initial_m, log_remaining_m, remaining/initial, distance_to_base/remaining
 USE_TRAJECTORY = True  # Enable trajectory encoder
 
 # Trajectory tracking parameters (same as parameter.py)

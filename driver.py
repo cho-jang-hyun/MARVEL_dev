@@ -660,8 +660,8 @@ def main():
             if len(training_data) >= SUMMARY_WINDOW:
                 write_to_tensor_board(writer, training_data, curr_episode)
                 writer.add_scalar('Curriculum/success_rate_ema', curriculum_success_rate, curr_episode)
-                current_budget = BUDGET_END + int((BUDGET_START - BUDGET_END) * (1.0 - curriculum_success_rate))
-                writer.add_scalar('Curriculum/budget', current_budget, curr_episode)
+                current_budget = BUDGET_END + ((BUDGET_START - BUDGET_END) * (1.0 - curriculum_success_rate))
+                writer.add_scalar('Curriculum/budget_meters', current_budget, curr_episode)
                 training_data = []
                 perf_metrics = {}
                 for n in metric_name:

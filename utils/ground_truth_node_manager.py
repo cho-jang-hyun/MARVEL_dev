@@ -160,30 +160,20 @@ class GroundTruthNodeManager:
         node_utility = node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
         node_frontiers_distribution = node_frontiers_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
         node_highest_utility_angles = node_highest_utility_angles / 360
-        # Compute hops-to-base per node via BFS on the ground truth graph
-        node_hops = np.zeros((n_node, 1), dtype=np.float32)
+        # Compute shortest-path distance-to-base per node on the ground truth graph.
+        node_base_distances = np.zeros((n_node, 1), dtype=np.float32)
         if base_location is not None:
-            base_key = (base_location[0], base_location[1])
-            hop_dict = {base_key: 0}
-            queue = deque([base_key])
-            while queue:
-                u = queue.popleft()
-                node_entry = self.nodes_dict.find(u)
-                if node_entry is None:
-                    continue
-                for neighbor_coords in node_entry.data.neighbor_list:
-                    v = (neighbor_coords[0], neighbor_coords[1])
-                    if v not in hop_dict:
-                        hop_dict[v] = hop_dict[u] + 1
-                        queue.append(v)
-            scale = max(float(MAX_BUDGET), 1.0)
-            for i, coords in enumerate(all_node_coords):
-                key = (coords[0], coords[1])
-                h = hop_dict.get(key, int(1e6))
-                node_hops[i, 0] = min(h / scale, 2.0) if h < int(1e6) else 2.0
+            base_key = (float(base_location[0]), float(base_location[1]))
+            if self.nodes_dict.find(base_key) is not None:
+                dist_dict, _ = self.Dijkstra(base_location)
+                scale = max(float(MAX_BUDGET), 1.0)
+                for i, coords in enumerate(all_node_coords):
+                    key = (coords[0], coords[1])
+                    distance = dist_dict.get(key, float('inf'))
+                    node_base_distances[i, 0] = min(distance / scale, 2.0) if np.isfinite(distance) else 2.0
 
         # visited_by_others is already 0 or 1, no normalization needed
-        node_inputs = np.concatenate((node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_hops, node_explored_sign), axis=1)
+        node_inputs = np.concatenate((node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_base_distances, node_explored_sign), axis=1)
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
 
         assert node_coords.shape[0] < NODE_PADDING_SIZE, print(node_coords.shape[0], NODE_PADDING_SIZE)
