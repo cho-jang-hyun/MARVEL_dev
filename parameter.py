@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '4_10_Dual_critic_estimation_metric'
+FOLDER_NAME = '4_12_Dual_critic_estimation_metric_corrected'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -79,13 +79,13 @@ BUDGET_CURRICULUM_UNIFORM_P = 0.15  # probability of ignoring curriculum and sam
 BUDGET = BUDGET_START
 MIN_BUDGET = BUDGET_END
 MAX_BUDGET = BUDGET_START
-REPLAY_SIZE = 15000
-MINIMUM_BUFFER_SIZE = 10000
+REPLAY_SIZE = 10000
+MINIMUM_BUFFER_SIZE = 8000
 BATCH_SIZE = 256
 LR = 2e-5
 GAMMA = 0.99
 TAU = 0.003  # Soft update coefficient for target network (0.001 ~ 0.01)
-NUM_META_AGENT = 20
+NUM_META_AGENT = 26
 POST_PHASE_REPLAY_MIN_SAMPLES = 512
 POST_PHASE_BATCH_RATIO = 0.25
 
@@ -96,14 +96,14 @@ VISITED_BY_OTHERS_MIN = 0.05
 LOW_UTILITY_MOVE_THRESHOLD = 0.05
 REPEATED_LOW_UTILITY_PENALTY = 0.03
 TIME_PRESSURE_WEIGHT = 0.05  # per-step cost that scales linearly as budget depletes (0 at full budget, this value at zero budget)
-MERGED_SUCCESS_BONUS = 6.5  # one-time bonus when merged explored coverage reaches SUCCESS_THRESHOLD
+MERGED_SUCCESS_BONUS = 3.0  # one-time bonus when merged explored coverage reaches SUCCESS_THRESHOLD (reduced from 6.5 to limit TD target spikes and critic gradient instability)
 
 # Gradient clipping parameters
 GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5.0)
-GRAD_CLIP_Q = 1.5 # Max gradient norm for Q networks (typical: 1.0 ~ 10.0)
+GRAD_CLIP_Q = 20.0  # Max gradient norm for Q networks (raised from 1.5; was being clipped 100x causing near-random critic updates)
 
 # network parameters
-NODE_INPUT_DIM = 8  # Added distance_to_base/MAX_BUDGET per node
+NODE_INPUT_DIM = 9  # Local actor node features, including visited_self as the final scalar
 EMBEDDING_DIM = 128
 BUDGET_FEATURE_DIM = 4  # log_initial_m, log_remaining_m, remaining/initial, distance_to_base/remaining
 RETURN_SAFETY_MARGIN = 0.0  # extra meters reserved before an agent must stop exploring and head home

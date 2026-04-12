@@ -70,11 +70,50 @@ def safe_nanmean(values):
     return float(np.nanmean(values))
 
 
+class RewardNormalizer:
+    """Running reward normalization using Welford's online algorithm.
+
+    Normalizes rewards to zero-mean, unit-variance using an exponential
+    moving estimate of mean and variance.  This keeps Q-value magnitudes
+    bounded and prevents gradient explosion in the critic.
+    """
+
+    def __init__(self, momentum: float = 0.001, eps: float = 1e-6):
+        self.momentum = momentum
+        self.eps = eps
+        self.running_mean = 0.0
+        self.running_var = 1.0
+
+    def normalize(self, reward_tensor):
+        """Normalize a batch of rewards in-place on the same device."""
+        with torch.no_grad():
+            batch_mean = reward_tensor.mean().item()
+            batch_var = reward_tensor.var().item()
+            self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * batch_mean
+            self.running_var = (1 - self.momentum) * self.running_var + self.momentum * batch_var
+            std = max(self.running_var ** 0.5, self.eps)
+            return (reward_tensor - self.running_mean) / std
+
+    def state_dict(self):
+        return {'running_mean': self.running_mean, 'running_var': self.running_var}
+
+    def load_state_dict(self, state):
+        self.running_mean = state.get('running_mean', 0.0)
+        self.running_var = state.get('running_var', 1.0)
+
+
 def snapshot_module_state(module, target_device):
-    return {
-        key: value.detach().to(target_device).clone()
-        for key, value in module.state_dict().items()
-    }
+    """Snapshot model weights for distribution to Ray workers.
+
+    Uses .data to avoid autograd overhead and skips the redundant .clone()
+    when .to() already returns a new tensor (i.e. when crossing devices).
+    """
+    state = module.state_dict()
+    if target_device == next(module.parameters()).device:
+        # Same device: .to() is a no-op, so we must clone explicitly.
+        return {k: v.data.clone() for k, v in state.items()}
+    # Cross-device: .to() already allocates a new tensor; clone is wasteful.
+    return {k: v.data.to(target_device) for k, v in state.items()}
 
 
 def collect_rollouts(experience_buffer, sample_indices):
@@ -122,41 +161,52 @@ def sample_phase_stratified_indices(indices, phase_entries, batch_size):
     return sampled_indices
 
 
+def _stack_to(rollout_list, device, non_blocking=True):
+    """Stack a list of tensors on CPU, then transfer once to target device."""
+    stacked = torch.stack(rollout_list)
+    if stacked.device == device:
+        return stacked
+    return stacked.to(device, non_blocking=non_blocking)
+
+
 def prepare_training_batch(rollouts, device, effective_train_algo):
     batch = {}
-    batch['node_inputs'] = torch.stack(rollouts[0]).to(device)
-    batch['node_padding_mask'] = torch.stack(rollouts[1]).to(device)
-    batch['local_edge_mask'] = torch.stack(rollouts[2]).to(device)
-    batch['current_local_index'] = torch.stack(rollouts[3]).to(device)
-    batch['current_local_edge'] = torch.stack(rollouts[4]).to(device)
-    batch['local_edge_padding_mask'] = torch.stack(rollouts[5]).to(device)
-    batch['frontier_distribution'] = torch.stack(rollouts[6]).to(device)
-    batch['heading_visited'] = torch.stack(rollouts[7]).to(device)
-    batch['action'] = torch.stack(rollouts[8]).to(device)
-    batch['reward'] = torch.stack(rollouts[9]).to(device)
-    batch['done'] = torch.stack(rollouts[10]).to(device)
-    batch['next_node_inputs'] = torch.stack(rollouts[11]).to(device)
-    batch['next_node_padding_mask'] = torch.stack(rollouts[12]).to(device)
-    batch['next_local_edge_mask'] = torch.stack(rollouts[13]).to(device)
-    batch['next_current_local_index'] = torch.stack(rollouts[14]).to(device)
-    batch['next_current_local_edge'] = torch.stack(rollouts[15]).to(device)
-    batch['next_local_edge_padding_mask'] = torch.stack(rollouts[16]).to(device)
-    batch['next_frontier_distribution'] = torch.stack(rollouts[17]).to(device)
-    batch['next_heading_visited'] = torch.stack(rollouts[18]).to(device)
-    batch['neighbor_best_headings'] = torch.stack(rollouts[38]).to(device)
-    batch['next_neighbor_best_headings'] = torch.stack(rollouts[39]).to(device)
-    batch['budget_state'] = torch.stack(rollouts[48]).to(device)
-    batch['next_budget_state'] = torch.stack(rollouts[50]).to(device)
-    batch['detected_trajectories'] = torch.stack(rollouts[40]).to(device)
-    batch['trajectory_mask'] = torch.stack(rollouts[41]).to(device)
-    batch['trajectory_node_indices'] = torch.stack(rollouts[42]).to(device)
-    batch['next_detected_trajectories'] = torch.stack(rollouts[43]).to(device)
-    batch['next_trajectory_mask'] = torch.stack(rollouts[44]).to(device)
-    batch['next_trajectory_node_indices'] = torch.stack(rollouts[45]).to(device)
+
+    # Core actor observation (indices 0-7) — stack on CPU, single transfer
+    _s = _stack_to
+    batch['node_inputs'] = _s(rollouts[0], device)
+    batch['node_padding_mask'] = _s(rollouts[1], device)
+    batch['local_edge_mask'] = _s(rollouts[2], device)
+    batch['current_local_index'] = _s(rollouts[3], device)
+    batch['current_local_edge'] = _s(rollouts[4], device)
+    batch['local_edge_padding_mask'] = _s(rollouts[5], device)
+    batch['frontier_distribution'] = _s(rollouts[6], device)
+    batch['heading_visited'] = _s(rollouts[7], device)
+    batch['action'] = _s(rollouts[8], device)
+    batch['reward'] = _s(rollouts[9], device)
+    batch['done'] = _s(rollouts[10], device)
+    batch['next_node_inputs'] = _s(rollouts[11], device)
+    batch['next_node_padding_mask'] = _s(rollouts[12], device)
+    batch['next_local_edge_mask'] = _s(rollouts[13], device)
+    batch['next_current_local_index'] = _s(rollouts[14], device)
+    batch['next_current_local_edge'] = _s(rollouts[15], device)
+    batch['next_local_edge_padding_mask'] = _s(rollouts[16], device)
+    batch['next_frontier_distribution'] = _s(rollouts[17], device)
+    batch['next_heading_visited'] = _s(rollouts[18], device)
+    batch['neighbor_best_headings'] = _s(rollouts[38], device)
+    batch['next_neighbor_best_headings'] = _s(rollouts[39], device)
+    batch['budget_state'] = _s(rollouts[48], device)
+    batch['next_budget_state'] = _s(rollouts[50], device)
+    batch['detected_trajectories'] = _s(rollouts[40], device)
+    batch['trajectory_mask'] = _s(rollouts[41], device)
+    batch['trajectory_node_indices'] = _s(rollouts[42], device)
+    batch['next_detected_trajectories'] = _s(rollouts[43], device)
+    batch['next_trajectory_mask'] = _s(rollouts[44], device)
+    batch['next_trajectory_node_indices'] = _s(rollouts[45], device)
 
     if len(rollouts[52]) > 0:
-        batch['critic_phase_flag'] = torch.stack(rollouts[52]).to(device)
-        batch['next_critic_phase_flag'] = torch.stack(rollouts[53]).to(device)
+        batch['critic_phase_flag'] = _s(rollouts[52], device)
+        batch['next_critic_phase_flag'] = _s(rollouts[53], device)
     else:
         zero_phase = torch.zeros_like(batch['done'], dtype=torch.float32, device=device)
         batch['critic_phase_flag'] = zero_phase
@@ -185,33 +235,33 @@ def prepare_training_batch(rollouts, device, effective_train_algo):
     )
 
     if effective_train_algo in (2, 3, 4, 5):
-        batch['critic_node_inputs'] = torch.stack(rollouts[19]).to(device)
-        batch['critic_node_padding_mask'] = torch.stack(rollouts[20]).to(device)
-        batch['critic_edge_mask'] = torch.stack(rollouts[21]).to(device)
-        batch['critic_current_index'] = torch.stack(rollouts[22]).to(device)
-        batch['critic_current_edge'] = torch.stack(rollouts[23]).to(device)
-        batch['critic_edge_padding_mask'] = torch.stack(rollouts[24]).to(device)
-        batch['critic_frontier_distribution'] = torch.stack(rollouts[25]).to(device)
-        batch['critic_heading_visited'] = torch.stack(rollouts[26]).to(device)
-        batch['critic_next_node_inputs'] = torch.stack(rollouts[27]).to(device)
-        batch['critic_next_node_padding_mask'] = torch.stack(rollouts[28]).to(device)
-        batch['critic_next_edge_mask'] = torch.stack(rollouts[29]).to(device)
-        batch['critic_next_current_index'] = torch.stack(rollouts[30]).to(device)
-        batch['critic_next_current_edge'] = torch.stack(rollouts[31]).to(device)
-        batch['critic_next_edge_padding_mask'] = torch.stack(rollouts[32]).to(device)
-        batch['critic_next_frontier_distribution'] = torch.stack(rollouts[33]).to(device)
-        batch['critic_next_heading_visited'] = torch.stack(rollouts[34]).to(device)
+        batch['critic_node_inputs'] = _s(rollouts[19], device)
+        batch['critic_node_padding_mask'] = _s(rollouts[20], device)
+        batch['critic_edge_mask'] = _s(rollouts[21], device)
+        batch['critic_current_index'] = _s(rollouts[22], device)
+        batch['critic_current_edge'] = _s(rollouts[23], device)
+        batch['critic_edge_padding_mask'] = _s(rollouts[24], device)
+        batch['critic_frontier_distribution'] = _s(rollouts[25], device)
+        batch['critic_heading_visited'] = _s(rollouts[26], device)
+        batch['critic_next_node_inputs'] = _s(rollouts[27], device)
+        batch['critic_next_node_padding_mask'] = _s(rollouts[28], device)
+        batch['critic_next_edge_mask'] = _s(rollouts[29], device)
+        batch['critic_next_current_index'] = _s(rollouts[30], device)
+        batch['critic_next_current_edge'] = _s(rollouts[31], device)
+        batch['critic_next_edge_padding_mask'] = _s(rollouts[32], device)
+        batch['critic_next_frontier_distribution'] = _s(rollouts[33], device)
+        batch['critic_next_heading_visited'] = _s(rollouts[34], device)
 
     if effective_train_algo in (4, 5):
-        batch['critic_neighbor_best_headings'] = torch.stack(rollouts[46]).to(device)
-        batch['next_critic_neighbor_best_headings'] = torch.stack(rollouts[47]).to(device)
-        batch['critic_trajectory_node_indices'] = torch.stack(rollouts[49]).to(device)
-        batch['next_critic_trajectory_node_indices'] = torch.stack(rollouts[51]).to(device)
+        batch['critic_neighbor_best_headings'] = _s(rollouts[46], device)
+        batch['next_critic_neighbor_best_headings'] = _s(rollouts[47], device)
+        batch['critic_trajectory_node_indices'] = _s(rollouts[49], device)
+        batch['next_critic_trajectory_node_indices'] = _s(rollouts[51], device)
 
     if effective_train_algo in (1, 3, 5):
-        batch['all_agent_indices'] = torch.stack(rollouts[35]).to(device)
-        batch['all_agent_next_indices'] = torch.stack(rollouts[36]).to(device)
-        batch['next_all_agent_next_indices'] = torch.stack(rollouts[37]).to(device)
+        batch['all_agent_indices'] = _s(rollouts[35], device)
+        batch['all_agent_next_indices'] = _s(rollouts[36], device)
+        batch['next_all_agent_next_indices'] = _s(rollouts[37], device)
 
     if effective_train_algo == 0:
         batch['state'] = batch['observation']
@@ -390,7 +440,7 @@ def main():
     # target entropy for SAC (discrete action space) updated
     action_dim = K_SIZE * NUM_HEADING_CANDIDATES
     entropy_target = 0.5 * np.log(action_dim)
-    log_alpha_min = -8.0
+    log_alpha_min = -4.0   # raised from -8.0; alpha=e^-4≈0.018 maintains minimum exploration (was collapsing to e^-7≈0.0007)
     log_alpha_max = 2.0
 
     print(f"Training Configuration:")
@@ -417,6 +467,8 @@ def main():
     global_q_net1_optimizer = optim.Adam(global_q_net1.parameters(), lr=LR)
     global_q_net2_optimizer = optim.Adam(global_q_net2.parameters(), lr=LR)
     log_alpha_optimizer = optim.Adam([log_alpha], lr=1e-4)
+
+    reward_normalizer = RewardNormalizer(momentum=0.001)
 
     curr_episode = 0
     best_success_rate = -float('inf')  # Track best performance for saving best model
@@ -448,6 +500,8 @@ def main():
         curr_episode = checkpoint['episode']
         best_success_rate = checkpoint.get('best_success_rate', -float('inf'))
         curriculum_success_rate = checkpoint.get('curriculum_success_rate', 0.0)
+        if 'reward_normalizer' in checkpoint:
+            reward_normalizer.load_state_dict(checkpoint['reward_normalizer'])
 
     global_target_q_net1.load_state_dict(global_q_net1.state_dict())
     global_target_q_net2.load_state_dict(global_q_net2.state_dict())
@@ -485,7 +539,7 @@ def main():
         job_list.append(meta_agent.job.remote(weights_set, curr_episode, curriculum_success_rate))
 
     # initialize metric collector
-    metric_name = ['merged_travel_dist', 'travel_dist', 'success_rate', 'explored_rate']
+    metric_name = ['merged_travel_dist', 'travel_dist', 'success_rate', 'explored_rate', 'episode_reward']
     training_data = []
     current_success_rate = -float('inf')
     perf_metrics = {}
@@ -563,6 +617,10 @@ def main():
                                                                       norm_type=2)
                     global_policy_optimizer.step()
 
+                    # Normalize rewards to stabilize Q-value magnitudes and prevent gradient explosion
+                    raw_reward = critic_batch['reward']
+                    normalized_reward = reward_normalizer.normalize(raw_reward)
+
                     with torch.no_grad():
                         next_logp = dp_policy(*critic_batch['next_observation'], **critic_batch['next_policy_kwargs'])
                         next_q_values1 = dp_target_q_net1(*critic_batch['next_state'], **critic_batch['next_q_kwargs'])
@@ -571,7 +629,7 @@ def main():
                         value_prime = torch.sum(
                             next_logp.unsqueeze(2).exp() * (next_q_values - log_alpha.exp() * next_logp.unsqueeze(2)),
                             dim=1).unsqueeze(1)
-                        target_q_batch = critic_batch['reward'] + GAMMA * (1 - critic_batch['done']) * value_prime
+                        target_q_batch = normalized_reward + GAMMA * (1 - critic_batch['done']) * value_prime
 
                     mse_loss = nn.MSELoss()
 
@@ -647,7 +705,12 @@ def main():
                     critic_active_q_mean = float(selected_active_q.mean().item())
                     critic_head_gap = float((selected_q_post - selected_q_pre).abs().mean().item())
 
-                data = [critic_batch['reward'].mean().item(), value_prime.mean().item(), policy_loss.item(), q1_loss.item(),
+                # Use the actual rollout episode reward (from perf_metrics) instead of the
+                # replay-buffer batch mean, which is a lagging/biased indicator that masks
+                # real performance degradation.
+                rollout_reward = safe_nanmean(perf_metrics.get('episode_reward', []))
+
+                data = [rollout_reward, value_prime.mean().item(), policy_loss.item(), q1_loss.item(),
                         entropy.mean().item(), policy_grad_norm.item(), q_grad_norm.item(), log_alpha.item(),
                         alpha_loss.item(), traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio,
                         traj_embedding_norm, traj_attention_entropy, critic_phase_post_ratio,
@@ -690,6 +753,7 @@ def main():
                               "episode": curr_episode,
                               "best_success_rate": best_success_rate,
                               "curriculum_success_rate": curriculum_success_rate,
+                              "reward_normalizer": reward_normalizer.state_dict(),
                               }
 
                 # Save latest model (always)
@@ -723,7 +787,13 @@ def write_to_tensor_board(writer, tensorboard_data, curr_episode):
         safe_nanmean(tensorboard_data[:, column_idx])
         for column_idx in range(tensorboard_data.shape[1])
     ]
-    reward, value, policy_loss, q_value_loss, entropy, policy_grad_norm, q_value_grad_norm, log_alpha, alpha_loss, traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio, traj_embedding_norm, traj_attention_entropy, critic_phase_post_ratio, critic_next_phase_post_ratio, critic_pre_q_mean, critic_post_q_mean, critic_active_q_mean, critic_head_gap, merged_travel_dist, travel_dist, success_rate, explored_rate = tensorboard_data
+    (rollout_reward, value, policy_loss, q_value_loss, entropy, policy_grad_norm,
+     q_value_grad_norm, log_alpha, alpha_loss, traj_detected_agents,
+     traj_usable_agents, traj_valid_timestep_ratio, traj_embedding_norm,
+     traj_attention_entropy, critic_phase_post_ratio, critic_next_phase_post_ratio,
+     critic_pre_q_mean, critic_post_q_mean, critic_active_q_mean, critic_head_gap,
+     merged_travel_dist, travel_dist, success_rate, explored_rate,
+     episode_reward) = tensorboard_data
 
     writer.add_scalar(tag='Losses/Value', scalar_value=value, global_step=curr_episode)
     writer.add_scalar(tag='Losses/Policy Loss', scalar_value=policy_loss, global_step=curr_episode)
@@ -744,7 +814,8 @@ def write_to_tensor_board(writer, tensorboard_data, curr_episode):
     writer.add_scalar(tag='Critic/Selected Post Head Q Mean', scalar_value=critic_post_q_mean, global_step=curr_episode)
     writer.add_scalar(tag='Critic/Selected Active Head Q Mean', scalar_value=critic_active_q_mean, global_step=curr_episode)
     writer.add_scalar(tag='Critic/Selected Head Gap', scalar_value=critic_head_gap, global_step=curr_episode)
-    writer.add_scalar(tag='Perf/Reward', scalar_value=reward, global_step=curr_episode)
+    writer.add_scalar(tag='Perf/Reward', scalar_value=rollout_reward, global_step=curr_episode)
+    writer.add_scalar(tag='Perf/Episode Reward', scalar_value=episode_reward, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Merged Objective Travel Distance', scalar_value=merged_travel_dist, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Full Episode Travel Distance', scalar_value=travel_dist, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Travel Distance', scalar_value=travel_dist, global_step=curr_episode)

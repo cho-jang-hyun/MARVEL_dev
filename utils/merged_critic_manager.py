@@ -177,6 +177,21 @@ class MergedBeliefCriticManager:
             device=self.device,
         )
 
+    def _map_local_visited_self(self, local_observation, local_node_coords, num_critic_nodes):
+        visited_self = np.zeros((num_critic_nodes, 1), dtype=np.float32)
+        local_node_inputs = local_observation[0][0, :len(local_node_coords), :]
+        local_visited_self = local_node_inputs[:, -1].detach().cpu().numpy()
+        index_lookup = self.get_index_lookup()
+
+        for local_node_index, local_coords in enumerate(local_node_coords):
+            critic_node_index = self.get_node_index(local_coords, index_lookup=index_lookup)
+            visited_self[critic_node_index, 0] = max(
+                visited_self[critic_node_index, 0],
+                float(local_visited_self[local_node_index]),
+            )
+
+        return visited_self
+
     def _aggregate_team_visit_features(self, node_coords, team_node_managers):
         team_heading_visited = []
         team_visited_flag = []
@@ -395,6 +410,14 @@ class MergedBeliefCriticManager:
             (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin
         )
 
+        node_visited_self = np.zeros((n_node, 1), dtype=np.float32)
+        if local_observation is not None and local_node_coords is not None:
+            node_visited_self = self._map_local_visited_self(
+                local_observation,
+                local_node_coords,
+                n_node,
+            )
+
         node_base_distances = np.zeros((n_node, 1), dtype=np.float32)
         if base_location is not None:
             base_key = (float(base_location[0]), float(base_location[1]))
@@ -415,6 +438,7 @@ class MergedBeliefCriticManager:
             node_team_visited,
             node_base_distances,
             node_other_agents_explored,
+            node_visited_self,
         ), axis=1)
 
         node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)

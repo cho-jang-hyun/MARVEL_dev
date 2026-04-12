@@ -516,7 +516,8 @@ class MultiAgentWorker:
                 else:
                     self.low_utility_streaks[robot_id] = 0
 
-                # repeated_low_utility_penalty = REPEATED_LOW_UTILITY_PENALTY * max(self.low_utility_streaks[robot_id] - 1, 0)
+                # Penalise consecutive low-utility moves (streak length > 1 = oscillation pattern).
+                repeated_low_utility_penalty = REPEATED_LOW_UTILITY_PENALTY * max(self.low_utility_streaks[robot_id] - 1, 0)
 
                 # Scale the teammate-trail penalty by the decayed recency signal.
                 trajectory_history_penalty = 0.15 * float(np.clip(node.visited_by_others, 0.0, 1.0))
@@ -528,7 +529,8 @@ class MultiAgentWorker:
                     utility_reward
                     + merged_node_utility_reward
                     + trajectory_reward
-                    - trajectory_history_penalty)
+                    - trajectory_history_penalty
+                    - repeated_low_utility_penalty)
                 robot.save_action(torch.tensor([executed_action_index], device=self.device))
             for robot in self.robot_list:
                 robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
@@ -591,6 +593,15 @@ class MultiAgentWorker:
         )
         self.perf_metrics['explored_rate'] = self.env.explored_rate
         self.perf_metrics['success_rate'] = self._episode_success(mission_failure)
+
+        # Compute actual mean per-step reward from this episode's replay buffer
+        reward_entries = self.episode_buffer[9]  # list of reward tensors
+        if len(reward_entries) > 0:
+            self.perf_metrics['episode_reward'] = float(
+                torch.stack(reward_entries).mean().item()
+            )
+        else:
+            self.perf_metrics['episode_reward'] = 0.0
 
         # Save episode video.
         if self.save_image:

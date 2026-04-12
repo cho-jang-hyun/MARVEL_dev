@@ -33,6 +33,10 @@ class NodeManager:
         else:
             self.utility_range = utility_range
         self._dijkstra_cache = {}
+        # Guidepost hysteresis: remember last frontier target to avoid flip-flopping
+        # between equidistant clusters every step.
+        self._last_guidepost_target = None
+        self._GUIDEPOST_HYSTERESIS = 0.80  # new target must be ≥20% closer to switch
         self._astar_cache = {}
         self._bfs_cache = {}
 
@@ -95,6 +99,7 @@ class NodeManager:
         highest_utility_angle = []
         heading_visited = []
         visited_by_others = []
+        visited_self = []
 
         n_nodes = all_node_coords.shape[0]
         adjacent_matrix = np.ones((n_nodes, n_nodes)).astype(int)
@@ -105,6 +110,7 @@ class NodeManager:
             frontiers_distribution.append(node.frontiers_distribution)
             heading_visited.append(node.heading_visited)
             highest_utility_angle.append(node.highest_utility_angle)
+            visited_self.append(float(node.visited))
 
             # Decay visited_by_others over time but keep a small persistent memory once a teammate was seen.
             if node.visited_by_others > 0.0:
@@ -121,17 +127,34 @@ class NodeManager:
         highest_utility_angle = np.array(highest_utility_angle)
         heading_visited = np.array(heading_visited)
         visited_by_others = np.array(visited_by_others)
+        visited_self = np.array(visited_self)
 
         indices = np.argwhere(utility > 0).reshape(-1)
         utility_node_coords = all_node_coords[indices]
         dist_dict, prev_dict = self.Dijkstra(robot_location)
-        nearest_utility_coords = robot_location
-        nearest_dist = 1e8
+
+        # Hysteresis: keep the previous target unless a new one is meaningfully
+        # closer (by at least HYSTERESIS_FACTOR), preventing the guidepost from
+        # flip-flopping between equidistant frontier clusters each step.
+        prev_target = self._last_guidepost_target
+        if prev_target is not None:
+            prev_key = (prev_target[0], prev_target[1])
+            incumbent_dist = dist_dict.get(prev_key, 1e8)
+            if incumbent_dist >= 1e8 - 1:  # previous target no longer reachable/valid
+                prev_target = None
+                incumbent_dist = 1e8
+        else:
+            incumbent_dist = 1e8
+
+        nearest_utility_coords = prev_target if prev_target is not None else robot_location
+        switch_threshold = incumbent_dist * self._GUIDEPOST_HYSTERESIS
         for coords in utility_node_coords:
             dist = dist_dict[(coords[0], coords[1])]
-            if 0 < dist < nearest_dist:
-                nearest_dist = dist
+            if 0 < dist < switch_threshold:
+                switch_threshold = dist
                 nearest_utility_coords = coords
+
+        self._last_guidepost_target = nearest_utility_coords
 
         path_coords, dist = self.a_star(robot_location, nearest_utility_coords)
         guidepost = np.zeros_like(utility)
@@ -148,7 +171,7 @@ class NodeManager:
         occupancy = np.zeros((n_nodes, 1))
         occupancy[current_index] = -1  # Mark only current robot's position
 
-        return all_node_coords, utility, guidepost, occupancy, adjacent_matrix, current_index, neighbor_indices, highest_utility_angle, frontiers_distribution, heading_visited, visited_by_others, path_coords
+        return all_node_coords, utility, guidepost, occupancy, adjacent_matrix, current_index, neighbor_indices, highest_utility_angle, frontiers_distribution, heading_visited, visited_by_others, path_coords, visited_self
 
     def get_total_utility(self):
         total_utility = 0.0

@@ -18,7 +18,6 @@ Attributes:
     sensor_range (float): Maximum sensing range of the agent
     node_manager (NodeManager): Manages graph nodes 
 """
-import copy
 import time
 import torch
 import torch.nn.functional as F
@@ -69,7 +68,7 @@ class Agent:
         self.node_coords, self.utility, self.guidepost, self.occupancy = None, None, None, None
         self.current_index, self.adjacent_matrix, self.neighbor_indices = None, None, None
 
-        self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.visited_by_others = None, None, None, None
+        self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.visited_by_others, self.visited_self = None, None, None, None, None
         self.path_coords = None
 
         self.travel_dist = 0
@@ -190,7 +189,7 @@ class Agent:
                                        self.map_info)
 
     def update_planning_state(self):
-        self.node_coords, self.utility, self.guidepost, self.occupancy, self.adjacent_matrix, self.current_index, self.neighbor_indices, self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.visited_by_others, self.path_coords = \
+        self.node_coords, self.utility, self.guidepost, self.occupancy, self.adjacent_matrix, self.current_index, self.neighbor_indices, self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.visited_by_others, self.path_coords, self.visited_self = \
             self.node_manager.get_all_node_graph(self.location)
 
     def _refresh_observed_trajectory_buffer(self, robot_locations, trajectory_buffer):
@@ -358,25 +357,27 @@ class Agent:
 
     def get_observation(self, pad=True, robot_locations=None, trajectory_buffer=None):
         node_coords = self.node_coords
-        node_utility = self.utility.reshape(-1, 1)
+        n_node = node_coords.shape[0]
+        current_index = self.current_index
+
+        # Pre-compute normalization constants once
+        frontier_norm = 2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE
+        frontier_bin_norm = frontier_norm / self.num_angles_bin
+
+        # Build node features — use views where possible to avoid copies
+        node_utility = self.utility.reshape(-1, 1) / frontier_norm
         node_guidepost = self.guidepost.reshape(-1, 1)
         node_occupancy = self.occupancy.copy().reshape(-1, 1)
-        node_highest_utility_angles = self.highest_utility_angles.reshape(-1, 1)
-        node_frontier_distribution = self.frontier_distribution.reshape(-1, self.num_angles_bin)
+        node_highest_utility_angles = self.highest_utility_angles.reshape(-1, 1) / 360
+        node_frontier_distribution = self.frontier_distribution.reshape(-1, self.num_angles_bin) / frontier_bin_norm
         node_heading_visited = self.heading_visited.reshape(-1, self.num_angles_bin)
         node_visited_by_others = self.visited_by_others.copy().reshape(-1, 1)
-        current_index = self.current_index
-        edge_mask = self.adjacent_matrix
-        current_edge = self.neighbor_indices
-        n_node = node_coords.shape[0]
+        node_visited_self = self.visited_self.reshape(-1, 1)  # binary: 1 if this agent has visited the node
 
-        current_node_coords = node_coords[self.current_index]
-        all_node_coords = np.concatenate((node_coords[:, 0].reshape(-1, 1) - current_node_coords[0],
-                                             node_coords[:, 1].reshape(-1, 1) - current_node_coords[1]),
-                                           axis=-1) / UPDATING_MAP_SIZE / 2
-        node_utility = node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
-        node_highest_utility_angles = node_highest_utility_angles / 360
-        node_frontier_distribution = node_frontier_distribution / ((2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE) / self.num_angles_bin)
+        # Relative coordinates centred on current node
+        current_node_coords = node_coords[current_index]
+        scale = UPDATING_MAP_SIZE * 2
+        all_node_coords = (node_coords - current_node_coords) / scale
 
         # Process trajectory information if available
         detected_trajectories = None
@@ -395,7 +396,7 @@ class Agent:
 
             detected_trajectories, trajectory_mask, trajectory_node_indices = self._get_detected_trajectories()
 
-        # Shortest-path distances from base are shared by node budget features and budget state.
+        # Shortest-path distances from base — shared by node features and budget state
         base_dist_dict = None
         if self.base_location is not None:
             base_key = (float(self.base_location[0]), float(self.base_location[1]))
@@ -403,55 +404,59 @@ class Agent:
                 base_dist_dict, _ = self.node_manager.Dijkstra(self.base_location)
         node_base_distances = self._build_node_base_distances(n_node, base_dist_dict)
 
-        # visited_by_others is already 0 or 1, no normalization needed
-        node_inputs = np.concatenate((all_node_coords, node_utility, node_guidepost, node_occupancy, node_highest_utility_angles, node_visited_by_others, node_base_distances), axis=1)
-        node_inputs = torch.FloatTensor(node_inputs).unsqueeze(0).to(self.device)
-        all_node_frontier_distribution = torch.Tensor(node_frontier_distribution).unsqueeze(0).to(self.device)
-        node_heading_visited = torch.Tensor(node_heading_visited).unsqueeze(0).to(self.device)
+        # Concatenate node inputs on CPU, then single transfer to device
+        node_inputs_np = np.concatenate(
+            (all_node_coords, node_utility, node_guidepost, node_occupancy,
+             node_highest_utility_angles, node_visited_by_others, node_base_distances, node_visited_self),
+            axis=1,
+        )
+        node_inputs = torch.from_numpy(node_inputs_np).float().unsqueeze(0).to(self.device)
+        all_node_frontier_distribution = torch.from_numpy(node_frontier_distribution.copy()).float().unsqueeze(0).to(self.device)
+        node_heading_visited = torch.from_numpy(node_heading_visited.copy()).float().unsqueeze(0).to(self.device)
 
-        node_padding_mask = torch.zeros((1, 1, n_node), dtype=torch.int16).to(self.device)
-
+        # Build padding mask directly at target size to avoid cat
         if pad:
+            node_padding_mask = torch.zeros((1, 1, NODE_PADDING_SIZE), dtype=torch.int16, device=self.device)
+            node_padding_mask[0, 0, n_node:] = 1
+
             padding = torch.nn.ZeroPad2d((0, 0, 0, NODE_PADDING_SIZE - n_node))
             node_inputs = padding(node_inputs)
             all_node_frontier_distribution = padding(all_node_frontier_distribution)
             node_heading_visited = padding(node_heading_visited)
+        else:
+            node_padding_mask = torch.zeros((1, 1, n_node), dtype=torch.int16, device=self.device)
 
-            node_padding = torch.ones((1, 1, NODE_PADDING_SIZE - n_node), dtype=torch.int16).to(
-                self.device)
-            node_padding_mask = torch.cat((node_padding_mask, node_padding), dim=-1)
+        current_index_t = torch.tensor([[[current_index]]], device=self.device)
 
-        current_index = torch.tensor([current_index]).reshape(1, 1, 1).to(self.device)
-
-        edge_mask = torch.tensor(edge_mask).unsqueeze(0).to(self.device)
-
+        edge_mask = torch.as_tensor(self.adjacent_matrix, dtype=torch.float32).unsqueeze(0).to(self.device)
         if pad:
-            padding = torch.nn.ConstantPad2d(
-                (0, NODE_PADDING_SIZE - n_node, 0, NODE_PADDING_SIZE - n_node), 1)
-            edge_mask = padding(edge_mask)
+            pad_size = NODE_PADDING_SIZE - n_node
+            edge_mask = torch.nn.functional.pad(edge_mask, (0, pad_size, 0, pad_size), value=1)
 
-        current_in_edge = np.argwhere(current_edge == self.current_index)[0][0]
+        current_in_edge = np.argwhere(self.neighbor_indices == self.current_index)[0][0]
         budget_state = self._build_budget_features(base_dist_dict=base_dist_dict)
-        current_edge = torch.tensor(current_edge).unsqueeze(0)
-        k_size = current_edge.size()[-1]
+        current_edge = torch.tensor(self.neighbor_indices).unsqueeze(0)
+        k_size = current_edge.size(-1)
         if pad:
-            padding = torch.nn.ConstantPad1d((0, K_SIZE - k_size), 0)
-            current_edge = padding(current_edge)
+            current_edge = torch.nn.functional.pad(current_edge, (0, K_SIZE - k_size), value=0)
         current_edge = current_edge.unsqueeze(-1)
-     
+
         node_neighbor_best_headings, self.neighbor_best_indices = self.compute_best_heading(node_coords, node_frontier_distribution, current_edge)
 
-        edge_padding_mask = torch.zeros((1, 1, k_size), dtype=torch.int16).to(self.device)
-        edge_padding_mask[0, 0, current_in_edge] = 1
-
+        # Build edge padding mask directly at target size
         if pad:
-            padding = torch.nn.ConstantPad1d((0, K_SIZE - k_size), 1)
-            edge_padding_mask = padding(edge_padding_mask)
+            edge_padding_mask = torch.ones((1, 1, K_SIZE), dtype=torch.int16, device=self.device)
+            edge_padding_mask[0, 0, :k_size] = 0
+            edge_padding_mask[0, 0, current_in_edge] = 1
+        else:
+            edge_padding_mask = torch.zeros((1, 1, k_size), dtype=torch.int16, device=self.device)
+            edge_padding_mask[0, 0, current_in_edge] = 1
 
-        self.current_edge_tensor = current_edge.clone()
-        self.current_edge_padding_mask = edge_padding_mask.clone()
+        # Store references for later use (no clone needed — tensors are freshly created)
+        self.current_edge_tensor = current_edge
+        self.current_edge_padding_mask = edge_padding_mask
 
-        return [node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask,
+        return [node_inputs, node_padding_mask, edge_mask, current_index_t, current_edge, edge_padding_mask,
                 all_node_frontier_distribution, node_heading_visited, node_neighbor_best_headings,
                 budget_state,
                 detected_trajectories, trajectory_mask, trajectory_node_indices]
@@ -884,24 +889,27 @@ class Agent:
         self.episode_buffer[10] += torch.tensor([int(done)]).reshape(1, 1, 1).to(self.device)
 
     def save_next_observations(self, observation, next_node_index_list):
-        self.episode_buffer[11] = copy.deepcopy(self.episode_buffer[0])[1:]
-        self.episode_buffer[12] = copy.deepcopy(self.episode_buffer[1])[1:]
-        self.episode_buffer[13] = copy.deepcopy(self.episode_buffer[2])[1:]
-        self.episode_buffer[14] = copy.deepcopy(self.episode_buffer[3])[1:]
-        self.episode_buffer[15] = copy.deepcopy(self.episode_buffer[4])[1:]
-        self.episode_buffer[16] = copy.deepcopy(self.episode_buffer[5])[1:]
-        self.episode_buffer[17] = copy.deepcopy(self.episode_buffer[6])[1:]
-        self.episode_buffer[18] = copy.deepcopy(self.episode_buffer[7])[1:]
+        # Shift-by-one: next_obs[t] = obs[t+1].  List slicing is O(1) reference
+        # copies (no tensor data is duplicated), unlike deepcopy which clones
+        # every tensor's underlying storage.
+        self.episode_buffer[11] = self.episode_buffer[0][1:]
+        self.episode_buffer[12] = self.episode_buffer[1][1:]
+        self.episode_buffer[13] = self.episode_buffer[2][1:]
+        self.episode_buffer[14] = self.episode_buffer[3][1:]
+        self.episode_buffer[15] = self.episode_buffer[4][1:]
+        self.episode_buffer[16] = self.episode_buffer[5][1:]
+        self.episode_buffer[17] = self.episode_buffer[6][1:]
+        self.episode_buffer[18] = self.episode_buffer[7][1:]
 
         # Only process agent indices if they were saved (USE_COMMUNICATION=True)
         if len(self.episode_buffer[35]) > 0:
-            self.episode_buffer[36] = copy.deepcopy(self.episode_buffer[35])[1:]
+            self.episode_buffer[36] = self.episode_buffer[35][1:]
 
-        self.episode_buffer[39] = copy.deepcopy(self.episode_buffer[38])[1:]
-        self.episode_buffer[50] = copy.deepcopy(self.episode_buffer[48])[1:]
-        self.episode_buffer[43] = copy.deepcopy(self.episode_buffer[40])[1:]
-        self.episode_buffer[44] = copy.deepcopy(self.episode_buffer[41])[1:]
-        self.episode_buffer[45] = copy.deepcopy(self.episode_buffer[42])[1:]
+        self.episode_buffer[39] = self.episode_buffer[38][1:]
+        self.episode_buffer[50] = self.episode_buffer[48][1:]
+        self.episode_buffer[43] = self.episode_buffer[40][1:]
+        self.episode_buffer[44] = self.episode_buffer[41][1:]
+        self.episode_buffer[45] = self.episode_buffer[42][1:]
 
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings, budget_state, detected_trajectories, trajectory_mask, trajectory_node_indices = observation
         if detected_trajectories is None or trajectory_mask is None or trajectory_node_indices is None:
@@ -923,8 +931,8 @@ class Agent:
         # Only update agent indices buffers if they were initialized
         if len(self.episode_buffer[35]) > 0:
             self.episode_buffer[36] += torch.tensor(next_node_index_list).reshape(1, -1, 1).to(self.device)
-            self.episode_buffer[37] = copy.deepcopy(self.episode_buffer[36])[1:]
-            self.episode_buffer[37] += copy.deepcopy(self.episode_buffer[36])[-1:]
+            self.episode_buffer[37] = self.episode_buffer[36][1:]
+            self.episode_buffer[37] += self.episode_buffer[36][-1:]
 
     def save_ground_truth_observation(self, ground_truth_observation, critic_phase_flag=0.0):
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited = ground_truth_observation
@@ -953,15 +961,15 @@ class Agent:
         self.episode_buffer[52] += torch.tensor([float(critic_phase_flag)], dtype=torch.float32).reshape(1, 1, 1).to(self.device)
 
     def save_next_ground_truth_observations(self, ground_truth_observation, next_critic_phase_flag=0.0):
-        self.episode_buffer[27] = copy.deepcopy(self.episode_buffer[19])[1:]
-        self.episode_buffer[28] = copy.deepcopy(self.episode_buffer[20])[1:]
-        self.episode_buffer[29] = copy.deepcopy(self.episode_buffer[21])[1:]
-        self.episode_buffer[30] = copy.deepcopy(self.episode_buffer[22])[1:]
-        self.episode_buffer[31] = copy.deepcopy(self.episode_buffer[23])[1:]
-        self.episode_buffer[32] = copy.deepcopy(self.episode_buffer[24])[1:]
-        self.episode_buffer[33] = copy.deepcopy(self.episode_buffer[25])[1:]
-        self.episode_buffer[34] = copy.deepcopy(self.episode_buffer[26])[1:]
-        self.episode_buffer[53] = copy.deepcopy(self.episode_buffer[52])[1:]
+        self.episode_buffer[27] = self.episode_buffer[19][1:]
+        self.episode_buffer[28] = self.episode_buffer[20][1:]
+        self.episode_buffer[29] = self.episode_buffer[21][1:]
+        self.episode_buffer[30] = self.episode_buffer[22][1:]
+        self.episode_buffer[31] = self.episode_buffer[23][1:]
+        self.episode_buffer[32] = self.episode_buffer[24][1:]
+        self.episode_buffer[33] = self.episode_buffer[25][1:]
+        self.episode_buffer[34] = self.episode_buffer[26][1:]
+        self.episode_buffer[53] = self.episode_buffer[52][1:]
 
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited = ground_truth_observation
         self.episode_buffer[27] += node_inputs
@@ -975,17 +983,17 @@ class Agent:
         self.episode_buffer[53] += torch.tensor([float(next_critic_phase_flag)], dtype=torch.float32).reshape(1, 1, 1).to(self.device)
 
     def save_next_critic_observations(self, critic_observation, next_critic_phase_flag=0.0):
-        self.episode_buffer[27] = copy.deepcopy(self.episode_buffer[19])[1:]
-        self.episode_buffer[28] = copy.deepcopy(self.episode_buffer[20])[1:]
-        self.episode_buffer[29] = copy.deepcopy(self.episode_buffer[21])[1:]
-        self.episode_buffer[30] = copy.deepcopy(self.episode_buffer[22])[1:]
-        self.episode_buffer[31] = copy.deepcopy(self.episode_buffer[23])[1:]
-        self.episode_buffer[32] = copy.deepcopy(self.episode_buffer[24])[1:]
-        self.episode_buffer[33] = copy.deepcopy(self.episode_buffer[25])[1:]
-        self.episode_buffer[34] = copy.deepcopy(self.episode_buffer[26])[1:]
-        self.episode_buffer[47] = copy.deepcopy(self.episode_buffer[46])[1:]
-        self.episode_buffer[51] = copy.deepcopy(self.episode_buffer[49])[1:]
-        self.episode_buffer[53] = copy.deepcopy(self.episode_buffer[52])[1:]
+        self.episode_buffer[27] = self.episode_buffer[19][1:]
+        self.episode_buffer[28] = self.episode_buffer[20][1:]
+        self.episode_buffer[29] = self.episode_buffer[21][1:]
+        self.episode_buffer[30] = self.episode_buffer[22][1:]
+        self.episode_buffer[31] = self.episode_buffer[23][1:]
+        self.episode_buffer[32] = self.episode_buffer[24][1:]
+        self.episode_buffer[33] = self.episode_buffer[25][1:]
+        self.episode_buffer[34] = self.episode_buffer[26][1:]
+        self.episode_buffer[47] = self.episode_buffer[46][1:]
+        self.episode_buffer[51] = self.episode_buffer[49][1:]
+        self.episode_buffer[53] = self.episode_buffer[52][1:]
 
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, critic_neighbor_best_headings, critic_trajectory_node_indices = critic_observation
         self.episode_buffer[27] += node_inputs
