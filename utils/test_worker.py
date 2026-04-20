@@ -1,19 +1,16 @@
 import matplotlib.pyplot as plt
-from copy import deepcopy
 from matplotlib.patches import Wedge, FancyArrowPatch
-from shapely.geometry import Point, Polygon
 from skimage.draw import polygon as sk_polygon
+from skimage.morphology import label
 from collections import deque
+import time
 
-from utils.env_test import Env
+from utils.env import Env
 from utils.agent import Agent
 from utils.utils import *
 from utils.node_manager import NodeManager
-from utils.ground_truth_node_manager import GroundTruthNodeManager
-from utils.model import PolicyNet
 from utils.motion_model import compute_allowable_heading
-from utils.sensor import sensor_work_heading
-from test_parameter import *
+from utils.runtime_config import *
 
 if not os.path.exists(gifs_path):
     os.makedirs(gifs_path)
@@ -30,7 +27,8 @@ def load_compatible_state_dict(module, checkpoint_state, label):
     print(f'Loaded {label}: {len(compatible_state)} tensors, skipped {missing_or_mismatched}')
 
 class TestWorker:
-    def __init__(self, meta_agent_id, policy_net, global_step, n_agent, fov, sensor_range, utility_range, device='cpu', save_image=False, greedy=True):
+    def __init__(self, meta_agent_id, policy_net, global_step, n_agent, fov, sensor_range, utility_range,
+                 budget_timesteps=None, device='cpu', save_image=False, greedy=True):
         self.meta_agent_id = meta_agent_id
         self.global_step = global_step
         self.save_image = save_image
@@ -42,8 +40,14 @@ class TestWorker:
         self.n_agents = n_agent
         self.scaling = 0.04
 
-        self.env = Env(global_step, self.fov, self.n_agents, self.sensor_range, plot=self.save_image)
-        self.merged_node_manager = NodeManager(self.fov, self.sensor_range, utility_range, plot=self.save_image)
+        self.env = Env(
+            global_step,
+            self.fov,
+            self.sensor_range,
+            plot=self.save_image,
+            n_agents=self.n_agents,
+            test_set=TEST_SET,
+        )
 
         # Create independent node managers for each agent to ensure decentralized testing
         self.robot_list = []
@@ -70,46 +74,37 @@ class TestWorker:
                 0.0
             ))
         self.base_locations = self.env.robot_locations.copy()
-        self.initial_budgets = np.full(self.n_agents, BUDGET, dtype=float)
+        if budget_timesteps is None:
+            budget_meters = float(BUDGET)
+        else:
+            budget_meters = float(budget_timesteps) * float(BUDGET_TIMESTEP_METERS)
+        self.initial_budgets = np.full(self.n_agents, budget_meters, dtype=float)
         self.remaining_budgets = self.initial_budgets.copy()
         self.returning_agents = np.zeros(self.n_agents, dtype=bool)
         self.merged_objective_completed = False
         self.merged_completion_travel_dist = None
-        self.merged_total_utility = np.inf
-
-        # Initialize individual observation maps for each agent (for visualization)
-        # Each agent tracks what ONLY they have observed
+        self.merged_total_utility = np.nan
+        self.total_free_cells = int(np.count_nonzero(self.env.ground_truth == FREE))
+        self._sensing_mask_shape = self.env.ground_truth.shape
+        self._sensor_range_cells = float(self.sensor_range / CELL_SIZE)
+        self._sector_offsets_cache = {}
         self.individual_maps = {}
-        for i in range(self.n_agents):
-            # Start with unknown map (127)
-            self.individual_maps[i] = np.ones(self.env.ground_truth_size) * UNKNOWN
-            # Initialize with starting observation
-            robot_cell = get_cell_position_from_coords(self.env.robot_locations[i], self.env.belief_info)
-            self.individual_maps[i] = sensor_work_heading(
-                robot_cell, self.sensor_range / CELL_SIZE, self.individual_maps[i],
-                self.env.ground_truth, self.env.angles[i], self.fov
-            )
+        if self.save_image:
+            for i in range(self.n_agents):
+                self.individual_maps[i] = self.env.get_agent_map_info(i).map.copy()
 
     def _update_merged_graph(self):
-        frontiers = get_frontier_in_map(self.env.belief_info)
-        for robot_location in self.env.robot_locations:
-            self.merged_node_manager.update_graph(
-                robot_location,
-                frontiers,
-                self.env.belief_info,
-                self.env.belief_info,
-                skip_far_existing_updates=True,
-                refresh_all_neighbors=False,
-            )
+        # Test-time evaluation keeps merged map visualization from env beliefs only.
+        # Merged-node graph maintenance is intentionally skipped.
+        self.merged_total_utility = np.nan
 
     def _get_max_travel_dist(self):
         return max((robot.travel_dist for robot in self.robot_list), default=0.0)
 
     def _update_objective_state(self):
-        self.merged_total_utility = float(self.merged_node_manager.get_total_utility())
         merged_completed_this_step = (
             not self.merged_objective_completed
-            and self.env.explored_rate > SUCCESS_THRESHOLD
+            and self.env.explored_rate >= SUCCESS_THRESHOLD
         )
         if merged_completed_this_step:
             self.merged_objective_completed = True
@@ -117,12 +112,11 @@ class TestWorker:
         return merged_completed_this_step
 
     def _local_objective_completed(self, robot):
-        total_free = np.sum(self.env.ground_truth == FREE)
-        if total_free <= 0:
+        if self.total_free_cells <= 0:
             return False
-        agent_map = self.env.get_agent_map_info(robot.id).map
-        agent_explored_rate = np.sum(agent_map == FREE) / total_free
-        return bool(agent_explored_rate > SUCCESS_THRESHOLD)
+        agent_map = self.env.agent_beliefs[robot.id]
+        agent_explored_rate = np.count_nonzero(agent_map == FREE) / self.total_free_cells
+        return bool(agent_explored_rate >= SUCCESS_THRESHOLD)
 
     def _set_agent_budget_context(self, robot):
         robot.set_budget_context(
@@ -135,6 +129,51 @@ class TestWorker:
     def _get_return_path(self, robot):
         self._set_agent_budget_context(robot)
         return robot.get_path_to_base()
+
+    @staticmethod
+    def _location_key(location):
+        return float(location[0]), float(location[1])
+
+    def _get_collision_free_candidate(self, robot, occupied_keys):
+        for _, _, candidate_location, candidate_heading_index in robot.current_waypoint_candidates:
+            candidate_key = self._location_key(candidate_location)
+            if candidate_key in occupied_keys:
+                continue
+            return candidate_location.copy(), candidate_heading_index
+
+        return None, None
+
+    def _has_feasible_exploration_action(self, robot, observation):
+        current_edge = observation[4][0, :, 0].detach().cpu().numpy()
+        edge_padding = observation[5][0, 0].detach().cpu().numpy()
+        valid_slots = np.where(edge_padding == 0)[0]
+        for slot in valid_slots:
+            if int(current_edge[slot]) == int(robot.current_index):
+                continue
+            return True
+        return False
+
+    def _get_sector_offsets(self, heading):
+        heading_key = float(heading % 360)
+        cached_offsets = self._sector_offsets_cache.get(heading_key)
+        if cached_offsets is not None:
+            return cached_offsets
+
+        start_angle = (heading_key - self.fov / 2 + 360) % 360
+        end_angle = (heading_key + self.fov / 2) % 360
+        if start_angle <= end_angle:
+            angle_range = np.linspace(start_angle, end_angle, 20)
+        else:
+            angle_range = np.concatenate([
+                np.linspace(start_angle, 360, 10),
+                np.linspace(0, end_angle, 10),
+            ])
+
+        angle_radians = np.radians(angle_range)
+        x_offsets = self._sensor_range_cells * np.cos(angle_radians)
+        y_offsets = self._sensor_range_cells * np.sin(angle_radians)
+        self._sector_offsets_cache[heading_key] = (x_offsets, y_offsets)
+        return x_offsets, y_offsets
 
     def _get_heading_index_towards(self, robot, next_location):
         next_location = np.asarray(next_location, dtype=float)
@@ -175,210 +214,226 @@ class TestWorker:
         return int(np.ceil(max(float(budget_value), 0.0) / BUDGET_TIMESTEP_METERS))
 
     def run_episode(self):
-        done = False
         for robot in self.robot_list:
-            robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
+            robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
         for robot in self.robot_list:
             robot.update_planning_state()
             self._set_agent_budget_context(robot)
         self._update_merged_graph()
         self._update_objective_state()
-        
-        reach_checkpoint = False
 
-        max_travel_dist = 0
-        trajectory_length = 0
+        merged_reached_0_90 = False
+        merged_reached_0_99 = False
+        merged_dist_to_0_90 = np.nan
+        merged_dist_to_0_99 = np.nan
 
-        length_history = [max_travel_dist]
+        individual_reached_0_90 = np.zeros(self.n_agents, dtype=bool)
+        individual_reached_0_99 = np.zeros(self.n_agents, dtype=bool)
+        individual_dist_to_0_90 = np.full(self.n_agents, np.nan, dtype=float)
+        individual_dist_to_0_99 = np.full(self.n_agents, np.nan, dtype=float)
+
+        compute_time_history = []
+        mission_failure = False
+        max_decision_steps = MAX_EPISODE_STEP + self._budget_to_decision_steps(np.max(self.initial_budgets))
+
+        length_history = [self._get_max_travel_dist()]
         explored_rate_history = [self.env.explored_rate]
         overlap_rate = self.compute_overlap_rate(self.env.robot_locations, self.env.angles)
         overlap_ratio_history = [overlap_rate]
 
-        setpoints = [[] for _ in range(self.n_agents)]
-        headings = [[] for _ in range(self.n_agents)]
-        mission_failure = False
-
-        for i in range(MAX_EPISODE_STEP + self._budget_to_decision_steps(np.max(self.initial_budgets))):
-            # print(' Current timestep: {}/{}'.format(i, MAX_EPISODE_STEP))
+        for i in range(max_decision_steps):
+            step_start_time = time.time()
             selected_locations = [robot.location.copy() for robot in self.robot_list]
             dist_list = [0.0 for _ in range(self.n_agents)]
-            next_node_index_list = [robot.current_index for robot in self.robot_list]
             next_heading_index_list = [self._get_heading_index_towards(robot, robot.location) for robot in self.robot_list]
+            observations = {}
+            active_explorer_ids = []
+
             for robot in self.robot_list:
                 self._set_agent_budget_context(robot)
                 robot_at_base = np.allclose(robot.location, self.base_locations[robot.id])
-                if self.returning_agents[robot.id] and robot_at_base:
-                    continue
-
-                if (not self.returning_agents[robot.id]) and (
-                    self._local_objective_completed(robot)
-                    or self._should_force_return(robot.get_distance_to_base(), self.remaining_budgets[robot.id])
-                ):
-                    self.returning_agents[robot.id] = True
+                distance_to_base = robot.get_distance_to_base()
 
                 if self.returning_agents[robot.id]:
-                    if np.all(self.returning_agents):
+                    if robot_at_base:
                         continue
                     return_path = self._get_return_path(robot)
                     if len(return_path) == 0:
                         if not robot_at_base:
                             mission_failure = True
-                        next_location = robot.location.copy()
+                        selected_locations[robot.id] = robot.location.copy()
                     else:
-                        next_location = return_path[0].copy()
-                    next_heading_index = self._get_heading_index_towards(robot, next_location)
-                    next_node_index = robot.current_index
-                else:
-                    observation = robot.get_observation(
-                        pad=False,
-                        robot_locations=self.env.robot_locations,
-                        trajectory_buffer=self.trajectory_buffer
-                    )
+                        selected_locations[robot.id] = return_path[0].copy()
+                    dist_list[robot.id] = np.linalg.norm(selected_locations[robot.id] - robot.location)
+                    next_heading_index_list[robot.id] = self._get_heading_index_towards(robot, selected_locations[robot.id])
+                    continue
 
-                    current_edge = observation[4][0, :, 0].detach().cpu().numpy()
-                    edge_padding = observation[5][0, 0].detach().cpu().numpy()
-                    feasible_slots = []
-                    for slot in range(current_edge.shape[0]):
-                        if edge_padding[slot] != 0:
-                            continue
-                        if int(current_edge[slot]) == int(robot.current_index):
-                            continue
-                        feasible_slots.append(slot)
-
-                    if len(feasible_slots) == 0:
-                        self.returning_agents[robot.id] = True
-                        return_path = self._get_return_path(robot)
-                        if len(return_path) == 0:
-                            if not robot_at_base:
-                                mission_failure = True
-                            next_location = robot.location.copy()
-                        else:
-                            next_location = return_path[0].copy()
-                        next_heading_index = self._get_heading_index_towards(robot, next_location)
-                        next_node_index = robot.current_index
+                if (
+                    self._local_objective_completed(robot)
+                    or self._should_force_return(distance_to_base, self.remaining_budgets[robot.id])
+                ):
+                    self.returning_agents[robot.id] = True
+                    return_path = self._get_return_path(robot)
+                    if len(return_path) == 0:
+                        if not robot_at_base:
+                            mission_failure = True
+                        selected_locations[robot.id] = robot.location.copy()
                     else:
-                        next_location, next_node_index, _, next_heading_index = robot.select_next_waypoint(observation, greedy=self.greedy)
+                        selected_locations[robot.id] = return_path[0].copy()
+                    dist_list[robot.id] = np.linalg.norm(selected_locations[robot.id] - robot.location)
+                    next_heading_index_list[robot.id] = self._get_heading_index_towards(robot, selected_locations[robot.id])
+                    continue
 
-                selected_locations[robot.id] = next_location
-                dist_list[robot.id] = np.linalg.norm(next_location - robot.location)
-                next_node_index_list[robot.id] = next_node_index
-                next_heading_index_list[robot.id] = next_heading_index
+                observation = robot.get_observation(
+                    robot_locations=self.env.robot_locations,
+                    trajectory_buffer=self.trajectory_buffer
+                )
+
+                if not self._has_feasible_exploration_action(robot, observation):
+                    self.returning_agents[robot.id] = True
+                    return_path = self._get_return_path(robot)
+                    if len(return_path) == 0:
+                        if not robot_at_base:
+                            mission_failure = True
+                        selected_locations[robot.id] = robot.location.copy()
+                    else:
+                        selected_locations[robot.id] = return_path[0].copy()
+                    dist_list[robot.id] = np.linalg.norm(selected_locations[robot.id] - robot.location)
+                    next_heading_index_list[robot.id] = self._get_heading_index_towards(robot, selected_locations[robot.id])
+                    continue
+
+                observations[robot.id] = observation
+                active_explorer_ids.append(robot.id)
 
             if mission_failure:
                 break
 
-            if np.all(self.returning_agents):
-                done = True
+            if len(active_explorer_ids) == 0 and np.all(self.returning_agents):
                 break
 
-            selected_locations = np.array(selected_locations).reshape(-1, 2)
-            arriving_sequence = np.argsort(np.array(dist_list))
-            selected_locations_in_arriving_sequence = np.array(selected_locations)[arriving_sequence]
+            for robot_id in active_explorer_ids:
+                robot = self.robot_list[robot_id]
+                observation = observations[robot_id]
+                next_location, _, _, next_heading_index = robot.select_next_waypoint(observation, greedy=self.greedy)
+                selected_locations[robot_id] = next_location.copy()
+                dist_list[robot_id] = np.linalg.norm(next_location - robot.location)
+                next_heading_index_list[robot_id] = next_heading_index
 
-  
+            selected_locations = np.asarray(selected_locations).reshape(-1, 2)
+            arriving_sequence = np.argsort(np.asarray(dist_list))
+            selected_locations_in_arriving_sequence = selected_locations[arriving_sequence].copy()
+            active_explorer_set = set(active_explorer_ids)
+            resolved_location_keys = set()
+
             for j, selected_location in enumerate(selected_locations_in_arriving_sequence):
-                solved_locations = selected_locations_in_arriving_sequence[:j]
-                while selected_location[0] + selected_location[1] * 1j in solved_locations[:, 0] + solved_locations[:, 1] * 1j:
-                    id = arriving_sequence[j]
-                    if self.returning_agents[id]:
-                        selected_location = self.robot_list[id].location.copy()
+                selected_key = self._location_key(selected_location)
+                if selected_key in resolved_location_keys:
+                    robot_id = arriving_sequence[j]
+                    if robot_id in active_explorer_set:
+                        replacement_location, replacement_heading_index = self._get_collision_free_candidate(
+                            self.robot_list[robot_id],
+                            resolved_location_keys,
+                        )
+                        if replacement_location is None:
+                            replacement_location = self.robot_list[robot_id].location.copy()
+                            replacement_heading_index = self._get_heading_index_towards(self.robot_list[robot_id], replacement_location)
                     else:
-                        nearby_nodes = self.robot_list[id].node_manager.nodes_dict.nearest_neighbors(
-                            selected_location.tolist(), 25)
-                        for node in nearby_nodes:
-                            coords = node.data.coords
-                            if coords[0] + coords[1] * 1j in solved_locations[:, 0] + solved_locations[:, 1] * 1j:
-                                continue
-                            selected_location = coords
-                            break
+                        replacement_location = self.robot_list[robot_id].location.copy()
+                        replacement_heading_index = self._get_heading_index_towards(self.robot_list[robot_id], replacement_location)
 
+                    selected_location = replacement_location
+                    selected_key = self._location_key(selected_location)
+                    next_heading_index_list[robot_id] = replacement_heading_index
                     selected_locations_in_arriving_sequence[j] = selected_location
-                    selected_locations[id] = selected_location
+                    selected_locations[robot_id] = selected_location
+                resolved_location_keys.add(selected_key)
 
-            for p, location in enumerate(selected_locations):
-                setpoints[p].append(location*self.scaling)
-
-            # Compute simulation data
             robot_locations_sim = []
             robot_headings_sim = []
             all_robots_heading_list = []
-            for k, (robot, next_location, next_heading_index) in enumerate(zip(self.robot_list, selected_locations, next_heading_index_list)):
+            for robot, next_location, next_heading_index in zip(self.robot_list, selected_locations, next_heading_index_list):
                 robot_current_cell = get_cell_position_from_coords(robot.location, self.env.belief_info)
                 robot_cell = get_cell_position_from_coords(next_location, self.env.belief_info)
 
-                next_heading = next_heading_index*(360/NUM_ANGLES_BIN)
-                final_heading = compute_allowable_heading(robot.location, next_location, robot.heading, next_heading, robot.velocity, robot.yaw_rate)
+                next_heading = next_heading_index * (360 / NUM_ANGLES_BIN)
+                final_heading = compute_allowable_heading(
+                    robot.location, next_location, robot.heading, next_heading, robot.velocity, robot.yaw_rate
+                )
 
-                intermediate_cells = np.linspace(robot_current_cell, robot_cell, self.sim_steps+1)[1:] 
-
+                intermediate_cells = np.linspace(robot_current_cell, robot_cell, self.sim_steps + 1)[1:]
                 intermediate_cells = np.round(intermediate_cells).astype(int)
                 intermediate_headings = self.smooth_heading_change(robot.heading, final_heading, steps=self.sim_steps)
 
                 robot_locations_sim.append(intermediate_cells)
                 robot_headings_sim.append(intermediate_headings)
                 all_robots_heading_list.append(final_heading)
-                corrected_heading = self.correct_heading(final_heading)
-                headings[k].append(corrected_heading)
-
                 robot.update_heading(final_heading)
 
             for l in range(self.sim_steps):
                 robot_location_sim_step = []
                 robot_heading_sim_step = []
                 for q in range(self.n_agents):
-                    self.env.update_robot_belief(robot_locations_sim[q][l], robot_headings_sim[q][l])
-                    # Update individual agent's observation map
-                    self.individual_maps[q] = sensor_work_heading(
-                        robot_locations_sim[q][l], self.sensor_range / CELL_SIZE,
-                        self.individual_maps[q], self.env.ground_truth,
-                        robot_headings_sim[q][l], self.fov
-                    )
+                    self.env.update_robot_belief(q, robot_locations_sim[q][l], robot_headings_sim[q][l])
+                    if self.save_image:
+                        self.individual_maps[q] = self.env.get_agent_map_info(q).map.copy()
                     robot_location_sim_step.append(robot_locations_sim[q][l])
                     robot_heading_sim_step.append(robot_headings_sim[q][l])
 
                 if self.save_image:
                     num_frame = i * self.sim_steps + l
-                    # Plot both the original view and individual agent views
                     self.plot_local_env_sim(num_frame, robot_location_sim_step, robot_heading_sim_step)
-                    # Also create individual agent views to show decentralized learning
-                    if num_frame % 5 == 0:  # Save individual views every 5 frames to avoid too many files
+                    if num_frame % 5 == 0:
                         self.plot_individual_agent_views(num_frame, robot_location_sim_step, robot_heading_sim_step)
 
-            for robot, next_location, next_node_index in zip(self.robot_list, selected_locations, next_node_index_list):
+            previous_locations = [robot.location.copy() for robot in self.robot_list]
+            for robot, next_location in zip(self.robot_list, selected_locations):
                 self.env.final_sim_step(next_location, robot.id)
-                traveled_distance = float(np.linalg.norm(next_location - robot.location))
+                traveled_distance = float(np.linalg.norm(previous_locations[robot.id] - next_location))
                 if traveled_distance > 0.0:
                     self.remaining_budgets[robot.id] -= traveled_distance
                 self._append_trajectory_step(robot, next_location)
 
-                robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
-                robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
-
-            overlap_rate = self.compute_overlap_rate(selected_locations, all_robots_heading_list)
-
             for robot in self.robot_list:
+                robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
+            for robot in self.robot_list:
+                robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
                 robot.update_planning_state()
                 self._set_agent_budget_context(robot)
+                
+            compute_time_history.append(time.time() - step_start_time)
+
             self._update_merged_graph()
             merged_completed_this_step = self._update_objective_state()
+            overlap_rate = self.compute_overlap_rate(selected_locations, all_robots_heading_list)
 
-            max_travel_dist += np.max(dist_list)
+            max_travel_dist = self._get_max_travel_dist()
             length_history.append(max_travel_dist)
             explored_rate_history.append(self.env.explored_rate)
             overlap_ratio_history.append(overlap_rate)
-            if self.env.explored_rate > INITIAL_EXPLORED_RATE and not reach_checkpoint:
-                trajectory_length = max([robot.travel_dist for robot in self.robot_list])
-                reach_checkpoint = True
+            if (self.env.explored_rate >= 0.90) and (not merged_reached_0_90):
+                merged_dist_to_0_90 = max_travel_dist
+                merged_reached_0_90 = True
+            if (self.env.explored_rate >= 0.99) and (not merged_reached_0_99):
+                merged_dist_to_0_99 = max_travel_dist
+                merged_reached_0_99 = True
+
+            individual_explored_rates = self._get_agent_explored_rates()
+            for agent_id, agent_rate in enumerate(individual_explored_rates):
+                if (agent_rate >= 0.90) and (not individual_reached_0_90[agent_id]):
+                    individual_dist_to_0_90[agent_id] = self.robot_list[agent_id].travel_dist
+                    individual_reached_0_90[agent_id] = True
+                if (agent_rate >= 0.99) and (not individual_reached_0_99[agent_id]):
+                    individual_dist_to_0_99[agent_id] = self.robot_list[agent_id].travel_dist
+                    individual_reached_0_99[agent_id] = True
 
             if merged_completed_this_step:
                 self.merged_completion_travel_dist = self._get_max_travel_dist()
             if np.any(self.remaining_budgets < 0):
                 mission_failure = True
 
+            if mission_failure:
+                break
             if np.all(self.returning_agents):
-                done = True
-
-            if mission_failure or done:
                 break
 
         # Save metrics
@@ -390,10 +445,22 @@ class TestWorker:
         )
         self.perf_metrics['explored_rate'] = self.env.explored_rate
         self.perf_metrics['success_rate'] = bool(self.merged_objective_completed)
-        if trajectory_length > 0:
-            self.perf_metrics['dist_to_0_90'] = trajectory_length
+        self.perf_metrics['dist_to_0_90'] = merged_dist_to_0_90
+        self.perf_metrics['dist_to_0_99'] = merged_dist_to_0_99
+        final_individual_rates = np.asarray(self._get_agent_explored_rates(), dtype=float)
+        self.perf_metrics['individual_explored_rates'] = final_individual_rates.tolist()
+        self.perf_metrics['individual_explored_rate_mean'] = float(np.mean(final_individual_rates))
+        self.perf_metrics['individual_explored_rate_std'] = float(np.std(final_individual_rates))
+        self.perf_metrics['individual_dist_to_0_90'] = individual_dist_to_0_90.tolist()
+        self.perf_metrics['individual_dist_to_0_99'] = individual_dist_to_0_99.tolist()
+        self.perf_metrics['compute_time_history'] = compute_time_history
+        if len(compute_time_history) > 0:
+            compute_time_array = np.asarray(compute_time_history, dtype=float)
+            self.perf_metrics['compute_time_mean'] = float(np.mean(compute_time_array))
+            self.perf_metrics['compute_time_std'] = float(np.std(compute_time_array))
         else:
-            self.perf_metrics['dist_to_0_90'] = []
+            self.perf_metrics['compute_time_mean'] = np.nan
+            self.perf_metrics['compute_time_std'] = np.nan
         self.perf_metrics['length_history'] = length_history
         self.perf_metrics['explored_rate_history'] = explored_rate_history
         self.perf_metrics['overlap_ratio_history'] = overlap_ratio_history
@@ -426,55 +493,52 @@ class TestWorker:
         heading_rad = np.radians(heading)
         return np.cos(heading_rad) * length, np.sin(heading_rad) * length
     
-    def create_sensing_mask(self, location, heading):
-        mask = np.zeros_like(self.env.ground_truth)
-
+    def create_sensing_mask(self, location, heading, labeled_free=None):
+        mask = np.zeros(self._sensing_mask_shape, dtype=np.uint8)
         location_cell = get_cell_position_from_coords(location, self.env.belief_info)
-        robot_point = Point(location_cell)
+        x_offsets, y_offsets = self._get_sector_offsets(heading)
+        x_coords = np.rint(np.concatenate(([location_cell[0]], location_cell[0] + x_offsets, [location_cell[0]]))).astype(int)
+        y_coords = np.rint(np.concatenate(([location_cell[1]], location_cell[1] + y_offsets, [location_cell[1]]))).astype(int)
+        rr, cc = sk_polygon(y_coords, x_coords, shape=mask.shape)
 
-        start_angle = (heading - self.fov / 2 + 360) % 360
-        end_angle = (heading + self.fov / 2) % 360
+        if labeled_free is None:
+            free_connected_map = get_free_and_connected_map(location, self.env.belief_info)
+            robot_component = free_connected_map[location_cell[1], location_cell[0]]
+            mask[rr, cc] = (free_connected_map[rr, cc] == robot_component)
+            return mask
 
-        sector_points = [robot_point]
-        if start_angle <= end_angle:
-            angle_range = np.linspace(start_angle, end_angle, 20)
-        else:
-            angle_range = np.concatenate([np.linspace(start_angle, 360, 10), np.linspace(0, end_angle, 10)])
-        for angle in angle_range:  
-            x = location_cell[0] + SENSOR_RANGE/CELL_SIZE * np.cos(np.radians(angle))
-            y = location_cell[1] + SENSOR_RANGE/CELL_SIZE * np.sin(np.radians(angle))
-            sector_points.append(Point(x, y))
-        sector_points.append(robot_point)  
-        sector = Polygon(sector_points)
-
-        x_coords, y_coords = sector.exterior.xy
-        y_coords = np.rint(y_coords).astype(int)
-        x_coords = np.rint(x_coords).astype(int)
-        rr, cc = sk_polygon(
-                [int(round(y)) for y in y_coords],
-                [int(round(x)) for x in x_coords],
-                shape=mask.shape
-            )
-        
-        free_connected_map = get_free_and_connected_map(location, self.env.belief_info)
-
-        mask[rr, cc] = (free_connected_map[rr, cc] == free_connected_map[location_cell[1], location_cell[0]])
+        robot_component = labeled_free[location_cell[1], location_cell[0]]
+        if robot_component == 0:
+            return mask
+        mask[rr, cc] = (labeled_free[rr, cc] == robot_component)
        
         return mask
     
     def compute_overlap_rate(self, all_robots_locations, robot_headings_list):
-        all_robot_sensing_mask = []
+        total_mask = np.zeros(self._sensing_mask_shape, dtype=np.uint16)
+        labeled_free = label((self.env.robot_belief == FREE).astype(np.uint8), connectivity=2)
         for robot_location, robot_heading in zip(all_robots_locations, robot_headings_list):
-            robot_sensing_mask = self.create_sensing_mask(robot_location, robot_heading)
-            all_robot_sensing_mask.append(robot_sensing_mask)
-        
-        total_mask = np.sum(all_robot_sensing_mask, axis=0)
-        total_sensing_area = np.sum(total_mask > 0)
-        total_overlap_area = np.sum(total_mask > 1)
+            total_mask += self.create_sensing_mask(robot_location, robot_heading, labeled_free=labeled_free)
 
-        overlap_ratio = total_overlap_area / total_sensing_area  
+        total_sensing_area = np.count_nonzero(total_mask)
+        if total_sensing_area == 0:
+            return 0.0
+        total_overlap_area = np.count_nonzero(total_mask > 1)
+
+        overlap_ratio = total_overlap_area / total_sensing_area
         
         return overlap_ratio
+
+    def _get_agent_explored_rates(self):
+        if self.total_free_cells <= 0:
+            return [0.0 for _ in range(self.n_agents)]
+        rates = []
+        for agent_id in range(self.n_agents):
+            agent_map = self.env.agent_beliefs[agent_id]
+            rate = np.count_nonzero(agent_map == FREE) / self.total_free_cells
+            rates.append(float(rate))
+        return rates
+
     def get_detected_robots_in_fov(self, robot, robot_locations, robot_headings):
         """Helper function to detect which robots are in the FOV of a given robot"""
         detected_robots = []
@@ -648,7 +712,7 @@ class TestWorker:
 
         color_list = ['r', 'b', 'g', 'y', 'c', 'm']
         color_name = ['Red', 'Blue', 'Green', 'Yellow', 'Cyan', 'Magenta']
-        sensing_range = SENSOR_RANGE / CELL_SIZE
+        sensing_range = self.sensor_range / CELL_SIZE
 
         # Detect robots in FOV for each robot
         fov_detections = {}
@@ -705,7 +769,7 @@ class TestWorker:
             arrow = FancyArrowPatch((location[0], location[1]), (location[0] + dx/1.25, location[1] + dy/1.25),
                                     mutation_scale=10, color=c, arrowstyle='-|>')
             plt.gca().add_artist(arrow)
-            cone = Wedge(center=(location[0], location[1]), r=SENSOR_RANGE / CELL_SIZE,
+            cone = Wedge(center=(location[0], location[1]), r=self.sensor_range / CELL_SIZE,
                         theta1=(heading-self.fov/2), theta2=(heading+self.fov/2), color=c, alpha=0.3, zorder=10)
             plt.gca().add_artist(cone)
 
@@ -751,7 +815,7 @@ class TestWorker:
             plt.gca().add_artist(arrow)
 
             # Draw FOV cone
-            cone = Wedge(center=(location[0], location[1]), r=SENSOR_RANGE / CELL_SIZE,
+            cone = Wedge(center=(location[0], location[1]), r=self.sensor_range / CELL_SIZE,
                         theta1=(heading - self.fov/2), theta2=(heading + self.fov/2),
                         color=c, alpha=0.3, zorder=10)
             plt.gca().add_artist(cone)
@@ -813,7 +877,7 @@ class TestWorker:
             # Draw FOV cone
             cone = Wedge(
                 center=(robot_local_x, robot_local_y),
-                r=SENSOR_RANGE / CELL_SIZE,
+                r=self.sensor_range / CELL_SIZE,
                 theta1=(robot_headings[robot.id] - self.fov/2),
                 theta2=(robot_headings[robot.id] + self.fov/2),
                 color=c, alpha=0.3, zorder=10
@@ -891,10 +955,12 @@ class TestWorker:
 
 if __name__ == '__main__':
     import torch
+    from utils.model import PolicyNet
+
     policy_net = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, use_trajectory=USE_TRAJECTORY)
     if LOAD_MODEL:
-        checkpoint = torch.load(load_path + '/checkpoint.pth', map_location='cpu')
+        checkpoint = torch.load(load_path, map_location='cpu')
         load_compatible_state_dict(policy_net, checkpoint['policy_model'], 'policy')
         print('Policy loaded!')
-    worker = TestWorker(0, policy_net, 188, 4, 120, 10, 'cpu', True)
+    worker = TestWorker(0, policy_net, 188, 4, 120, 10, 9.0, 'cpu', True)
     worker.run_episode()

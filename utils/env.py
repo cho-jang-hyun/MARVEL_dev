@@ -9,14 +9,16 @@ from skimage.draw import polygon as sk_polygon
 
 
 from utils.sensor import sensor_work_heading
-from parameter import *
+from utils.runtime_config import *
 from utils.utils import *
 
 
 class Env:
-    def __init__(self, episode_index, fov, sensor_range, plot=False):
+    def __init__(self, episode_index, fov, sensor_range, plot=False, n_agents=None, test_set=None):
         self.episode_index = episode_index
         self.plot = plot
+        self.n_agents = int(n_agents if n_agents is not None else N_AGENTS)
+        self.test_set = test_set
         self.ground_truth, initial_cell = self.import_ground_truth(episode_index)
         self.ground_truth_size = np.shape(self.ground_truth)  # cell
         self.cell_size = CELL_SIZE  # meter
@@ -36,13 +38,14 @@ class Env:
         initial_belief_info = MapInfo(initial_belief, self.belief_origin_x, self.belief_origin_y, self.cell_size)
 
         free, _ = get_updating_node_coords(np.array([0.0, 0.0]), initial_belief_info)
-        choice = np.random.choice(free.shape[0], N_AGENTS, replace=False)
+        replace = free.shape[0] < self.n_agents
+        choice = np.random.choice(free.shape[0], self.n_agents, replace=replace)
         starts = free[choice]
         self.robot_locations = np.array(starts)
 
         robot_cells = get_cell_position_from_coords(self.robot_locations, initial_belief_info).reshape(-1, 2)
-        self.angles =  np.random.uniform(0, 360, size=N_AGENTS)   # Intialise the robot heading
-        self.agent_beliefs = [np.ones(self.ground_truth_size) * UNKNOWN for _ in range(N_AGENTS)]
+        self.angles = np.random.uniform(0, 360, size=self.n_agents)   # Intialise the robot heading
+        self.agent_beliefs = [np.ones(self.ground_truth_size) * UNKNOWN for _ in range(self.n_agents)]
         for i, robot_cell in enumerate(robot_cells):
             self.agent_beliefs[i] = self.reveal_box_around_cell(self.agent_beliefs[i], robot_cell, 6.0)
             self.agent_beliefs[i] = sensor_work_heading(
@@ -64,8 +67,8 @@ class Env:
             self.frame_files = []
 
     def import_ground_truth(self, episode_index):
-        map_dir = f'maps_medium'
-        map_list = os.listdir(map_dir)
+        map_dir = self.test_set if self.test_set is not None else globals().get('TEST_SET', 'maps_medium')
+        map_list = sorted(os.listdir(map_dir))
         map_index = episode_index % np.size(map_list)
         ground_truth = (io.imread(map_dir + '/' + map_list[map_index], 1)).astype(int)
 

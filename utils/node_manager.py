@@ -18,7 +18,7 @@ from collections import deque
 
 import numpy as np
 from utils.utils import *
-from parameter import *
+from utils.runtime_config import *
 import utils.quads as quads
 
 

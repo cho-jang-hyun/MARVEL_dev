@@ -26,7 +26,7 @@ from shapely.geometry import Point, Polygon
 from skimage.draw import polygon as sk_polygon
 
 from utils.utils import *
-from parameter import *
+from utils.runtime_config import *
 
 class Agent:
     def __init__(self, id, policy_net, fov, heading, sensor_range, node_manager, ground_truth_node_manager, device='cpu', plot=False):

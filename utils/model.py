@@ -2,7 +2,12 @@ import torch
 import torch.nn as nn
 import math
 import numpy as np
-from parameter import BUDGET_FEATURE_DIM
+from utils.runtime_config import (
+    BUDGET_FEATURE_DIM,
+    TRAJECTORY_FEATURE_DIM,
+    TRAJECTORY_EMBEDDING_DIM,
+    TRAJECTORY_HISTORY_LENGTH,
+)
 
 
 def _clone_linear_weights(target_layer, source_layer):
@@ -348,7 +353,6 @@ class PolicyNet(nn.Module):
 
         # Trajectory encoder
         if use_trajectory:
-            from parameter import TRAJECTORY_FEATURE_DIM, TRAJECTORY_EMBEDDING_DIM, TRAJECTORY_HISTORY_LENGTH
             self.trajectory_encoder = TrajectoryEncoder(
                 feature_dim=TRAJECTORY_FEATURE_DIM,
                 trajectory_embedding_dim=TRAJECTORY_EMBEDDING_DIM,
@@ -575,7 +579,6 @@ class QNet(nn.Module):
 
         # Trajectory encoder
         if use_trajectory:
-            from parameter import TRAJECTORY_FEATURE_DIM, TRAJECTORY_EMBEDDING_DIM, TRAJECTORY_HISTORY_LENGTH
             self.trajectory_encoder = TrajectoryEncoder(
                 feature_dim=TRAJECTORY_FEATURE_DIM,
                 trajectory_embedding_dim=TRAJECTORY_EMBEDDING_DIM,

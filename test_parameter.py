@@ -12,12 +12,13 @@ This file defines various parameters for:
 
 """
 TEST_SET = 'maps_test'
-LOAD_FOLDER_NAME = 'MARVEL'
-load_path = f'model/fixed_partial_map_visualization_for_test'
+LOAD_FOLDER_NAME = 'MARVEL2_4_12'
+CHECKPOINT_NAME = 'latest.pth'
+load_path = f'load_model/{LOAD_FOLDER_NAME}/{CHECKPOINT_NAME}'
 gifs_path = f'results/gifs/{LOAD_FOLDER_NAME}'
 LOAD_MODEL = True  
 SAVE_IMG_GAP = 50
-SAVE_GIFS = True
+SAVE_GIFS = False
 GREEDY = True
 NUM_RUN = 1
 NUM_TEST = 100
@@ -28,9 +29,14 @@ NUM_SIM_STEPS = 6
 MAX_EPISODE_STEP = 128
 BUDGET_TIMESTEP_METERS = 8.0
 BUDGET_TIMESTEPS = MAX_EPISODE_STEP
+TEST_BUDGET_TIMESTEPS_LIST = [70, 80, 90, 100, 128]
 BUDGET = BUDGET_TIMESTEPS * BUDGET_TIMESTEP_METERS
+MAX_BUDGET = BUDGET
+RETURN_SAFETY_MARGIN = 0.0
+NUM_EPISODE_BUFFER = 54
 VELOCITY = 1
 YAW_RATE = 35 # in degrees
+SUCCESS_THRESHOLD = 0.99
 
 # Heading parameters
 NUM_ANGLES_BIN = 36
@@ -48,12 +54,14 @@ UNKNOWN = 127
 
 # Sensor and utility range
 MIN_UTILITY = 1
+VISITED_BY_OTHERS_DECAY = 0.025
+VISITED_BY_OTHERS_MIN = 0.05
 
 # Updating map range w.r.t the robot
 UPDATING_MAP_SIZE = 15 * NODE_RESOLUTION
 
 # Testing parameters
-NUM_META_AGENT = 10
+NUM_META_AGENT = 16
 INITIAL_EXPLORED_RATE = 0.90
 
 # Network parameters
@@ -61,6 +69,7 @@ NODE_INPUT_DIM = 9  # +1 for visited_self (binary flag: agent has visited this n
 EMBEDDING_DIM = 128
 BUDGET_FEATURE_DIM = 4  # log_initial_m, log_remaining_m, remaining/initial, distance_to_base/remaining
 USE_TRAJECTORY = True  # Enable trajectory encoder
+GATED_ATTENTION = True
 
 # Trajectory tracking parameters (same as parameter.py)
 TRAJECTORY_HISTORY_LENGTH = 10  # Number of recent steps to track
@@ -72,6 +81,7 @@ MAX_DETECTED_AGENTS = 10  # Maximum number of detectable agents in FOV (conserva
 # Graph parameters
 NUM_NODE_NEIGHBORS = 5
 K_SIZE = NUM_NODE_NEIGHBORS**2   # the number of neighboring nodes
+NODE_PADDING_SIZE = 360
 
 # GPU usage
 USE_GPU = True # False

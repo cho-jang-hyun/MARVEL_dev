@@ -5,7 +5,7 @@ import shutil
 import subprocess
 from skimage.morphology import label
 
-from parameter import *
+from utils.runtime_config import *
 
 DEFAULT_VIDEO_FPS = 10
 FFMPEG_CANDIDATES = ['/usr/bin/ffmpeg', 'ffmpeg']
