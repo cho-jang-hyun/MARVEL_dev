@@ -47,7 +47,7 @@ class Env:
         self.angles = np.random.uniform(0, 360, size=self.n_agents)   # Intialise the robot heading
         self.agent_beliefs = [np.ones(self.ground_truth_size) * UNKNOWN for _ in range(self.n_agents)]
         for i, robot_cell in enumerate(robot_cells):
-            self.agent_beliefs[i] = self.reveal_box_around_cell(self.agent_beliefs[i], robot_cell, 6.0)
+            self.agent_beliefs[i] = self.reveal_circle_around_cell(self.agent_beliefs[i], robot_cell, 6.0)
             self.agent_beliefs[i] = sensor_work_heading(
                 robot_cell,
                 self.sensor_range / self.cell_size,
@@ -94,6 +94,24 @@ class Env:
         y_min = max(0, robot_cell[1] - radius_cells)
         y_max = min(belief_map.shape[0], robot_cell[1] + radius_cells + 1)
         belief_map[y_min:y_max, x_min:x_max] = self.ground_truth[y_min:y_max, x_min:x_max]
+        return belief_map
+
+    def reveal_circle_around_cell(self, belief_map, robot_cell, radius_m):
+        radius_cells = int(np.round(radius_m / self.cell_size))
+        x_min = max(0, robot_cell[0] - radius_cells)
+        x_max = min(belief_map.shape[1], robot_cell[0] + radius_cells + 1)
+        y_min = max(0, robot_cell[1] - radius_cells)
+        y_max = min(belief_map.shape[0], robot_cell[1] + radius_cells + 1)
+
+        if x_min >= x_max or y_min >= y_max:
+            return belief_map
+
+        y_coords, x_coords = np.ogrid[y_min:y_max, x_min:x_max]
+        circular_mask = ((x_coords - robot_cell[0]) ** 2 + (y_coords - robot_cell[1]) ** 2) <= (radius_cells ** 2)
+        belief_slice = belief_map[y_min:y_max, x_min:x_max]
+        truth_slice = self.ground_truth[y_min:y_max, x_min:x_max]
+        belief_slice[circular_mask] = truth_slice[circular_mask]
+        belief_map[y_min:y_max, x_min:x_max] = belief_slice
         return belief_map
 
     def merge_agent_beliefs(self):
