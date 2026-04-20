@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '4_12_Dual_critic_estimation_metric_corrected'
+FOLDER_NAME = '4_20_Dual_critic_estimation_metric_reward_updated'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -69,13 +69,13 @@ UPDATING_MAP_SIZE = 4 * SENSOR_RANGE + 4 * NODE_RESOLUTION
 MAX_EPISODE_STEP = 128
 BUDGET_TIMESTEP_METERS = 8.0
 BUDGET_START_TIMESTEPS = 128
-BUDGET_END_TIMESTEPS = 96
-BUDGET_CURRICULUM_NOISE_TIMESTEPS = 8
+BUDGET_END_TIMESTEPS = 80
+BUDGET_CURRICULUM_NOISE_TIMESTEPS = 16
 BUDGET_START = BUDGET_START_TIMESTEPS * BUDGET_TIMESTEP_METERS   # budget when success rate is 0 (easy), in meters
 BUDGET_END = BUDGET_END_TIMESTEPS * BUDGET_TIMESTEP_METERS       # budget when success rate is 1 (hard), in meters
 BUDGET_CURRICULUM_NOISE = BUDGET_CURRICULUM_NOISE_TIMESTEPS * BUDGET_TIMESTEP_METERS   # ±uniform noise around the curriculum target budget, in meters
 BUDGET_CURRICULUM_EMA = 0.05  # EMA smoothing for success rate tracker
-BUDGET_CURRICULUM_UNIFORM_P = 0.15  # probability of ignoring curriculum and sampling uniformly (prevents forgetting)
+BUDGET_CURRICULUM_UNIFORM_P = 0.5  # probability of ignoring curriculum and sampling uniformly (prevents forgetting)
 BUDGET = BUDGET_START
 MIN_BUDGET = BUDGET_END
 MAX_BUDGET = BUDGET_START
@@ -90,13 +90,13 @@ POST_PHASE_REPLAY_MIN_SAMPLES = 512
 POST_PHASE_BATCH_RATIO = 0.25
 
 # reward shaping
-MERGED_NODE_UTILITY_REWARD_WEIGHT = 0.8
+MERGED_NODE_UTILITY_REWARD_WEIGHT = 1.0
 VISITED_BY_OTHERS_DECAY = 0.025
-VISITED_BY_OTHERS_MIN = 0.05
+VISITED_BY_OTHERS_MIN = 0.08
 LOW_UTILITY_MOVE_THRESHOLD = 0.05
-REPEATED_LOW_UTILITY_PENALTY = 0.03
+REPEATED_LOW_UTILITY_PENALTY = 0.05
 TIME_PRESSURE_WEIGHT = 0.05  # per-step cost that scales linearly as budget depletes (0 at full budget, this value at zero budget)
-MERGED_SUCCESS_BONUS = 3.0  # one-time bonus when merged explored coverage reaches SUCCESS_THRESHOLD (reduced from 6.5 to limit TD target spikes and critic gradient instability)
+MERGED_SUCCESS_BONUS = 5.0  # one-time bonus when merged explored coverage reaches SUCCESS_THRESHOLD (reduced from 6.5 to limit TD target spikes and critic gradient instability)
 
 # Gradient clipping parameters
 GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5.0)
