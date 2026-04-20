@@ -473,6 +473,8 @@ def main():
     curr_episode = 0
     best_success_rate = -float('inf')  # Track best performance for saving best model
     curriculum_success_rate = 0.0     # EMA of success rate used to anneal the budget
+    curriculum_completed_episodes = 0
+    curriculum_success_window = []
 
     if USE_WANDB:
         import parameter
@@ -500,6 +502,8 @@ def main():
         curr_episode = checkpoint['episode']
         best_success_rate = checkpoint.get('best_success_rate', -float('inf'))
         curriculum_success_rate = checkpoint.get('curriculum_success_rate', 0.0)
+        curriculum_completed_episodes = checkpoint.get('curriculum_completed_episodes', curr_episode)
+        curriculum_success_window = list(checkpoint.get('curriculum_success_window', []))
         if 'reward_normalizer' in checkpoint:
             reward_normalizer.load_state_dict(checkpoint['reward_normalizer'])
 
@@ -562,14 +566,23 @@ def main():
             # save experience and metric
             for job in done_jobs:
                 job_results, metrics, info = job
+                curriculum_completed_episodes += 1
                 for i in range(len(experience_buffer)):
                     experience_buffer[i] += job_results[i]
                 for n in metric_name:
                     perf_metrics[n].append(metrics[n])
-                curriculum_success_rate = (
-                    (1 - BUDGET_CURRICULUM_EMA) * curriculum_success_rate
-                    + BUDGET_CURRICULUM_EMA * float(metrics['success_rate'])
+                curriculum_success_signal = float(
+                    metrics.get('explored_rate', 0.0) >= BUDGET_CURRICULUM_SUCCESS_THRESHOLD
                 )
+                if curriculum_completed_episodes > BUDGET_CURRICULUM_WARMUP_EPISODES:
+                    curriculum_success_window.append(curriculum_success_signal)
+                    if len(curriculum_success_window) >= max(int(BUDGET_CURRICULUM_UPDATE_STRIDE), 1):
+                        aggregated_success = float(np.mean(curriculum_success_window))
+                        curriculum_success_rate = (
+                            (1 - BUDGET_CURRICULUM_EMA) * curriculum_success_rate
+                            + BUDGET_CURRICULUM_EMA * aggregated_success
+                        )
+                        curriculum_success_window = []
 
             # launch new task
             curr_episode += 1
@@ -753,6 +766,8 @@ def main():
                               "episode": curr_episode,
                               "best_success_rate": best_success_rate,
                               "curriculum_success_rate": curriculum_success_rate,
+                              "curriculum_completed_episodes": curriculum_completed_episodes,
+                              "curriculum_success_window": curriculum_success_window,
                               "reward_normalizer": reward_normalizer.state_dict(),
                               }
 
