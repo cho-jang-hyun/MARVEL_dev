@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '4_20_Dual_critic_estimation_metric_reward_updated'
+FOLDER_NAME = '4_22_Dual_critic_estimation_metric_with_indv_complete_reward'
 LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -100,6 +100,7 @@ LOW_UTILITY_MOVE_THRESHOLD = 0.05
 REPEATED_LOW_UTILITY_PENALTY = 0.05
 TIME_PRESSURE_WEIGHT = 0.05  # per-step cost that scales linearly as budget depletes (0 at full budget, this value at zero budget)
 MERGED_SUCCESS_BONUS = 5.0  # one-time bonus when merged explored coverage reaches SUCCESS_THRESHOLD (reduced from 6.5 to limit TD target spikes and critic gradient instability)
+INDIVIDUAL_SUCCESS_BONUS = 2.5  # one-time bonus when an agent's individual explored coverage exceeds SUCCESS_THRESHOLD
 
 # Gradient clipping parameters
 GRAD_CLIP_POLICY = 1.0  # Max gradient norm for policy network (typical: 0.5 ~ 5.0)

@@ -96,6 +96,7 @@ class MultiAgentWorker:
         self.returning_agents = np.zeros(self.n_agents, dtype=bool)
         self.replay_closed = np.zeros(self.n_agents, dtype=bool)
         self.low_utility_streaks = np.zeros(self.n_agents, dtype=int)
+        self.individual_objective_completed = np.zeros(self.n_agents, dtype=bool)
         self.merged_objective_completed = False
         self.merged_completion_travel_dist = None
         self.merged_total_utility = np.inf
@@ -558,12 +559,17 @@ class MultiAgentWorker:
 
             for robot_id, reward in zip(active_explorer_ids, reward_list):
                 robot = self.robot_list[robot_id]
+                local_completed = self._local_objective_completed(robot)
+                individual_completion_bonus = 0.0
+                if local_completed and not self.individual_objective_completed[robot_id]:
+                    self.individual_objective_completed[robot_id] = True
+                    individual_completion_bonus = INDIVIDUAL_SUCCESS_BONUS
                 robot_should_return = (
-                    self._local_objective_completed(robot)
+                    local_completed
                     or self._should_force_return(robot.get_distance_to_base(), self.remaining_budgets[robot_id])
                 )
                 transition_done = mission_failure or robot_should_return
-                robot.save_reward(reward + team_reward)
+                robot.save_reward(reward + team_reward + individual_completion_bonus)
                 if USE_COMMUNICATION:
                     if self.use_merged_critic:
                         robot.save_all_indices(curr_critic_indices)
