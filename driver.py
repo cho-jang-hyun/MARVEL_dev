@@ -451,6 +451,9 @@ def main():
     print(f"  Using Gated Attention: {GATED_ATTENTION}")
     print(f"  Gradient Clipping - Policy: {GRAD_CLIP_POLICY}, Q: {GRAD_CLIP_Q}")
     print(f"  Entropy Target: {entropy_target:.4f} (action_dim={action_dim})")
+    budget_sampling_mode = 'curriculum' if BUDGET_USE_CURRICULUM else 'uniform_random_ablation'
+    print(f"  Budget Sampling: {budget_sampling_mode}")
+    print(f"  Budget Range: [{BUDGET_END:.1f}, {BUDGET_START:.1f}] meters")
 
     # initialize neural networks
     global_policy_net = PolicyNet(NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, use_trajectory=True, gated_attention=GATED_ATTENTION).to(device)
@@ -571,18 +574,19 @@ def main():
                     experience_buffer[i] += job_results[i]
                 for n in metric_name:
                     perf_metrics[n].append(metrics[n])
-                curriculum_success_signal = float(
-                    metrics.get('explored_rate', 0.0) >= BUDGET_CURRICULUM_SUCCESS_THRESHOLD
-                )
-                if curriculum_completed_episodes > BUDGET_CURRICULUM_WARMUP_EPISODES:
-                    curriculum_success_window.append(curriculum_success_signal)
-                    if len(curriculum_success_window) >= max(int(BUDGET_CURRICULUM_UPDATE_STRIDE), 1):
-                        aggregated_success = float(np.mean(curriculum_success_window))
-                        curriculum_success_rate = (
-                            (1 - BUDGET_CURRICULUM_EMA) * curriculum_success_rate
-                            + BUDGET_CURRICULUM_EMA * aggregated_success
-                        )
-                        curriculum_success_window = []
+                if BUDGET_USE_CURRICULUM:
+                    curriculum_success_signal = float(
+                        metrics.get('explored_rate', 0.0) >= BUDGET_CURRICULUM_SUCCESS_THRESHOLD
+                    )
+                    if curriculum_completed_episodes > BUDGET_CURRICULUM_WARMUP_EPISODES:
+                        curriculum_success_window.append(curriculum_success_signal)
+                        if len(curriculum_success_window) >= max(int(BUDGET_CURRICULUM_UPDATE_STRIDE), 1):
+                            aggregated_success = float(np.mean(curriculum_success_window))
+                            curriculum_success_rate = (
+                                (1 - BUDGET_CURRICULUM_EMA) * curriculum_success_rate
+                                + BUDGET_CURRICULUM_EMA * aggregated_success
+                            )
+                            curriculum_success_window = []
 
             # launch new task
             curr_episode += 1
@@ -735,9 +739,14 @@ def main():
             # write record to tensorboard
             if len(training_data) >= SUMMARY_WINDOW:
                 write_to_tensor_board(writer, training_data, curr_episode)
-                writer.add_scalar('Curriculum/success_rate_ema', curriculum_success_rate, curr_episode)
-                current_budget = BUDGET_END + ((BUDGET_START - BUDGET_END) * (1.0 - curriculum_success_rate))
-                writer.add_scalar('Curriculum/budget_meters', current_budget, curr_episode)
+                if BUDGET_USE_CURRICULUM:
+                    writer.add_scalar('Curriculum/success_rate_ema', curriculum_success_rate, curr_episode)
+                    current_budget = BUDGET_END + ((BUDGET_START - BUDGET_END) * (1.0 - curriculum_success_rate))
+                    writer.add_scalar('Curriculum/budget_meters', current_budget, curr_episode)
+                else:
+                    writer.add_scalar('BudgetSampling/random_min_budget_m', BUDGET_END, curr_episode)
+                    writer.add_scalar('BudgetSampling/random_max_budget_m', BUDGET_START, curr_episode)
+                    writer.add_scalar('BudgetSampling/random_mean_budget_m', (BUDGET_START + BUDGET_END) / 2.0, curr_episode)
                 training_data = []
                 perf_metrics = {}
                 for n in metric_name:
@@ -768,6 +777,8 @@ def main():
                               "curriculum_success_rate": curriculum_success_rate,
                               "curriculum_completed_episodes": curriculum_completed_episodes,
                               "curriculum_success_window": curriculum_success_window,
+                              "budget_use_curriculum": BUDGET_USE_CURRICULUM,
+                              "budget_sampling_mode": budget_sampling_mode,
                               "reward_normalizer": reward_normalizer.state_dict(),
                               }
 

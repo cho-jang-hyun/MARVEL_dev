@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '4_22_Dual_critic_estimation_metric_with_indv_complete_reward'
+FOLDER_NAME = '4_22_Dual_critic_estimation_metric_with_indv_complete_reward_random_budget_ablation'
 LOAD_FOLDER_NAME = '4_22_Dual_critic_estimation_metric_with_indv_complete_reward'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -73,6 +73,7 @@ BUDGET_END_TIMESTEPS = 80
 BUDGET_CURRICULUM_NOISE_TIMESTEPS = 16
 BUDGET_START = BUDGET_START_TIMESTEPS * BUDGET_TIMESTEP_METERS   # budget when success rate is 0 (easy), in meters
 BUDGET_END = BUDGET_END_TIMESTEPS * BUDGET_TIMESTEP_METERS       # budget when success rate is 1 (hard), in meters
+BUDGET_USE_CURRICULUM = False  # False: ablation mode, sample uniformly from [BUDGET_END, BUDGET_START]
 BUDGET_CURRICULUM_NOISE = BUDGET_CURRICULUM_NOISE_TIMESTEPS * BUDGET_TIMESTEP_METERS   # ±uniform noise around the curriculum target budget, in meters
 BUDGET_CURRICULUM_EMA = 0.002  # EMA smoothing for success rate tracker
 BUDGET_CURRICULUM_UNIFORM_P = 0.6  # probability of ignoring curriculum and sampling uniformly (prevents forgetting)
