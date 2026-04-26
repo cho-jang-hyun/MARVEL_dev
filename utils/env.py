@@ -21,6 +21,7 @@ class Env:
         self.test_set = test_set
         self.ground_truth, initial_cell = self.import_ground_truth(episode_index)
         self.ground_truth_size = np.shape(self.ground_truth)  # cell
+        self.total_free_cells = int(np.sum(self.ground_truth == FREE))
         self.cell_size = CELL_SIZE  # meter
 
         initial_belief = np.ones(self.ground_truth_size) * UNKNOWN
@@ -116,8 +117,11 @@ class Env:
 
     def merge_agent_beliefs(self):
         merged_belief = np.ones(self.ground_truth_size) * UNKNOWN
-        occupied_mask = np.any(np.stack([belief == OCCUPIED for belief in self.agent_beliefs], axis=0), axis=0)
-        free_mask = np.any(np.stack([belief == FREE for belief in self.agent_beliefs], axis=0), axis=0)
+        occupied_mask = np.zeros(self.ground_truth_size, dtype=bool)
+        free_mask = np.zeros(self.ground_truth_size, dtype=bool)
+        for belief in self.agent_beliefs:
+            occupied_mask |= belief == OCCUPIED
+            free_mask |= belief == FREE
         merged_belief[free_mask] = FREE
         merged_belief[occupied_mask] = OCCUPIED
         return merged_belief
@@ -125,7 +129,11 @@ class Env:
     def get_agent_map_info(self, agent_id):
         return MapInfo(self.agent_beliefs[agent_id], self.belief_origin_x, self.belief_origin_y, self.cell_size)
 
-    def update_robot_belief(self, agent_id, robot_cell, heading):
+    def refresh_merged_belief(self):
+        self.robot_belief = self.merge_agent_beliefs()
+        self.belief_info.update_map_info(self.robot_belief, self.belief_origin_x, self.belief_origin_y)
+
+    def update_robot_belief(self, agent_id, robot_cell, heading, refresh_merged=True):
         self.agent_beliefs[agent_id] = sensor_work_heading(
             robot_cell,
             round(self.sensor_range / self.cell_size),
@@ -134,8 +142,8 @@ class Env:
             heading,
             self.fov,
         )
-        self.robot_belief = self.merge_agent_beliefs()
-        self.belief_info.update_map_info(self.robot_belief, self.belief_origin_x, self.belief_origin_y)
+        if refresh_merged:
+            self.refresh_merged_belief()
 
     def calculate_team_reward(self):
         reward = 0

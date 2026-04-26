@@ -101,6 +101,19 @@ class TestWorker:
     def _get_max_travel_dist(self):
         return max((robot.travel_dist for robot in self.robot_list), default=0.0)
 
+    def _get_merged_explored_rate(self):
+        if self.total_free_cells <= 0:
+            return 0.0
+        return float(np.count_nonzero(self.env.robot_belief == FREE) / self.total_free_cells)
+
+    def _get_remaining_budget_summary(self):
+        remaining = np.asarray(self.remaining_budgets, dtype=float)
+        return (
+            float(np.mean(remaining)),
+            float(np.min(remaining)),
+            float(np.max(remaining)),
+        )
+
     def _update_objective_state(self):
         merged_completed_this_step = (
             not self.merged_objective_completed
@@ -238,6 +251,16 @@ class TestWorker:
 
         length_history = [self._get_max_travel_dist()]
         explored_rate_history = [self.env.explored_rate]
+        merged_explored_rate_history = [self._get_merged_explored_rate()]
+        individual_explored_rate_history = [self._get_agent_explored_rates()]
+        remaining_budget_history = [self.remaining_budgets.astype(float).tolist()]
+        remaining_budget_mean_history = []
+        remaining_budget_min_history = []
+        remaining_budget_max_history = []
+        remaining_mean, remaining_min, remaining_max = self._get_remaining_budget_summary()
+        remaining_budget_mean_history.append(remaining_mean)
+        remaining_budget_min_history.append(remaining_min)
+        remaining_budget_max_history.append(remaining_max)
         overlap_rate = self.compute_overlap_rate(self.env.robot_locations, self.env.angles)
         overlap_ratio_history = [overlap_rate]
 
@@ -373,11 +396,17 @@ class TestWorker:
                 robot_location_sim_step = []
                 robot_heading_sim_step = []
                 for q in range(self.n_agents):
-                    self.env.update_robot_belief(q, robot_locations_sim[q][l], robot_headings_sim[q][l])
+                    self.env.update_robot_belief(
+                        q,
+                        robot_locations_sim[q][l],
+                        robot_headings_sim[q][l],
+                        refresh_merged=False,
+                    )
                     if self.save_image:
                         self.individual_maps[q] = self.env.get_agent_map_info(q).map.copy()
                     robot_location_sim_step.append(robot_locations_sim[q][l])
                     robot_heading_sim_step.append(robot_headings_sim[q][l])
+                self.env.refresh_merged_belief()
 
                 if self.save_image:
                     num_frame = i * self.sim_steps + l
@@ -409,6 +438,14 @@ class TestWorker:
             max_travel_dist = self._get_max_travel_dist()
             length_history.append(max_travel_dist)
             explored_rate_history.append(self.env.explored_rate)
+            merged_explored_rate_history.append(self._get_merged_explored_rate())
+            individual_explored_rates = self._get_agent_explored_rates()
+            individual_explored_rate_history.append(individual_explored_rates)
+            remaining_budget_history.append(self.remaining_budgets.astype(float).tolist())
+            remaining_mean, remaining_min, remaining_max = self._get_remaining_budget_summary()
+            remaining_budget_mean_history.append(remaining_mean)
+            remaining_budget_min_history.append(remaining_min)
+            remaining_budget_max_history.append(remaining_max)
             overlap_ratio_history.append(overlap_rate)
             if (self.env.explored_rate >= 0.90) and (not merged_reached_0_90):
                 merged_dist_to_0_90 = max_travel_dist
@@ -417,7 +454,6 @@ class TestWorker:
                 merged_dist_to_0_99 = max_travel_dist
                 merged_reached_0_99 = True
 
-            individual_explored_rates = self._get_agent_explored_rates()
             for agent_id, agent_rate in enumerate(individual_explored_rates):
                 if (agent_rate >= 0.90) and (not individual_reached_0_90[agent_id]):
                     individual_dist_to_0_90[agent_id] = self.robot_list[agent_id].travel_dist
@@ -463,6 +499,13 @@ class TestWorker:
             self.perf_metrics['compute_time_std'] = np.nan
         self.perf_metrics['length_history'] = length_history
         self.perf_metrics['explored_rate_history'] = explored_rate_history
+        self.perf_metrics['merged_explored_rate_history'] = merged_explored_rate_history
+        self.perf_metrics['individual_explored_rate_history'] = individual_explored_rate_history
+        self.perf_metrics['initial_budget_history'] = self.initial_budgets.astype(float).tolist()
+        self.perf_metrics['remaining_budget_history'] = remaining_budget_history
+        self.perf_metrics['remaining_budget_mean_history'] = remaining_budget_mean_history
+        self.perf_metrics['remaining_budget_min_history'] = remaining_budget_min_history
+        self.perf_metrics['remaining_budget_max_history'] = remaining_budget_max_history
         self.perf_metrics['overlap_ratio_history'] = overlap_ratio_history
     
         # Save episode video.

@@ -153,7 +153,7 @@ class MultiAgentWorker:
         return merged_completed_this_step
 
     def _local_objective_completed(self, robot):
-        total_free = np.sum(self.env.ground_truth == FREE)
+        total_free = self.env.total_free_cells
         if total_free <= 0:
             return False
         agent_map = self.env.get_agent_map_info(robot.id).map
@@ -443,9 +443,15 @@ class MultiAgentWorker:
                 robot_location_sim_step = []
                 robot_heading_sim_step = []
                 for q in range(self.n_agents):
-                    self.env.update_robot_belief(q, robot_locations_sim[q][l], robot_headings_sim[q][l])
+                    self.env.update_robot_belief(
+                        q,
+                        robot_locations_sim[q][l],
+                        robot_headings_sim[q][l],
+                        refresh_merged=False,
+                    )
                     robot_location_sim_step.append(robot_locations_sim[q][l])
                     robot_heading_sim_step.append(robot_headings_sim[q][l])
+                self.env.refresh_merged_belief()
                 
                 if self.save_image:
                     num_frame = i * self.sim_steps + l

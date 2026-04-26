@@ -34,6 +34,8 @@ from utils.runtime_config import *
 import csv
 
 EVAL_USE_GPU = USE_GPU and NUM_GPU > 0 and torch.cuda.is_available()
+BUDGET_EXPLORATION_RECORD_PATH = "record_10agents_budget_exploration.csv"
+BOXPLOT_METRICS_RECORD_PATH = "record_10agents_boxplot_metrics.csv"
 
 if USE_GPU and NUM_GPU > 0 and not torch.cuda.is_available():
     warnings.warn("USE_GPU is True but CUDA is unavailable; falling back to CPU.")
@@ -63,6 +65,282 @@ def safe_nanstd(values):
         return np.nan
     return float(np.nanstd(values))
 
+
+def _history_value(history, step, default=np.nan):
+    if step < len(history):
+        return history[step]
+    return default
+
+
+def _agent_history_value(history, step, agent_id, default=np.nan):
+    if step >= len(history):
+        return default
+    step_values = history[step]
+    if agent_id >= len(step_values):
+        return default
+    return step_values[agent_id]
+
+
+def append_budget_exploration_rows(metrics, info, n_agent, fov, sensor_range, budget_timesteps):
+    merged_history = metrics.get('merged_explored_rate_history', metrics.get('explored_rate_history', []))
+    individual_history = metrics.get('individual_explored_rate_history', [])
+    remaining_history = metrics.get('remaining_budget_history', [])
+    initial_budgets = metrics.get('initial_budget_history', [])
+    remaining_mean_history = metrics.get('remaining_budget_mean_history', [])
+    remaining_min_history = metrics.get('remaining_budget_min_history', [])
+    remaining_max_history = metrics.get('remaining_budget_max_history', [])
+    length_history = metrics.get('length_history', [])
+    overlap_history = metrics.get('overlap_ratio_history', [])
+
+    num_steps = max(
+        len(merged_history),
+        len(individual_history),
+        len(remaining_history),
+        len(length_history),
+        len(overlap_history),
+    )
+    if num_steps == 0:
+        return 0
+
+    budget_m = float(budget_timesteps) * float(BUDGET_TIMESTEP_METERS)
+    mean_initial_budget = (
+        float(np.mean(np.asarray(initial_budgets, dtype=float)))
+        if len(initial_budgets) > 0 else budget_m
+    )
+    fieldnames = [
+        'test_set',
+        'episode_number',
+        'step',
+        'scope',
+        'agent_id',
+        'n_agent',
+        'fov_deg',
+        'sensor_range_m',
+        'budget_timesteps',
+        'budget_m',
+        'remaining_budget_m',
+        'consumed_budget_m',
+        'explored_rate',
+        'merged_explored_rate',
+        'team_remaining_budget_mean_m',
+        'team_remaining_budget_min_m',
+        'team_remaining_budget_max_m',
+        'max_travel_dist_m',
+        'overlap_ratio',
+    ]
+    write_header = (
+        not os.path.exists(BUDGET_EXPLORATION_RECORD_PATH)
+        or os.path.getsize(BUDGET_EXPLORATION_RECORD_PATH) == 0
+    )
+
+    rows_written = 0
+    with open(BUDGET_EXPLORATION_RECORD_PATH, "a", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+
+        for step in range(num_steps):
+            merged_rate = float(_history_value(merged_history, step))
+            team_remaining_mean = float(_history_value(remaining_mean_history, step))
+            team_remaining_min = float(_history_value(remaining_min_history, step))
+            team_remaining_max = float(_history_value(remaining_max_history, step))
+            max_travel_dist = float(_history_value(length_history, step))
+            overlap_ratio = float(_history_value(overlap_history, step))
+
+            common = {
+                'test_set': TEST_SET,
+                'episode_number': info.get('episode_number', np.nan),
+                'step': step,
+                'n_agent': n_agent,
+                'fov_deg': fov,
+                'sensor_range_m': sensor_range,
+                'budget_timesteps': budget_timesteps,
+                'budget_m': budget_m,
+                'merged_explored_rate': merged_rate,
+                'team_remaining_budget_mean_m': team_remaining_mean,
+                'team_remaining_budget_min_m': team_remaining_min,
+                'team_remaining_budget_max_m': team_remaining_max,
+                'max_travel_dist_m': max_travel_dist,
+                'overlap_ratio': overlap_ratio,
+            }
+
+            writer.writerow({
+                **common,
+                'scope': 'merged',
+                'agent_id': '',
+                'remaining_budget_m': team_remaining_mean,
+                'consumed_budget_m': mean_initial_budget - team_remaining_mean,
+                'explored_rate': merged_rate,
+            })
+            rows_written += 1
+
+            for agent_id in range(n_agent):
+                agent_remaining = float(_agent_history_value(remaining_history, step, agent_id))
+                agent_initial = (
+                    float(initial_budgets[agent_id])
+                    if agent_id < len(initial_budgets) else budget_m
+                )
+                agent_explored = float(_agent_history_value(individual_history, step, agent_id))
+                writer.writerow({
+                    **common,
+                    'scope': 'individual',
+                    'agent_id': agent_id,
+                    'remaining_budget_m': agent_remaining,
+                    'consumed_budget_m': agent_initial - agent_remaining,
+                    'explored_rate': agent_explored,
+                })
+                rows_written += 1
+
+    return rows_written
+
+
+def _write_metric_row(writer, common, metric_name, metric_value, scope='episode', agent_id='', step=''):
+    try:
+        value = float(metric_value)
+    except (TypeError, ValueError):
+        return 0
+    writer.writerow({
+        **common,
+        'step': step,
+        'scope': scope,
+        'agent_id': agent_id,
+        'metric_name': metric_name,
+        'metric_value': value,
+    })
+    return 1
+
+
+def _write_metric_series(writer, common, metric_name, values, scope='step'):
+    rows_written = 0
+    for step, value in enumerate(values):
+        rows_written += _write_metric_row(
+            writer,
+            common,
+            metric_name,
+            value,
+            scope=scope,
+            step=step,
+        )
+    return rows_written
+
+
+def _write_agent_metric_series(writer, common, metric_name, values, scope='agent_step'):
+    rows_written = 0
+    for step, step_values in enumerate(values):
+        for agent_id, value in enumerate(step_values):
+            rows_written += _write_metric_row(
+                writer,
+                common,
+                metric_name,
+                value,
+                scope=scope,
+                agent_id=agent_id,
+                step=step,
+            )
+    return rows_written
+
+
+def append_boxplot_metric_rows(metrics, info, n_agent, fov, sensor_range, utility_range, budget_timesteps):
+    fieldnames = [
+        'test_set',
+        'episode_number',
+        'n_agent',
+        'fov_deg',
+        'sensor_range_m',
+        'utility_range_m',
+        'budget_timesteps',
+        'budget_m',
+        'step',
+        'scope',
+        'agent_id',
+        'metric_name',
+        'metric_value',
+    ]
+    write_header = (
+        not os.path.exists(BOXPLOT_METRICS_RECORD_PATH)
+        or os.path.getsize(BOXPLOT_METRICS_RECORD_PATH) == 0
+    )
+    budget_m = float(budget_timesteps) * float(BUDGET_TIMESTEP_METERS)
+    common = {
+        'test_set': TEST_SET,
+        'episode_number': info.get('episode_number', np.nan),
+        'n_agent': n_agent,
+        'fov_deg': fov,
+        'sensor_range_m': sensor_range,
+        'utility_range_m': utility_range,
+        'budget_timesteps': budget_timesteps,
+        'budget_m': budget_m,
+    }
+
+    rows_written = 0
+    with open(BOXPLOT_METRICS_RECORD_PATH, "a", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+
+        episode_metrics = {
+            'travel_dist_m': metrics.get('travel_dist', np.nan),
+            'merged_travel_dist_m': metrics.get('merged_travel_dist', np.nan),
+            'final_merged_explored_rate': metrics.get('explored_rate', np.nan),
+            'success_rate_0_99': metrics.get('success_rate', np.nan),
+            'dist_to_0_90_merged_m': metrics.get('dist_to_0_90', np.nan),
+            'dist_to_0_99_merged_m': metrics.get('dist_to_0_99', np.nan),
+            'individual_explored_rate_mean': metrics.get('individual_explored_rate_mean', np.nan),
+            'individual_explored_rate_std': metrics.get('individual_explored_rate_std', np.nan),
+            'compute_time_mean_s': metrics.get('compute_time_mean', np.nan),
+            'compute_time_std_s': metrics.get('compute_time_std', np.nan),
+        }
+        for metric_name, metric_value in episode_metrics.items():
+            rows_written += _write_metric_row(writer, common, metric_name, metric_value)
+
+        agent_metrics = {
+            'final_individual_explored_rate': metrics.get('individual_explored_rates', []),
+            'dist_to_0_90_individual_m': metrics.get('individual_dist_to_0_90', []),
+            'dist_to_0_99_individual_m': metrics.get('individual_dist_to_0_99', []),
+            'initial_budget_m': metrics.get('initial_budget_history', []),
+        }
+        final_remaining_budget = metrics.get('remaining_budget_history', [])
+        if len(final_remaining_budget) > 0:
+            agent_metrics['final_remaining_budget_m'] = final_remaining_budget[-1]
+
+        for metric_name, values in agent_metrics.items():
+            for agent_id, value in enumerate(values):
+                rows_written += _write_metric_row(
+                    writer,
+                    common,
+                    metric_name,
+                    value,
+                    scope='agent',
+                    agent_id=agent_id,
+                )
+
+        step_series = {
+            'max_travel_dist_m': metrics.get('length_history', []),
+            'merged_explored_rate': metrics.get('merged_explored_rate_history', metrics.get('explored_rate_history', [])),
+            'overlap_ratio': metrics.get('overlap_ratio_history', []),
+            'compute_time_s': metrics.get('compute_time_history', []),
+            'remaining_budget_mean_m': metrics.get('remaining_budget_mean_history', []),
+            'remaining_budget_min_m': metrics.get('remaining_budget_min_history', []),
+            'remaining_budget_max_m': metrics.get('remaining_budget_max_history', []),
+        }
+        for metric_name, values in step_series.items():
+            rows_written += _write_metric_series(writer, common, metric_name, values)
+
+        rows_written += _write_agent_metric_series(
+            writer,
+            common,
+            'individual_explored_rate',
+            metrics.get('individual_explored_rate_history', []),
+        )
+        rows_written += _write_agent_metric_series(
+            writer,
+            common,
+            'remaining_budget_m',
+            metrics.get('remaining_budget_history', []),
+        )
+
+    return rows_written
+
 def run_test():
     device = torch.device('cuda') if EVAL_USE_GPU else torch.device('cpu')
     global_network = PolicyNet(
@@ -83,9 +361,9 @@ def run_test():
     meta_agents = [Runner.remote(i) for i in range(NUM_META_AGENT)]
     weights = global_network.state_dict()
 
-    all_fov = [120]
-    all_n_agent = [2, 4, 8]
-    all_sensor_range = [8, 10, 15]
+    all_fov = [120, 150]
+    all_n_agent = [10]
+    all_sensor_range = [10, 15]
     all_utility_range = [range_val * 0.9 for range_val in all_sensor_range]
     all_budget_timesteps = TEST_BUDGET_TIMESTEPS_LIST
 
@@ -109,6 +387,8 @@ def run_test():
                     all_length_history = []
                     all_explored_rate_history = []
                     all_overlap_ratio_history =[]
+                    budget_exploration_rows = 0
+                    boxplot_metric_rows = 0
 
                     job_list = []
                     progress_bar = tqdm(
@@ -140,6 +420,23 @@ def run_test():
                                 all_length_history.extend(metrics['length_history'])
                                 all_explored_rate_history.extend(metrics['explored_rate_history'])
                                 all_overlap_ratio_history.extend(metrics['overlap_ratio_history'])
+                                budget_exploration_rows += append_budget_exploration_rows(
+                                    metrics,
+                                    info,
+                                    n_agent,
+                                    fov,
+                                    sensor_range,
+                                    budget_timesteps,
+                                )
+                                boxplot_metric_rows += append_boxplot_metric_rows(
+                                    metrics,
+                                    info,
+                                    n_agent,
+                                    fov,
+                                    sensor_range,
+                                    utility_range,
+                                    budget_timesteps,
+                                )
                                 progress_bar.update(1)
 
                                 if curr_test < NUM_TEST:
@@ -177,6 +474,8 @@ def run_test():
                         print('|#Std overlap ratio:', np.array(all_overlap_ratio_history).std())
                         print('|#Ave compute time:', safe_nanmean(compute_time_values))
                         print('|#Std compute time:', safe_nanstd(compute_time_values))
+                        print('|#Budget/exploration CSV rows:', budget_exploration_rows)
+                        print('|#Boxplot metrics CSV rows:', boxplot_metric_rows)
                         
                         lines = [
                         f"|#Test set: {TEST_SET}",
@@ -206,9 +505,13 @@ def run_test():
                         f"|#Std overlap ratio: {np.array(all_overlap_ratio_history).std()}",
                         f"|#Ave compute time: {safe_nanmean(compute_time_values)}",
                         f"|#Std compute time: {safe_nanstd(compute_time_values)}",
+                        f"|#Budget/exploration CSV: {BUDGET_EXPLORATION_RECORD_PATH}",
+                        f"|#Budget/exploration CSV rows: {budget_exploration_rows}",
+                        f"|#Boxplot metrics CSV: {BOXPLOT_METRICS_RECORD_PATH}",
+                        f"|#Boxplot metrics CSV rows: {boxplot_metric_rows}",
                         ]
 
-                        with open("record.txt", "a") as f:
+                        with open("record_10agents.txt", "a") as f:
                             for line in lines:
                                 f.write(line + "\n")
                             f.write("\n")  # 실행 1회 구분용 빈 줄

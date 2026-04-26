@@ -189,7 +189,11 @@ def _get_line_traversal_cells(start_cell, end_cell):
 
     x, y = x0, y0
     while x != x1 or y != y1:
-        if np.isclose(t_max_x, t_max_y):
+        if (
+            t_max_x != np.inf
+            and t_max_y != np.inf
+            and abs(t_max_x - t_max_y) <= (1e-08 + 1e-05 * abs(t_max_y))
+        ):
             next_x = x + step_x
             next_y = y + step_y
             cells.append((next_x, y))

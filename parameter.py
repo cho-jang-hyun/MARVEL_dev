@@ -19,7 +19,7 @@ Key configurations include:
 """
 
 FOLDER_NAME = '4_22_Dual_critic_estimation_metric_with_indv_complete_reward'
-LOAD_FOLDER_NAME = 'joint_action_5_9_GT_MAAC'
+LOAD_FOLDER_NAME = '4_22_Dual_critic_estimation_metric_with_indv_complete_reward'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
 train_path = f'train/{FOLDER_NAME}' # save tensorboard
@@ -27,7 +27,7 @@ gifs_path = f'gifs/{FOLDER_NAME}' # save gif
 
 # save training data
 SUMMARY_WINDOW = 32
-LOAD_MODEL = False  # do you want to load the model trained before
+LOAD_MODEL = True  # do you want to load the model trained before
 SAVE_IMG_GAP = 1000
 NUM_EPISODE_BUFFER = 54
 
@@ -84,11 +84,11 @@ MIN_BUDGET = BUDGET_END
 MAX_BUDGET = BUDGET_START
 REPLAY_SIZE = 10000
 MINIMUM_BUFFER_SIZE = 8000
-BATCH_SIZE = 256
+BATCH_SIZE = 128
 LR = 2e-5
 GAMMA = 0.99
 TAU = 0.003  # Soft update coefficient for target network (0.001 ~ 0.01)
-NUM_META_AGENT = 30
+NUM_META_AGENT = 15
 POST_PHASE_REPLAY_MIN_SAMPLES = 512
 POST_PHASE_BATCH_RATIO = 0.3
 
