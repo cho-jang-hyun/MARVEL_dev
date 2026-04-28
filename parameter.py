@@ -21,7 +21,7 @@ Key configurations include:
 FOLDER_NAME = '4_22_Dual_critic_estimation_metric_with_indv_complete_reward'
 LOAD_FOLDER_NAME = '4_22_Dual_critic_estimation_metric_with_indv_complete_reward'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
-load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
+load_path = f'model/{LOAD_FOLDER_NAME}' # load checkpoint
 train_path = f'train/{FOLDER_NAME}' # save tensorboard
 gifs_path = f'gifs/{FOLDER_NAME}' # save gif
 
@@ -92,8 +92,11 @@ NUM_META_AGENT = 15
 POST_PHASE_REPLAY_MIN_SAMPLES = 512
 POST_PHASE_BATCH_RATIO = 0.3
 
+# ablations
+USE_AGENT_OBSERVATION_AS_CRITIC_OBSERVATION = True
+
 # reward shaping
-MERGED_NODE_UTILITY_REWARD_WEIGHT = 1.0
+MERGED_NODE_UTILITY_REWARD_WEIGHT = 0.0
 VISITED_BY_OTHERS_DECAY = 0.025
 VISITED_BY_OTHERS_MIN = 0.08
 LOW_UTILITY_MOVE_THRESHOLD = 0.05

@@ -7,6 +7,7 @@ from utils.runtime_config import (
     TRAJECTORY_FEATURE_DIM,
     TRAJECTORY_EMBEDDING_DIM,
     TRAJECTORY_HISTORY_LENGTH,
+    USE_AGENT_OBSERVATION_AS_CRITIC_OBSERVATION,
 )
 
 
@@ -612,7 +613,9 @@ class QNet(nn.Module):
         self.neighboring_node_embedding = nn.Linear(embedding_dim * 3, embedding_dim)
 
         # Agent decoder
-        if train_algo in (2, 3, 4, 5):
+        if train_algo in (2, 3, 4, 5) and not (
+            train_algo in (4, 5) and USE_AGENT_OBSERVATION_AS_CRITIC_OBSERVATION
+        ):
             self.initial_embedding = nn.Linear(node_dim + 1, embedding_dim)
         else:
             # Graph embedding

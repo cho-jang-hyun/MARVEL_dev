@@ -25,6 +25,7 @@ def _apply_test_defaults(config_module):
         'UTILITY_RANGE': 0.9 * sensor_range,
         'VISITED_BY_OTHERS_DECAY': 0.025,
         'VISITED_BY_OTHERS_MIN': 0.05,
+        'USE_AGENT_OBSERVATION_AS_CRITIC_OBSERVATION': False,
     }
     for name, value in defaults.items():
         if not hasattr(config_module, name):

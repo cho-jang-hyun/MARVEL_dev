@@ -212,6 +212,20 @@ class MultiAgentWorker:
             critic_next_indices = [self.merged_critic_manager.get_node_index(robot.location) for robot in self.robot_list]
         return local_next_indices, critic_next_indices
 
+    def _agent_observation_as_critic_observation(self, observation):
+        return [
+            observation[0],
+            observation[1],
+            observation[2],
+            observation[3],
+            observation[4],
+            observation[5],
+            observation[6],
+            observation[7],
+            observation[8],
+            observation[12],
+        ]
+
     def _close_agent_replay(self, robot, team_node_managers, next_phase_flag=None):
         if self.replay_closed[robot.id] or len(robot.episode_buffer[0]) == 0:
             self.replay_closed[robot.id] = True
@@ -224,7 +238,7 @@ class MultiAgentWorker:
         )
         local_next_indices, critic_next_indices = self._get_joint_next_index_lists()
         joint_next_index_list = local_next_indices
-        if self.use_merged_critic and USE_COMMUNICATION:
+        if self.use_merged_critic and USE_COMMUNICATION and not USE_AGENT_OBSERVATION_AS_CRITIC_OBSERVATION:
             joint_next_index_list = critic_next_indices
         robot.save_next_observations(observation, joint_next_index_list)
 
@@ -232,16 +246,19 @@ class MultiAgentWorker:
             next_phase_flag = float(self.merged_objective_completed)
 
         if self.use_merged_critic:
-            critic_observation = self.merged_critic_manager.get_critic_observation(
-                robot.location,
-                robot.id,
-                self.env.robot_locations,
-                team_node_managers,
-                self.env.get_agent_map_info(robot.id),
-                local_observation=observation,
-                local_node_coords=robot.node_coords,
-                base_location=self.base_locations[robot.id],
-            )
+            if USE_AGENT_OBSERVATION_AS_CRITIC_OBSERVATION:
+                critic_observation = self._agent_observation_as_critic_observation(observation)
+            else:
+                critic_observation = self.merged_critic_manager.get_critic_observation(
+                    robot.location,
+                    robot.id,
+                    self.env.robot_locations,
+                    team_node_managers,
+                    self.env.get_agent_map_info(robot.id),
+                    local_observation=observation,
+                    local_node_coords=robot.node_coords,
+                    base_location=self.base_locations[robot.id],
+                )
             robot.save_next_critic_observations(critic_observation, next_critic_phase_flag=next_phase_flag)
         else:
             ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, base_location=self.base_locations[robot.id])
@@ -367,16 +384,19 @@ class MultiAgentWorker:
                 observation = observations[robot_id]
                 robot.save_observation(observation)
                 if self.use_merged_critic:
-                    critic_observation = self.merged_critic_manager.get_critic_observation(
-                        robot.location,
-                        robot.id,
-                        self.env.robot_locations,
-                        team_node_managers,
-                        self.env.get_agent_map_info(robot.id),
-                        local_observation=observation,
-                        local_node_coords=robot.node_coords,
-                        base_location=self.base_locations[robot.id],
-                    )
+                    if USE_AGENT_OBSERVATION_AS_CRITIC_OBSERVATION:
+                        critic_observation = self._agent_observation_as_critic_observation(observation)
+                    else:
+                        critic_observation = self.merged_critic_manager.get_critic_observation(
+                            robot.location,
+                            robot.id,
+                            self.env.robot_locations,
+                            team_node_managers,
+                            self.env.get_agent_map_info(robot.id),
+                            local_observation=observation,
+                            local_node_coords=robot.node_coords,
+                            base_location=self.base_locations[robot.id],
+                        )
                     robot.current_critic_index = critic_observation[3][0, 0, 0].item()
                     robot.save_critic_observation(critic_observation, critic_phase_flag=current_phase_flag)
                 else:
@@ -495,10 +515,12 @@ class MultiAgentWorker:
                 else:
                     utility_reward = 0
 
-                merged_node_utility = self.merged_map_manager.get_node_utility(next_location)
-                merged_node_utility_reward = MERGED_NODE_UTILITY_REWARD_WEIGHT * (
-                    merged_node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
-                )
+                merged_node_utility_reward = 0.0
+                if MERGED_NODE_UTILITY_REWARD_WEIGHT != 0:
+                    merged_node_utility = self.merged_map_manager.get_node_utility(next_location)
+                    merged_node_utility_reward = MERGED_NODE_UTILITY_REWARD_WEIGHT * (
+                        merged_node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
+                    )
 
                 preferred_angle = node.highest_utility_angle
                 if preferred_angle == -360:
@@ -517,7 +539,7 @@ class MultiAgentWorker:
                 #     robot_headings_list
                 # )
 
-                low_utility_signal = 0.5 * utility_reward + merged_node_utility_reward
+                low_utility_signal = 0.5 * utility_reward
                 if low_utility_signal < LOW_UTILITY_MOVE_THRESHOLD:
                     self.low_utility_streaks[robot_id] += 1
                 else:
@@ -560,7 +582,7 @@ class MultiAgentWorker:
 
             curr_node_indices = np.array([robot.current_index for robot in self.robot_list])
             curr_critic_indices = None
-            if self.use_merged_critic and USE_COMMUNICATION:
+            if self.use_merged_critic and USE_COMMUNICATION and not USE_AGENT_OBSERVATION_AS_CRITIC_OBSERVATION:
                 curr_critic_indices = np.array([self.merged_critic_manager.get_node_index(robot.location) for robot in self.robot_list])
 
             for robot_id, reward in zip(active_explorer_ids, reward_list):
@@ -577,7 +599,7 @@ class MultiAgentWorker:
                 transition_done = mission_failure or robot_should_return
                 robot.save_reward(reward + team_reward + individual_completion_bonus)
                 if USE_COMMUNICATION:
-                    if self.use_merged_critic:
+                    if self.use_merged_critic and not USE_AGENT_OBSERVATION_AS_CRITIC_OBSERVATION:
                         robot.save_all_indices(curr_critic_indices)
                     else:
                         robot.save_all_indices(curr_node_indices)
