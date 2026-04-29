@@ -255,6 +255,12 @@ class MultiAgentWorker:
                 continue
             self._close_agent_replay(robot, team_node_managers)
 
+    @staticmethod
+    def _mark_last_transition_done(robot):
+        if len(robot.episode_buffer[10]) == 0:
+            return
+        robot.episode_buffer[10][-1] = torch.ones_like(robot.episode_buffer[10][-1])
+
     def _has_feasible_exploration_action(self, robot, observation):
         current_edge = observation[4][0, :, 0].detach().cpu().numpy()
         edge_padding = observation[5][0, 0].detach().cpu().numpy()
@@ -287,6 +293,7 @@ class MultiAgentWorker:
             self._set_agent_budget_context(robot)
 
         mission_failure = False
+        hard_failure = False
         max_decision_steps = MAX_EPISODE_STEP + self._budget_to_decision_steps(np.max(self.initial_budgets))
 
         for i in range(max_decision_steps):
@@ -310,6 +317,7 @@ class MultiAgentWorker:
                     if len(return_path) == 0:
                         if not robot_at_base:
                             mission_failure = True
+                            hard_failure = True
                         selected_locations[robot.id] = robot.location.copy()
                     else:
                         selected_locations[robot.id] = return_path[0].copy()
@@ -327,6 +335,7 @@ class MultiAgentWorker:
                     if len(return_path) == 0:
                         if not robot_at_base:
                             mission_failure = True
+                            hard_failure = True
                         selected_locations[robot.id] = robot.location.copy()
                     else:
                         selected_locations[robot.id] = return_path[0].copy()
@@ -346,6 +355,7 @@ class MultiAgentWorker:
                     if len(return_path) == 0:
                         if not robot_at_base:
                             mission_failure = True
+                            hard_failure = True
                         selected_locations[robot.id] = robot.location.copy()
                     else:
                         selected_locations[robot.id] = return_path[0].copy()
@@ -356,7 +366,7 @@ class MultiAgentWorker:
                 observations[robot.id] = observation
                 active_explorer_ids.append(robot.id)
 
-            if mission_failure:
+            if hard_failure:
                 break
 
             if len(active_explorer_ids) == 0 and np.all(self.returning_agents):
@@ -550,7 +560,8 @@ class MultiAgentWorker:
             for robot in self.robot_list:
                 self._set_agent_budget_context(robot)
 
-            if np.any(self.remaining_budgets < 0):
+            over_budget_agents = self.remaining_budgets < 0
+            if np.any(over_budget_agents):
                 mission_failure = True
 
             raw_team_reward = self.env.calculate_team_reward() - 0.5
@@ -572,9 +583,10 @@ class MultiAgentWorker:
                     individual_completion_bonus = INDIVIDUAL_SUCCESS_BONUS
                 robot_should_return = (
                     local_completed
+                    or over_budget_agents[robot_id]
                     or self._should_force_return(robot.get_distance_to_base(), self.remaining_budgets[robot_id])
                 )
-                transition_done = mission_failure or robot_should_return
+                transition_done = hard_failure or robot_should_return
                 robot.save_reward(reward + team_reward + individual_completion_bonus)
                 if USE_COMMUNICATION:
                     if self.use_merged_critic:
@@ -586,11 +598,24 @@ class MultiAgentWorker:
                     self.returning_agents[robot_id] = True
                     self._close_agent_replay(robot, team_node_managers, next_phase_flag=next_phase_flag)
 
-            if mission_failure:
+            if hard_failure:
                 break
 
             if np.all(self.returning_agents):
                 break
+
+        if not hard_failure and not np.all(self.returning_agents):
+            mission_failure = True
+            for robot in self.robot_list:
+                if self.returning_agents[robot.id]:
+                    continue
+                self.returning_agents[robot.id] = True
+                self._mark_last_transition_done(robot)
+                self._close_agent_replay(
+                    robot,
+                    team_node_managers,
+                    next_phase_flag=float(self.merged_objective_completed),
+                )
 
         self._finalize_open_agent_replays(team_node_managers)
         for robot in self.robot_list:
