@@ -613,6 +613,20 @@ class TestWorker:
 
         return detected_robots
 
+    def _draw_return_label(self, ax, location, color):
+        ax.text(
+            location[0],
+            location[1] - 6,
+            'return',
+            fontsize=6.5,
+            fontweight='bold',
+            color='black',
+            ha='center',
+            va='bottom',
+            bbox=dict(facecolor='white', edgecolor=color, boxstyle='round,pad=0.16', alpha=0.9),
+            zorder=20,
+        )
+
     def plot_individual_agent_views(self, step, robot_locations, robot_headings):
         """
         Create visualization showing each agent's individual map belief and frontier distribution
@@ -789,6 +803,8 @@ class TestWorker:
             arrow = FancyArrowPatch((location[0], location[1]), (location[0] + dx/1.25, location[1] + dy/1.25),
                                     mutation_scale=10, color=c, arrowstyle='-|>')
             plt.gca().add_artist(arrow)
+            if self.returning_agents[robot.id]:
+                self._draw_return_label(plt.gca(), location, c)
 
         global_frontiers = get_frontier_in_map(self.env.belief_info)
         if len(global_frontiers) != 0:
@@ -812,6 +828,8 @@ class TestWorker:
             arrow = FancyArrowPatch((location[0], location[1]), (location[0] + dx/1.25, location[1] + dy/1.25),
                                     mutation_scale=10, color=c, arrowstyle='-|>')
             plt.gca().add_artist(arrow)
+            if self.returning_agents[robot.id]:
+                self._draw_return_label(plt.gca(), location, c)
             cone = Wedge(center=(location[0], location[1]), r=self.sensor_range / CELL_SIZE,
                         theta1=(heading-self.fov/2), theta2=(heading+self.fov/2), color=c, alpha=0.3, zorder=10)
             plt.gca().add_artist(cone)
@@ -856,6 +874,8 @@ class TestWorker:
             arrow = FancyArrowPatch((location[0], location[1]), (location[0] + dx/1.25, location[1] + dy/1.25),
                                     mutation_scale=10, color=c, arrowstyle='-|>', linewidth=2)
             plt.gca().add_artist(arrow)
+            if self.returning_agents[robot.id]:
+                self._draw_return_label(plt.gca(), location, c)
 
             # Draw FOV cone
             cone = Wedge(center=(location[0], location[1]), r=self.sensor_range / CELL_SIZE,
@@ -916,6 +936,8 @@ class TestWorker:
                 mutation_scale=10, color=c, arrowstyle='-|>', linewidth=2
             )
             plt.gca().add_artist(arrow)
+            if self.returning_agents[robot.id]:
+                self._draw_return_label(plt.gca(), np.array([robot_local_x, robot_local_y]), c)
 
             # Draw FOV cone
             cone = Wedge(

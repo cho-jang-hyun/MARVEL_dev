@@ -255,6 +255,16 @@ class MultiAgentWorker:
                 continue
             self._close_agent_replay(robot, team_node_managers)
 
+    def _plot_current_return_status_frame(self, frame_id):
+        if not self.save_image:
+            return
+        robot_locations = get_cell_position_from_coords(
+            np.asarray(self.env.robot_locations).reshape(-1, 2),
+            self.env.belief_info,
+        )
+        robot_headings = [robot.heading for robot in self.robot_list]
+        self.plot_local_env_sim(frame_id, robot_locations, robot_headings, locations_are_cells=True)
+
     @staticmethod
     def _mark_last_transition_done(robot):
         if len(robot.episode_buffer[10]) == 0:
@@ -370,6 +380,7 @@ class MultiAgentWorker:
                 break
 
             if len(active_explorer_ids) == 0 and np.all(self.returning_agents):
+                self._plot_current_return_status_frame(f'{i}_all_returning')
                 break
 
             for robot_id in active_explorer_ids:
@@ -574,6 +585,7 @@ class MultiAgentWorker:
             if self.use_merged_critic and USE_COMMUNICATION:
                 curr_critic_indices = np.array([self.merged_critic_manager.get_node_index(robot.location) for robot in self.robot_list])
 
+            return_started_this_step = False
             for robot_id, reward in zip(active_explorer_ids, reward_list):
                 robot = self.robot_list[robot_id]
                 local_completed = self._local_objective_completed(robot)
@@ -595,8 +607,12 @@ class MultiAgentWorker:
                         robot.save_all_indices(curr_node_indices)
                 robot.save_done(transition_done)
                 if robot_should_return:
+                    return_started_this_step = True
                     self.returning_agents[robot_id] = True
                     self._close_agent_replay(robot, team_node_managers, next_phase_flag=next_phase_flag)
+
+            if return_started_this_step:
+                self._plot_current_return_status_frame(f'{i}_return_start')
 
             if hard_failure:
                 break
@@ -758,9 +774,22 @@ class MultiAgentWorker:
                     zorder=1.8,
                 )
 
-    def _draw_robot_overlay(self, ax, location, heading, color, sensing_range, draw_fov=True, linewidth=1.2):
+    def _draw_robot_overlay(self, ax, location, heading, color, sensing_range, draw_fov=True, linewidth=1.2, return_mode=False):
         location = np.asarray(location)
         ax.plot(location[0], location[1], marker='o', color=color, markersize=4.5, zorder=6)
+        if return_mode:
+            ax.text(
+                location[0],
+                location[1] - 6,
+                'return',
+                fontsize=6.5,
+                fontweight='bold',
+                color='black',
+                ha='center',
+                va='bottom',
+                bbox=dict(facecolor='white', edgecolor=color, boxstyle='round,pad=0.16', alpha=0.9),
+                zorder=9,
+            )
         dx, dy = self.heading_to_vector(heading, length=sensing_range)
         arrow = FancyArrowPatch(
             (location[0], location[1]),
@@ -843,7 +872,16 @@ class MultiAgentWorker:
 
         for robot, location, heading in zip(self.robot_list, plot_robot_locations, robot_headings):
             c = color_list[robot.id % len(color_list)]
-            self._draw_robot_overlay(merged_ax, location, heading, c, sensing_range, draw_fov=True, linewidth=1.2)
+            self._draw_robot_overlay(
+                merged_ax,
+                location,
+                heading,
+                c,
+                sensing_range,
+                draw_fov=True,
+                linewidth=1.2,
+                return_mode=self.returning_agents[robot.id],
+            )
 
         fov_ax = fig.add_subplot(gs[0, 1])
         fov_ax.imshow(self.env.robot_belief, cmap='gray', interpolation='nearest', vmin=OCCUPIED, vmax=FREE)
@@ -869,7 +907,16 @@ class MultiAgentWorker:
                 linewidth=1.2,
                 zorder=1,
             )
-            self._draw_robot_overlay(fov_ax, location, heading, c, sensing_range, draw_fov=True, linewidth=1.2)
+            self._draw_robot_overlay(
+                fov_ax,
+                location,
+                heading,
+                c,
+                sensing_range,
+                draw_fov=True,
+                linewidth=1.2,
+                return_mode=self.returning_agents[robot.id],
+            )
 
         gt_ax = fig.add_subplot(gs[0, 2])
         gt_ax.imshow(
@@ -893,7 +940,16 @@ class MultiAgentWorker:
 
         for i, (location, heading) in enumerate(zip(plot_robot_locations, robot_headings)):
             c = color_list[i % len(color_list)]
-            self._draw_robot_overlay(gt_ax, location, heading, c, sensing_range, draw_fov=True, linewidth=1.2)
+            self._draw_robot_overlay(
+                gt_ax,
+                location,
+                heading,
+                c,
+                sensing_range,
+                draw_fov=True,
+                linewidth=1.2,
+                return_mode=self.returning_agents[i],
+            )
 
         summary_ax = fig.add_subplot(gs[0, 3])
         summary_ax.axis('off')
@@ -1080,7 +1136,16 @@ class MultiAgentWorker:
 
             location = plot_robot_locations[robot.id]
             heading = robot_headings[robot.id]
-            self._draw_robot_overlay(agent_ax, location, heading, c, sensing_range, draw_fov=True, linewidth=1.2)
+            self._draw_robot_overlay(
+                agent_ax,
+                location,
+                heading,
+                c,
+                sensing_range,
+                draw_fov=True,
+                linewidth=1.2,
+                return_mode=self.returning_agents[robot.id],
+            )
 
             num_nodes = 0 if plot_node_coords is None else len(plot_node_coords)
             agent_ax.set_title(
@@ -1093,6 +1158,7 @@ class MultiAgentWorker:
             # Budget loading bar (below each agent subplot), expressed in meters.
             initial_budget = max(float(self.initial_budgets[robot.id]), 1.0) if hasattr(self, 'initial_budgets') else max(float(BUDGET), 1.0)
             remaining = float(max(self.remaining_budgets[robot.id], 0.0)) if hasattr(self, 'remaining_budgets') else float(BUDGET)
+            is_returning = bool(hasattr(self, 'returning_agents') and self.returning_agents[robot.id])
             fraction_remaining = remaining / initial_budget
             if fraction_remaining > 0.5:
                 bar_color = '#2ecc71'   # green  — high budget
@@ -1109,13 +1175,27 @@ class MultiAgentWorker:
                                 color=bar_color, clip_on=True, zorder=16)
             agent_ax.add_patch(bar_fg)
             agent_ax.text(
-                0.5, 0.975,
-                f'{remaining:.1f}/{initial_budget:.1f} m{" | return" if hasattr(self, "returning_agents") and self.returning_agents[robot.id] else ""}',
+                0.42 if is_returning else 0.5, 0.975,
+                f'{remaining:.0f}/{initial_budget:.0f}m',
                 transform=agent_ax.transAxes,
                 fontsize=6.5, ha='center', va='center',
                 fontweight='bold', color='#1a1a1a',
                 clip_on=True, zorder=17,
             )
+            if is_returning:
+                agent_ax.text(
+                    0.88, 0.975,
+                    'return',
+                    transform=agent_ax.transAxes,
+                    fontsize=6.2,
+                    ha='center',
+                    va='center',
+                    fontweight='bold',
+                    color='#1a1a1a',
+                    bbox=dict(facecolor='white', edgecolor=c, boxstyle='round,pad=0.12', alpha=0.9),
+                    clip_on=False,
+                    zorder=18,
+                )
 
         for empty_col in range(self.n_agents, n_cols):
             empty_ax = fig.add_subplot(gs[1, empty_col])
