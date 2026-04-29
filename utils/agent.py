@@ -355,6 +355,34 @@ class Agent:
             node_distances[i, 0] = min(distance / scale, 2.0) if np.isfinite(distance) else 2.0
         return node_distances
 
+    def _mask_budget_infeasible_edges(self, edge_padding_mask, current_edge, k_size, base_dist_dict):
+        if self.return_mode:
+            return edge_padding_mask
+
+        if base_dist_dict is None or self.base_location is None:
+            edge_padding_mask[0, 0, :k_size] = 1
+            return edge_padding_mask
+
+        current_coords = self.node_coords[self.current_index]
+        remaining_budget = float(self.remaining_budget)
+        epsilon = 1e-6
+
+        for slot in range(k_size):
+            if int(edge_padding_mask[0, 0, slot].item()) != 0:
+                continue
+
+            candidate_index = int(current_edge[0, slot, 0].item())
+            candidate_coords = self.node_coords[candidate_index]
+            candidate_key = (candidate_coords[0], candidate_coords[1])
+            candidate_to_base = base_dist_dict.get(candidate_key, float('inf'))
+            step_cost = float(np.linalg.norm(candidate_coords - current_coords))
+            required_budget = step_cost + float(candidate_to_base) + RETURN_SAFETY_MARGIN
+
+            if not np.isfinite(required_budget) or required_budget > remaining_budget + epsilon:
+                edge_padding_mask[0, 0, slot] = 1
+
+        return edge_padding_mask
+
     def get_observation(self, pad=True, robot_locations=None, trajectory_buffer=None):
         node_coords = self.node_coords
         n_node = node_coords.shape[0]
@@ -451,6 +479,12 @@ class Agent:
         else:
             edge_padding_mask = torch.zeros((1, 1, k_size), dtype=torch.int16, device=self.device)
             edge_padding_mask[0, 0, current_in_edge] = 1
+        edge_padding_mask = self._mask_budget_infeasible_edges(
+            edge_padding_mask,
+            current_edge,
+            k_size,
+            base_dist_dict,
+        )
 
         # Store references for later use (no clone needed — tensors are freshly created)
         self.current_edge_tensor = current_edge
