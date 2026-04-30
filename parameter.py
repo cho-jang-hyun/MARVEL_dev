@@ -93,7 +93,7 @@ POST_PHASE_REPLAY_MIN_SAMPLES = 512
 POST_PHASE_BATCH_RATIO = 0.3
 
 # reward shaping
-MERGED_NODE_UTILITY_REWARD_WEIGHT = 1.0
+MERGED_NODE_UTILITY_REWARD_WEIGHT = 0.0
 VISITED_BY_OTHERS_DECAY = 0.025
 VISITED_BY_OTHERS_MIN = 0.08
 LOW_UTILITY_MOVE_THRESHOLD = 0.05
@@ -132,7 +132,7 @@ NUM_GPU = 1  # Number of GPUs for DataParallel in main process
 GPU_ID = 0  # Which GPU to use (0 or 1). Set to None to use all available GPUs
 
 USE_WANDB = False
-TRAIN_ALGO = 4
+TRAIN_ALGO = 0
 # 0: SAC
 # 1: MAAC
 # 2: Ground Truth critic

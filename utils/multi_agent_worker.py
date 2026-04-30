@@ -567,11 +567,6 @@ class MultiAgentWorker:
                 else:
                     utility_reward = 0
 
-                merged_node_utility = self.merged_map_manager.get_node_utility(next_location)
-                merged_node_utility_reward = MERGED_NODE_UTILITY_REWARD_WEIGHT * (
-                    merged_node_utility / (2 * self.sensor_range * 3.14 // FRONTIER_CELL_SIZE)
-                )
-
                 preferred_angle = node.highest_utility_angle
                 if preferred_angle == -360:
                     angle_reward = 0
@@ -589,7 +584,7 @@ class MultiAgentWorker:
                 #     robot_headings_list
                 # )
 
-                low_utility_signal = 0.5 * utility_reward + merged_node_utility_reward
+                low_utility_signal = 0.5 * utility_reward
                 if low_utility_signal < LOW_UTILITY_MOVE_THRESHOLD:
                     self.low_utility_streaks[robot_id] += 1
                 else:
@@ -606,7 +601,6 @@ class MultiAgentWorker:
 
                 reward_list.append(
                     utility_reward
-                    + merged_node_utility_reward
                     + trajectory_reward
                     - trajectory_history_penalty
                     - repeated_low_utility_penalty)
