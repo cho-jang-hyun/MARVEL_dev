@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '4_22_Dual_critic_estimation_metric_with_indv_complete_reward'
+FOLDER_NAME = '4_30'
 LOAD_FOLDER_NAME = '4_22_Dual_critic_estimation_metric_with_indv_complete_reward'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -27,7 +27,7 @@ gifs_path = f'gifs/{FOLDER_NAME}' # save gif
 
 # save training data
 SUMMARY_WINDOW = 32
-LOAD_MODEL = True  # do you want to load the model trained before
+LOAD_MODEL = False  # do you want to load the model trained before
 SAVE_IMG_GAP = 1000
 NUM_EPISODE_BUFFER = 54
 
@@ -111,7 +111,7 @@ NODE_INPUT_DIM = 9  # Local actor node features, including visited_self as the f
 EMBEDDING_DIM = 128
 BUDGET_FEATURE_DIM = 4  # log_initial_m, log_remaining_m, remaining/initial, distance_to_base/remaining
 RETURN_SAFETY_MARGIN = 0.0  # extra meters reserved before an agent must stop exploring and head home
-SIMULATE_RETURN_TO_BASE = True  # Returning agents are simulated while teammates still explore; once all agents are returning, the episode stops.
+SIMULATE_RETURN_TO_BASE = False  # Returning agents are simulated while teammates still explore; once all agents are returning, the episode stops.
 
 # Trajectory tracking parameters
 TRAJECTORY_HISTORY_LENGTH = 10  # Number of recent steps to track

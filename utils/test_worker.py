@@ -220,6 +220,34 @@ class TestWorker:
     def _should_force_return(distance_to_base, remaining_budget):
         return distance_to_base + RETURN_SAFETY_MARGIN >= remaining_budget
 
+    def _exploration_move_preserves_return_budget(self, robot, next_location):
+        step_distance = float(np.linalg.norm(np.asarray(next_location, dtype=float) - robot.location))
+        next_distance_to_base = robot.get_distance_to_base(start_location=next_location)
+        if not np.isfinite(next_distance_to_base):
+            return False
+        required_budget = step_distance + next_distance_to_base + RETURN_SAFETY_MARGIN
+        return required_budget <= self.remaining_budgets[robot.id] + 1e-6
+
+    def _set_return_target(self, robot, selected_locations, dist_list, next_heading_index_list):
+        robot_at_base = np.allclose(robot.location, self.base_locations[robot.id])
+        if robot_at_base:
+            selected_locations[robot.id] = robot.location.copy()
+            dist_list[robot.id] = 0.0
+            next_heading_index_list[robot.id] = self._get_heading_index_towards(robot, robot.location)
+            return False
+
+        return_path = self._get_return_path(robot)
+        if len(return_path) == 0:
+            selected_locations[robot.id] = robot.location.copy()
+            dist_list[robot.id] = 0.0
+            next_heading_index_list[robot.id] = self._get_heading_index_towards(robot, robot.location)
+            return True
+
+        selected_locations[robot.id] = return_path[0].copy()
+        dist_list[robot.id] = np.linalg.norm(selected_locations[robot.id] - robot.location)
+        next_heading_index_list[robot.id] = self._get_heading_index_towards(robot, selected_locations[robot.id])
+        return False
+
     @staticmethod
     def _budget_to_decision_steps(budget_value):
         if BUDGET_TIMESTEP_METERS <= 0:
@@ -332,15 +360,32 @@ class TestWorker:
                 break
 
             if len(active_explorer_ids) == 0 and np.all(self.returning_agents):
-                break
+                if not SIMULATE_RETURN_TO_BASE or self._all_agents_at_base():
+                    break
 
-            for robot_id in active_explorer_ids:
+            candidate_explorer_ids = active_explorer_ids
+            active_explorer_ids = []
+            for robot_id in candidate_explorer_ids:
                 robot = self.robot_list[robot_id]
                 observation = observations[robot_id]
                 next_location, _, _, next_heading_index = robot.select_next_waypoint(observation, greedy=self.greedy)
+                if not self._exploration_move_preserves_return_budget(robot, next_location):
+                    self.returning_agents[robot_id] = True
+                    if self._set_return_target(robot, selected_locations, dist_list, next_heading_index_list):
+                        mission_failure = True
+                    continue
+
                 selected_locations[robot_id] = next_location.copy()
                 dist_list[robot_id] = np.linalg.norm(next_location - robot.location)
                 next_heading_index_list[robot_id] = next_heading_index
+                active_explorer_ids.append(robot_id)
+
+            if mission_failure:
+                break
+
+            if len(active_explorer_ids) == 0 and np.all(self.returning_agents):
+                if not SIMULATE_RETURN_TO_BASE or self._all_agents_at_base():
+                    break
 
             selected_locations = np.asarray(selected_locations).reshape(-1, 2)
             arriving_sequence = np.argsort(np.asarray(dist_list))
@@ -370,6 +415,28 @@ class TestWorker:
                     selected_locations_in_arriving_sequence[j] = selected_location
                     selected_locations[robot_id] = selected_location
                 resolved_location_keys.add(selected_key)
+
+            still_active_explorer_ids = []
+            selected_locations_list = [selected_locations[k].copy() for k in range(self.n_agents)]
+            for robot_id in active_explorer_ids:
+                robot = self.robot_list[robot_id]
+                if self._exploration_move_preserves_return_budget(robot, selected_locations[robot_id]):
+                    still_active_explorer_ids.append(robot_id)
+                    continue
+
+                self.returning_agents[robot_id] = True
+                if self._set_return_target(robot, selected_locations_list, dist_list, next_heading_index_list):
+                    mission_failure = True
+
+            if mission_failure:
+                break
+
+            active_explorer_ids = still_active_explorer_ids
+            selected_locations = np.asarray(selected_locations_list).reshape(-1, 2)
+
+            if len(active_explorer_ids) == 0 and np.all(self.returning_agents):
+                if not SIMULATE_RETURN_TO_BASE or self._all_agents_at_base():
+                    break
 
             robot_locations_sim = []
             robot_headings_sim = []
@@ -470,7 +537,8 @@ class TestWorker:
             if mission_failure:
                 break
             if np.all(self.returning_agents):
-                break
+                if not SIMULATE_RETURN_TO_BASE or self._all_agents_at_base():
+                    break
 
         # Save metrics
         final_travel_dist = self._get_max_travel_dist()
