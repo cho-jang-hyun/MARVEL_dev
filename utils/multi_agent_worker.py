@@ -40,7 +40,7 @@ if not os.path.exists(gifs_path):
     os.makedirs(gifs_path)
 
 class MultiAgentWorker:
-    def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', save_image=False, curriculum_success_rate=0.0):
+    def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', save_image=False):
         self.meta_agent_id = meta_agent_id
         self.global_step = global_step
         self.save_image = save_image
@@ -91,7 +91,7 @@ class MultiAgentWorker:
                 0.0
             ))
         self.base_locations = self.env.robot_locations.copy()
-        self.initial_budgets = self._sample_initial_budgets(curriculum_success_rate)
+        self.initial_budgets = self._sample_initial_budgets()
         self.remaining_budgets = self.initial_budgets.copy()
         self.returning_agents = np.zeros(self.n_agents, dtype=bool)
         self.replay_closed = np.zeros(self.n_agents, dtype=bool)
@@ -115,17 +115,8 @@ class MultiAgentWorker:
 
         return None, None
 
-    def _sample_initial_budgets(self, curriculum_success_rate=0.0):
-        success_rate = float(np.clip(curriculum_success_rate, 0.0, 1.0))
-        target_budget = BUDGET_END + (BUDGET_START - BUDGET_END) * (1.0 - success_rate)
-
-        if np.random.random() < BUDGET_CURRICULUM_UNIFORM_P:
-            sampled_budgets = np.random.uniform(BUDGET_END, BUDGET_START, size=self.n_agents)
-        else:
-            noise = np.random.uniform(-BUDGET_CURRICULUM_NOISE, BUDGET_CURRICULUM_NOISE, size=self.n_agents)
-            sampled_budgets = target_budget + noise
-
-        return np.clip(sampled_budgets, BUDGET_END, BUDGET_START).astype(float)
+    def _sample_initial_budgets(self):
+        return np.random.uniform(MIN_BUDGET, MAX_BUDGET, size=self.n_agents).astype(float)
 
     def _set_agent_budget_context(self, robot):
         robot.set_budget_context(

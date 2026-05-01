@@ -472,9 +472,6 @@ def main():
 
     curr_episode = 0
     best_success_rate = -float('inf')  # Track best performance for saving best model
-    curriculum_success_rate = 0.0     # EMA of success rate used to anneal the budget
-    curriculum_completed_episodes = 0
-    curriculum_success_window = []
 
     if USE_WANDB:
         import parameter
@@ -501,9 +498,6 @@ def main():
         load_optimizer_state_if_compatible(log_alpha_optimizer, checkpoint['log_alpha_optimizer'], 'log_alpha')
         curr_episode = checkpoint['episode']
         best_success_rate = checkpoint.get('best_success_rate', -float('inf'))
-        curriculum_success_rate = checkpoint.get('curriculum_success_rate', 0.0)
-        curriculum_completed_episodes = checkpoint.get('curriculum_completed_episodes', curr_episode)
-        curriculum_success_window = list(checkpoint.get('curriculum_success_window', []))
         if 'reward_normalizer' in checkpoint:
             reward_normalizer.load_state_dict(checkpoint['reward_normalizer'])
 
@@ -540,7 +534,7 @@ def main():
     job_list = []
     for i, meta_agent in enumerate(meta_agents):
         curr_episode += 1
-        job_list.append(meta_agent.job.remote(weights_set, curr_episode, curriculum_success_rate))
+        job_list.append(meta_agent.job.remote(weights_set, curr_episode))
 
     # initialize metric collector
     metric_name = ['merged_travel_dist', 'travel_dist', 'success_rate', 'explored_rate', 'episode_reward']
@@ -566,27 +560,14 @@ def main():
             # save experience and metric
             for job in done_jobs:
                 job_results, metrics, info = job
-                curriculum_completed_episodes += 1
                 for i in range(len(experience_buffer)):
                     experience_buffer[i] += job_results[i]
                 for n in metric_name:
                     perf_metrics[n].append(metrics[n])
-                curriculum_success_signal = float(
-                    metrics.get('explored_rate', 0.0) >= BUDGET_CURRICULUM_SUCCESS_THRESHOLD
-                )
-                if curriculum_completed_episodes > BUDGET_CURRICULUM_WARMUP_EPISODES:
-                    curriculum_success_window.append(curriculum_success_signal)
-                    if len(curriculum_success_window) >= max(int(BUDGET_CURRICULUM_UPDATE_STRIDE), 1):
-                        aggregated_success = float(np.mean(curriculum_success_window))
-                        curriculum_success_rate = (
-                            (1 - BUDGET_CURRICULUM_EMA) * curriculum_success_rate
-                            + BUDGET_CURRICULUM_EMA * aggregated_success
-                        )
-                        curriculum_success_window = []
 
             # launch new task
             curr_episode += 1
-            job_list.append(meta_agents[info['id']].job.remote(weights_set, curr_episode, curriculum_success_rate))
+            job_list.append(meta_agents[info['id']].job.remote(weights_set, curr_episode))
 
             # start training
             if curr_episode % 1 == 0 and len(experience_buffer[0]) >= MINIMUM_BUFFER_SIZE:
@@ -735,9 +716,8 @@ def main():
             # write record to tensorboard
             if len(training_data) >= SUMMARY_WINDOW:
                 write_to_tensor_board(writer, training_data, curr_episode)
-                writer.add_scalar('Curriculum/success_rate_ema', curriculum_success_rate, curr_episode)
-                current_budget = BUDGET_END + ((BUDGET_START - BUDGET_END) * (1.0 - curriculum_success_rate))
-                writer.add_scalar('Curriculum/budget_meters', current_budget, curr_episode)
+                writer.add_scalar('BudgetSampling/min_budget_meters', MIN_BUDGET, curr_episode)
+                writer.add_scalar('BudgetSampling/max_budget_meters', MAX_BUDGET, curr_episode)
                 training_data = []
                 perf_metrics = {}
                 for n in metric_name:
@@ -765,9 +745,6 @@ def main():
                               "log_alpha_optimizer": log_alpha_optimizer.state_dict(),
                               "episode": curr_episode,
                               "best_success_rate": best_success_rate,
-                              "curriculum_success_rate": curriculum_success_rate,
-                              "curriculum_completed_episodes": curriculum_completed_episodes,
-                              "curriculum_success_window": curriculum_success_window,
                               "reward_normalizer": reward_normalizer.state_dict(),
                               }
 

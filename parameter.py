@@ -19,7 +19,7 @@ Key configurations include:
 """
 
 FOLDER_NAME = '4_30'
-LOAD_FOLDER_NAME = '4_22_Dual_critic_estimation_metric_with_indv_complete_reward'
+LOAD_FOLDER_NAME = '5_1_remove_curriculum_albation'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
 train_path = f'train/{FOLDER_NAME}' # save tensorboard
@@ -70,15 +70,8 @@ MAX_EPISODE_STEP = 128
 BUDGET_TIMESTEP_METERS = 8.0
 BUDGET_START_TIMESTEPS = 128
 BUDGET_END_TIMESTEPS = 80
-BUDGET_CURRICULUM_NOISE_TIMESTEPS = 16
-BUDGET_START = BUDGET_START_TIMESTEPS * BUDGET_TIMESTEP_METERS   # budget when success rate is 0 (easy), in meters
-BUDGET_END = BUDGET_END_TIMESTEPS * BUDGET_TIMESTEP_METERS       # budget when success rate is 1 (hard), in meters
-BUDGET_CURRICULUM_NOISE = BUDGET_CURRICULUM_NOISE_TIMESTEPS * BUDGET_TIMESTEP_METERS   # ±uniform noise around the curriculum target budget, in meters
-BUDGET_CURRICULUM_EMA = 0.002  # EMA smoothing for success rate tracker
-BUDGET_CURRICULUM_UNIFORM_P = 0.6  # probability of ignoring curriculum and sampling uniformly (prevents forgetting)
-BUDGET_CURRICULUM_SUCCESS_THRESHOLD = 0.995  # stricter success signal used only for curriculum updates
-BUDGET_CURRICULUM_WARMUP_EPISODES = 1500  # keep near-high budgets before curriculum starts decaying
-BUDGET_CURRICULUM_UPDATE_STRIDE = 8  # apply EMA after aggregating this many completed episodes
+BUDGET_START = BUDGET_START_TIMESTEPS * BUDGET_TIMESTEP_METERS
+BUDGET_END = BUDGET_END_TIMESTEPS * BUDGET_TIMESTEP_METERS
 BUDGET = BUDGET_START
 MIN_BUDGET = BUDGET_END
 MAX_BUDGET = BUDGET_START
