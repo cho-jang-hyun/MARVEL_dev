@@ -934,7 +934,7 @@ class Agent:
             self.episode_buffer[37] = self.episode_buffer[36][1:]
             self.episode_buffer[37] += self.episode_buffer[36][-1:]
 
-    def save_ground_truth_observation(self, ground_truth_observation, critic_phase_flag=0.0):
+    def save_ground_truth_observation(self, ground_truth_observation):
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited = ground_truth_observation
         self.episode_buffer[19] += node_inputs
         self.episode_buffer[20] += node_padding_mask.bool()
@@ -944,9 +944,8 @@ class Agent:
         self.episode_buffer[24] += edge_padding_mask.bool()
         self.episode_buffer[25] += frontier_distribution
         self.episode_buffer[26] += heading_visited
-        self.episode_buffer[52] += torch.tensor([float(critic_phase_flag)], dtype=torch.float32).reshape(1, 1, 1).to(self.device)
 
-    def save_critic_observation(self, critic_observation, critic_phase_flag=0.0):
+    def save_critic_observation(self, critic_observation):
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, critic_neighbor_best_headings, critic_trajectory_node_indices = critic_observation
         self.episode_buffer[19] += node_inputs
         self.episode_buffer[20] += node_padding_mask.bool()
@@ -958,9 +957,8 @@ class Agent:
         self.episode_buffer[26] += heading_visited
         self.episode_buffer[46] += critic_neighbor_best_headings
         self.episode_buffer[49] += critic_trajectory_node_indices
-        self.episode_buffer[52] += torch.tensor([float(critic_phase_flag)], dtype=torch.float32).reshape(1, 1, 1).to(self.device)
 
-    def save_next_ground_truth_observations(self, ground_truth_observation, next_critic_phase_flag=0.0):
+    def save_next_ground_truth_observations(self, ground_truth_observation):
         self.episode_buffer[27] = self.episode_buffer[19][1:]
         self.episode_buffer[28] = self.episode_buffer[20][1:]
         self.episode_buffer[29] = self.episode_buffer[21][1:]
@@ -969,7 +967,6 @@ class Agent:
         self.episode_buffer[32] = self.episode_buffer[24][1:]
         self.episode_buffer[33] = self.episode_buffer[25][1:]
         self.episode_buffer[34] = self.episode_buffer[26][1:]
-        self.episode_buffer[53] = self.episode_buffer[52][1:]
 
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited = ground_truth_observation
         self.episode_buffer[27] += node_inputs
@@ -980,9 +977,8 @@ class Agent:
         self.episode_buffer[32] += edge_padding_mask.bool()
         self.episode_buffer[33] += frontier_distribution
         self.episode_buffer[34] += heading_visited
-        self.episode_buffer[53] += torch.tensor([float(next_critic_phase_flag)], dtype=torch.float32).reshape(1, 1, 1).to(self.device)
 
-    def save_next_critic_observations(self, critic_observation, next_critic_phase_flag=0.0):
+    def save_next_critic_observations(self, critic_observation):
         self.episode_buffer[27] = self.episode_buffer[19][1:]
         self.episode_buffer[28] = self.episode_buffer[20][1:]
         self.episode_buffer[29] = self.episode_buffer[21][1:]
@@ -993,7 +989,6 @@ class Agent:
         self.episode_buffer[34] = self.episode_buffer[26][1:]
         self.episode_buffer[47] = self.episode_buffer[46][1:]
         self.episode_buffer[51] = self.episode_buffer[49][1:]
-        self.episode_buffer[53] = self.episode_buffer[52][1:]
 
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, critic_neighbor_best_headings, critic_trajectory_node_indices = critic_observation
         self.episode_buffer[27] += node_inputs
@@ -1006,7 +1001,6 @@ class Agent:
         self.episode_buffer[34] += heading_visited
         self.episode_buffer[47] += critic_neighbor_best_headings
         self.episode_buffer[51] += critic_trajectory_node_indices
-        self.episode_buffer[53] += torch.tensor([float(next_critic_phase_flag)], dtype=torch.float32).reshape(1, 1, 1).to(self.device)
 
     def save_all_indices(self, all_agent_indices):
         self.episode_buffer[35] += torch.tensor(all_agent_indices).reshape(1, -1, 1).to(self.device)

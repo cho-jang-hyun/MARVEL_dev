@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = '4_30'
+FOLDER_NAME = '5_3_no_pre_post_critic_head'
 LOAD_FOLDER_NAME = '4_22_Dual_critic_estimation_metric_with_indv_complete_reward'
 model_path = f'model/{FOLDER_NAME}' # save checkpoint
 load_path = f'load_model/{LOAD_FOLDER_NAME}' # load checkpoint
@@ -29,7 +29,7 @@ gifs_path = f'gifs/{FOLDER_NAME}' # save gif
 SUMMARY_WINDOW = 32
 LOAD_MODEL = False  # do you want to load the model trained before
 SAVE_IMG_GAP = 1000
-NUM_EPISODE_BUFFER = 54
+NUM_EPISODE_BUFFER = 52
 
 # Sim parameters
 N_AGENTS = 4
@@ -89,9 +89,6 @@ LR = 2e-5
 GAMMA = 0.99
 TAU = 0.003  # Soft update coefficient for target network (0.001 ~ 0.01)
 NUM_META_AGENT = 15
-POST_PHASE_REPLAY_MIN_SAMPLES = 512
-POST_PHASE_BATCH_RATIO = 0.3
-
 # reward shaping
 MERGED_NODE_UTILITY_REWARD_WEIGHT = 1.0
 VISITED_BY_OTHERS_DECAY = 0.025

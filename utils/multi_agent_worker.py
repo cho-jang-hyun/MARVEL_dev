@@ -240,7 +240,7 @@ class MultiAgentWorker:
             critic_next_indices = [self.merged_critic_manager.get_node_index(robot.location) for robot in self.robot_list]
         return local_next_indices, critic_next_indices
 
-    def _close_agent_replay(self, robot, team_node_managers, next_phase_flag=None):
+    def _close_agent_replay(self, robot, team_node_managers):
         if self.replay_closed[robot.id] or len(robot.episode_buffer[0]) == 0:
             self.replay_closed[robot.id] = True
             return
@@ -256,9 +256,6 @@ class MultiAgentWorker:
             joint_next_index_list = critic_next_indices
         robot.save_next_observations(observation, joint_next_index_list)
 
-        if next_phase_flag is None:
-            next_phase_flag = float(self.merged_objective_completed)
-
         if self.use_merged_critic:
             critic_observation = self.merged_critic_manager.get_critic_observation(
                 robot.location,
@@ -270,10 +267,10 @@ class MultiAgentWorker:
                 local_node_coords=robot.node_coords,
                 base_location=self.base_locations[robot.id],
             )
-            robot.save_next_critic_observations(critic_observation, next_critic_phase_flag=next_phase_flag)
+            robot.save_next_critic_observations(critic_observation)
         else:
             ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, base_location=self.base_locations[robot.id])
-            robot.save_next_ground_truth_observations(ground_truth_observation, next_critic_phase_flag=next_phase_flag)
+            robot.save_next_ground_truth_observations(ground_truth_observation)
 
         self.replay_closed[robot.id] = True
 
@@ -324,7 +321,6 @@ class MultiAgentWorker:
             observations = {}
             active_explorer_ids = []
             merged_was_completed = self.merged_objective_completed
-            current_phase_flag = float(merged_was_completed)
 
             for robot in self.robot_list:
                 self._set_agent_budget_context(robot)
@@ -350,7 +346,7 @@ class MultiAgentWorker:
                     or self._should_force_return(distance_to_base, self.remaining_budgets[robot.id])
                 ):
                     self.returning_agents[robot.id] = True
-                    self._close_agent_replay(robot, team_node_managers, next_phase_flag=current_phase_flag)
+                    self._close_agent_replay(robot, team_node_managers)
                     return_path = self._get_return_path(robot)
                     if len(return_path) == 0:
                         if not robot_at_base:
@@ -369,7 +365,7 @@ class MultiAgentWorker:
 
                 if not self._has_feasible_exploration_action(robot, observation):
                     self.returning_agents[robot.id] = True
-                    self._close_agent_replay(robot, team_node_managers, next_phase_flag=current_phase_flag)
+                    self._close_agent_replay(robot, team_node_managers)
                     return_path = self._get_return_path(robot)
                     if len(return_path) == 0:
                         if not robot_at_base:
@@ -399,7 +395,7 @@ class MultiAgentWorker:
                 next_location, _, _, next_heading_index = robot.select_next_waypoint(observation)
                 if not self._exploration_move_preserves_return_budget(robot, next_location):
                     self.returning_agents[robot_id] = True
-                    self._close_agent_replay(robot, team_node_managers, next_phase_flag=current_phase_flag)
+                    self._close_agent_replay(robot, team_node_managers)
                     if self._set_return_target(robot, selected_locations, dist_list, next_heading_index_list):
                         mission_failure = True
                     continue
@@ -453,7 +449,7 @@ class MultiAgentWorker:
                     continue
 
                 self.returning_agents[robot_id] = True
-                self._close_agent_replay(robot, team_node_managers, next_phase_flag=current_phase_flag)
+                self._close_agent_replay(robot, team_node_managers)
                 if self._set_return_target(robot, selected_locations_list, dist_list, next_heading_index_list):
                     mission_failure = True
 
@@ -483,10 +479,10 @@ class MultiAgentWorker:
                         base_location=self.base_locations[robot.id],
                     )
                     robot.current_critic_index = critic_observation[3][0, 0, 0].item()
-                    robot.save_critic_observation(critic_observation, critic_phase_flag=current_phase_flag)
+                    robot.save_critic_observation(critic_observation)
                 else:
                     ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, base_location=self.base_locations[robot.id])
-                    robot.save_ground_truth_observation(ground_truth_observation, critic_phase_flag=current_phase_flag)
+                    robot.save_ground_truth_observation(ground_truth_observation)
 
             robot_locations_sim = []
             robot_headings_sim = []
@@ -618,7 +614,6 @@ class MultiAgentWorker:
                 robot.update_planning_state()
             self._update_merged_graph()
             merged_completed_this_step = self._update_objective_state()
-            next_phase_flag = float(self.merged_objective_completed)
             for robot in self.robot_list:
                 self._set_agent_budget_context(robot)
 
@@ -656,7 +651,7 @@ class MultiAgentWorker:
                 robot.save_done(transition_done)
                 if robot_should_return:
                     self.returning_agents[robot_id] = True
-                    self._close_agent_replay(robot, team_node_managers, next_phase_flag=next_phase_flag)
+                    self._close_agent_replay(robot, team_node_managers)
 
             if mission_failure:
                 break

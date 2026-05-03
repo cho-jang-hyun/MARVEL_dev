@@ -126,41 +126,6 @@ def collect_rollouts(experience_buffer, sample_indices):
     return rollouts
 
 
-def sample_phase_stratified_indices(indices, phase_entries, batch_size):
-    if len(phase_entries) == 0:
-        return random.sample(indices, batch_size)
-
-    post_indices = []
-    pre_indices = []
-    for idx in indices:
-        phase_value = float(phase_entries[idx].item())
-        if phase_value > 0.5:
-            post_indices.append(idx)
-        else:
-            pre_indices.append(idx)
-
-    if len(post_indices) < POST_PHASE_REPLAY_MIN_SAMPLES or len(pre_indices) == 0:
-        return random.sample(indices, batch_size)
-
-    target_post = int(round(batch_size * POST_PHASE_BATCH_RATIO))
-    target_post = max(1, min(batch_size - 1, target_post))
-    target_pre = batch_size - target_post
-
-    if len(post_indices) >= target_post:
-        sampled_post = random.sample(post_indices, target_post)
-    else:
-        sampled_post = random.choices(post_indices, k=target_post)
-
-    if len(pre_indices) >= target_pre:
-        sampled_pre = random.sample(pre_indices, target_pre)
-    else:
-        sampled_pre = random.choices(pre_indices, k=target_pre)
-
-    sampled_indices = sampled_pre + sampled_post
-    random.shuffle(sampled_indices)
-    return sampled_indices
-
-
 def _stack_to(rollout_list, device, non_blocking=True):
     """Stack a list of tensors on CPU, then transfer once to target device."""
     stacked = torch.stack(rollout_list)
@@ -203,14 +168,6 @@ def prepare_training_batch(rollouts, device, effective_train_algo):
     batch['next_detected_trajectories'] = _s(rollouts[43], device)
     batch['next_trajectory_mask'] = _s(rollouts[44], device)
     batch['next_trajectory_node_indices'] = _s(rollouts[45], device)
-
-    if len(rollouts[52]) > 0:
-        batch['critic_phase_flag'] = _s(rollouts[52], device)
-        batch['next_critic_phase_flag'] = _s(rollouts[53], device)
-    else:
-        zero_phase = torch.zeros_like(batch['done'], dtype=torch.float32, device=device)
-        batch['critic_phase_flag'] = zero_phase
-        batch['next_critic_phase_flag'] = zero_phase.clone()
 
     batch['observation'] = [
         batch['node_inputs'], batch['node_padding_mask'], batch['local_edge_mask'], batch['current_local_index'],
@@ -267,13 +224,11 @@ def prepare_training_batch(rollouts, device, effective_train_algo):
         batch['state'] = batch['observation']
         batch['next_state'] = batch['next_observation']
         batch['q_kwargs'] = dict(
-            phase_flag=batch['critic_phase_flag'],
             detected_trajectories=batch['detected_trajectories'],
             trajectory_mask=batch['trajectory_mask'],
             trajectory_node_indices=batch['trajectory_node_indices'],
         )
         batch['next_q_kwargs'] = dict(
-            phase_flag=batch['next_critic_phase_flag'],
             detected_trajectories=batch['next_detected_trajectories'],
             trajectory_mask=batch['next_trajectory_mask'],
             trajectory_node_indices=batch['next_trajectory_node_indices'],
@@ -284,7 +239,6 @@ def prepare_training_batch(rollouts, device, effective_train_algo):
         batch['q_kwargs'] = dict(
             all_agent_indices=batch['all_agent_indices'],
             all_agent_next_indices=batch['all_agent_next_indices'],
-            phase_flag=batch['critic_phase_flag'],
             detected_trajectories=batch['detected_trajectories'],
             trajectory_mask=batch['trajectory_mask'],
             trajectory_node_indices=batch['trajectory_node_indices'],
@@ -292,7 +246,6 @@ def prepare_training_batch(rollouts, device, effective_train_algo):
         batch['next_q_kwargs'] = dict(
             all_agent_indices=batch['all_agent_next_indices'],
             all_agent_next_indices=batch['next_all_agent_next_indices'],
-            phase_flag=batch['next_critic_phase_flag'],
             detected_trajectories=batch['next_detected_trajectories'],
             trajectory_mask=batch['next_trajectory_mask'],
             trajectory_node_indices=batch['next_trajectory_node_indices'],
@@ -310,13 +263,11 @@ def prepare_training_batch(rollouts, device, effective_train_algo):
             batch['next_budget_state']
         ]
         batch['q_kwargs'] = dict(
-            phase_flag=batch['critic_phase_flag'],
             detected_trajectories=batch['detected_trajectories'],
             trajectory_mask=batch['trajectory_mask'],
             trajectory_node_indices=None,
         )
         batch['next_q_kwargs'] = dict(
-            phase_flag=batch['next_critic_phase_flag'],
             detected_trajectories=batch['next_detected_trajectories'],
             trajectory_mask=batch['next_trajectory_mask'],
             trajectory_node_indices=None,
@@ -336,7 +287,6 @@ def prepare_training_batch(rollouts, device, effective_train_algo):
         batch['q_kwargs'] = dict(
             all_agent_indices=batch['all_agent_indices'],
             all_agent_next_indices=batch['all_agent_next_indices'],
-            phase_flag=batch['critic_phase_flag'],
             detected_trajectories=batch['detected_trajectories'],
             trajectory_mask=batch['trajectory_mask'],
             trajectory_node_indices=None,
@@ -344,7 +294,6 @@ def prepare_training_batch(rollouts, device, effective_train_algo):
         batch['next_q_kwargs'] = dict(
             all_agent_indices=batch['all_agent_next_indices'],
             all_agent_next_indices=batch['next_all_agent_next_indices'],
-            phase_flag=batch['next_critic_phase_flag'],
             detected_trajectories=batch['next_detected_trajectories'],
             trajectory_mask=batch['next_trajectory_mask'],
             trajectory_node_indices=None,
@@ -362,13 +311,11 @@ def prepare_training_batch(rollouts, device, effective_train_algo):
             batch['next_budget_state']
         ]
         batch['q_kwargs'] = dict(
-            phase_flag=batch['critic_phase_flag'],
             detected_trajectories=batch['detected_trajectories'],
             trajectory_mask=batch['trajectory_mask'],
             trajectory_node_indices=batch['critic_trajectory_node_indices'],
         )
         batch['next_q_kwargs'] = dict(
-            phase_flag=batch['next_critic_phase_flag'],
             detected_trajectories=batch['next_detected_trajectories'],
             trajectory_mask=batch['next_trajectory_mask'],
             trajectory_node_indices=batch['next_critic_trajectory_node_indices'],
@@ -388,7 +335,6 @@ def prepare_training_batch(rollouts, device, effective_train_algo):
         batch['q_kwargs'] = dict(
             all_agent_indices=batch['all_agent_indices'],
             all_agent_next_indices=batch['all_agent_next_indices'],
-            phase_flag=batch['critic_phase_flag'],
             detected_trajectories=batch['detected_trajectories'],
             trajectory_mask=batch['trajectory_mask'],
             trajectory_node_indices=batch['critic_trajectory_node_indices'],
@@ -396,7 +342,6 @@ def prepare_training_batch(rollouts, device, effective_train_algo):
         batch['next_q_kwargs'] = dict(
             all_agent_indices=batch['all_agent_next_indices'],
             all_agent_next_indices=batch['next_all_agent_next_indices'],
-            phase_flag=batch['next_critic_phase_flag'],
             detected_trajectories=batch['next_detected_trajectories'],
             trajectory_mask=batch['next_trajectory_mask'],
             trajectory_node_indices=batch['next_critic_trajectory_node_indices'],
@@ -605,11 +550,7 @@ def main():
                     actor_rollouts = collect_rollouts(experience_buffer, actor_sample_indices)
                     actor_batch = prepare_training_batch(actor_rollouts, device, effective_train_algo)
 
-                    critic_sample_indices = sample_phase_stratified_indices(
-                        indices,
-                        experience_buffer[52] if len(experience_buffer) > 52 else [],
-                        BATCH_SIZE,
-                    )
+                    critic_sample_indices = random.sample(indices, BATCH_SIZE)
                     critic_rollouts = collect_rollouts(experience_buffer, critic_sample_indices)
                     critic_batch = prepare_training_batch(critic_rollouts, device, effective_train_algo)
 
@@ -692,31 +633,16 @@ def main():
                 traj_embedding_norm = float(trajectory_debug.get('embedding_norm', torch.tensor(0.0)).item())
                 traj_attention_entropy = float(trajectory_debug.get('agent_attention_entropy', torch.tensor(0.0)).item())
 
-                critic_phase_post_ratio = 0.0
-                critic_next_phase_post_ratio = 0.0
-                critic_pre_q_mean = 0.0
-                critic_post_q_mean = 0.0
-                critic_active_q_mean = 0.0
-                critic_head_gap = 0.0
+                critic_q_mean = 0.0
                 if effective_train_algo in (2, 3, 4, 5):
                     critic_model = dp_q_net1.module if hasattr(dp_q_net1, 'module') else dp_q_net1
                     with torch.no_grad():
-                        q_pre_debug, q_post_debug = critic_model(
+                        q_debug = critic_model(
                             *critic_batch['state'],
-                            return_both_heads=True,
                             **critic_batch['q_kwargs'],
                         )
-                        selected_q_pre = torch.gather(q_pre_debug, 1, critic_batch['action'])
-                        selected_q_post = torch.gather(q_post_debug, 1, critic_batch['action'])
-                        phase_mask = critic_batch['critic_phase_flag'].reshape(critic_batch['critic_phase_flag'].size(0), 1, 1).float()
-                        selected_active_q = (1.0 - phase_mask) * selected_q_pre + phase_mask * selected_q_post
-
-                    critic_phase_post_ratio = float(critic_batch['critic_phase_flag'].float().mean().item())
-                    critic_next_phase_post_ratio = float(critic_batch['next_critic_phase_flag'].float().mean().item())
-                    critic_pre_q_mean = float(selected_q_pre.mean().item())
-                    critic_post_q_mean = float(selected_q_post.mean().item())
-                    critic_active_q_mean = float(selected_active_q.mean().item())
-                    critic_head_gap = float((selected_q_post - selected_q_pre).abs().mean().item())
+                        selected_q = torch.gather(q_debug, 1, critic_batch['action'])
+                    critic_q_mean = float(selected_q.mean().item())
 
                 # Use the actual rollout episode reward (from perf_metrics) instead of the
                 # replay-buffer batch mean, which is a lagging/biased indicator that masks
@@ -726,9 +652,7 @@ def main():
                 data = [rollout_reward, value_prime.mean().item(), policy_loss.item(), q1_loss.item(),
                         entropy.mean().item(), policy_grad_norm.item(), q_grad_norm.item(), log_alpha.item(),
                         alpha_loss.item(), traj_detected_agents, traj_usable_agents, traj_valid_timestep_ratio,
-                        traj_embedding_norm, traj_attention_entropy, critic_phase_post_ratio,
-                        critic_next_phase_post_ratio, critic_pre_q_mean, critic_post_q_mean,
-                        critic_active_q_mean, critic_head_gap, *perf_data]
+                    traj_embedding_norm, traj_attention_entropy, critic_q_mean, *perf_data]
                 training_data.append(data)
                 current_success_rate = np.nanmean(perf_metrics['success_rate']) if len(perf_metrics['success_rate']) > 0 else -float('inf')
 
@@ -805,8 +729,7 @@ def write_to_tensor_board(writer, tensorboard_data, curr_episode):
     (rollout_reward, value, policy_loss, q_value_loss, entropy, policy_grad_norm,
      q_value_grad_norm, log_alpha, alpha_loss, traj_detected_agents,
      traj_usable_agents, traj_valid_timestep_ratio, traj_embedding_norm,
-     traj_attention_entropy, critic_phase_post_ratio, critic_next_phase_post_ratio,
-     critic_pre_q_mean, critic_post_q_mean, critic_active_q_mean, critic_head_gap,
+     traj_attention_entropy, critic_q_mean,
      merged_travel_dist, travel_dist, success_rate, explored_rate,
      episode_reward) = tensorboard_data
 
@@ -823,12 +746,7 @@ def write_to_tensor_board(writer, tensorboard_data, curr_episode):
     writer.add_scalar(tag='Trajectory/Valid Timestep Ratio', scalar_value=traj_valid_timestep_ratio, global_step=curr_episode)
     writer.add_scalar(tag='Trajectory/Embedding Norm', scalar_value=traj_embedding_norm, global_step=curr_episode)
     writer.add_scalar(tag='Trajectory/Agent Attention Entropy', scalar_value=traj_attention_entropy, global_step=curr_episode)
-    writer.add_scalar(tag='Critic/Phase Post Ratio', scalar_value=critic_phase_post_ratio, global_step=curr_episode)
-    writer.add_scalar(tag='Critic/Next Phase Post Ratio', scalar_value=critic_next_phase_post_ratio, global_step=curr_episode)
-    writer.add_scalar(tag='Critic/Selected Pre Head Q Mean', scalar_value=critic_pre_q_mean, global_step=curr_episode)
-    writer.add_scalar(tag='Critic/Selected Post Head Q Mean', scalar_value=critic_post_q_mean, global_step=curr_episode)
-    writer.add_scalar(tag='Critic/Selected Active Head Q Mean', scalar_value=critic_active_q_mean, global_step=curr_episode)
-    writer.add_scalar(tag='Critic/Selected Head Gap', scalar_value=critic_head_gap, global_step=curr_episode)
+    writer.add_scalar(tag='Critic/Selected Q Mean', scalar_value=critic_q_mean, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Reward', scalar_value=rollout_reward, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Episode Reward', scalar_value=episode_reward, global_step=curr_episode)
     writer.add_scalar(tag='Perf/Merged Objective Travel Distance', scalar_value=merged_travel_dist, global_step=curr_episode)
