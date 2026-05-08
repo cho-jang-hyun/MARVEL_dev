@@ -25,6 +25,7 @@ import os
 import time
 import warnings
 from tqdm import tqdm
+import json
 
 os.environ.setdefault('MARVEL_CONFIG_MODE', 'test')
 
@@ -91,6 +92,13 @@ def append_budget_exploration_rows(metrics, info, n_agent, fov, sensor_range, bu
     remaining_max_history = metrics.get('remaining_budget_max_history', [])
     length_history = metrics.get('length_history', [])
     overlap_history = metrics.get('overlap_ratio_history', [])
+    breakdown_enabled = bool(metrics.get('breakdown_enabled', False))
+    breakdown_agent_count = int(metrics.get('breakdown_agent_count', 0))
+    breakdown_random_seed = int(metrics.get('breakdown_random_seed', 0))
+    broken_agent_ids = json.dumps(metrics.get('broken_agent_ids', []), sort_keys=True)
+    breakdown_scheduled_steps = json.dumps(metrics.get('breakdown_scheduled_steps', {}), sort_keys=True)
+    breakdown_triggered_steps = json.dumps(metrics.get('breakdown_triggered_steps', {}), sort_keys=True)
+    num_broken_agents_final = int(metrics.get('num_broken_agents_final', 0))
 
     num_steps = max(
         len(merged_history),
@@ -127,6 +135,13 @@ def append_budget_exploration_rows(metrics, info, n_agent, fov, sensor_range, bu
         'team_remaining_budget_max_m',
         'max_travel_dist_m',
         'overlap_ratio',
+        'breakdown_enabled',
+        'breakdown_agent_count',
+        'breakdown_random_seed',
+        'broken_agent_ids',
+        'breakdown_scheduled_steps',
+        'breakdown_triggered_steps',
+        'num_broken_agents_final',
     ]
     write_header = (
         not os.path.exists(BUDGET_EXPLORATION_RECORD_PATH)
@@ -162,6 +177,13 @@ def append_budget_exploration_rows(metrics, info, n_agent, fov, sensor_range, bu
                 'team_remaining_budget_max_m': team_remaining_max,
                 'max_travel_dist_m': max_travel_dist,
                 'overlap_ratio': overlap_ratio,
+                'breakdown_enabled': breakdown_enabled,
+                'breakdown_agent_count': breakdown_agent_count,
+                'breakdown_random_seed': breakdown_random_seed,
+                'broken_agent_ids': broken_agent_ids,
+                'breakdown_scheduled_steps': breakdown_scheduled_steps,
+                'breakdown_triggered_steps': breakdown_triggered_steps,
+                'num_broken_agents_final': num_broken_agents_final,
             }
 
             writer.writerow({
@@ -255,6 +277,13 @@ def append_boxplot_metric_rows(metrics, info, n_agent, fov, sensor_range, utilit
         'agent_id',
         'metric_name',
         'metric_value',
+        'breakdown_enabled',
+        'breakdown_agent_count',
+        'breakdown_random_seed',
+        'broken_agent_ids',
+        'breakdown_scheduled_steps',
+        'breakdown_triggered_steps',
+        'num_broken_agents_final',
     ]
     write_header = (
         not os.path.exists(BOXPLOT_METRICS_RECORD_PATH)
@@ -270,6 +299,13 @@ def append_boxplot_metric_rows(metrics, info, n_agent, fov, sensor_range, utilit
         'utility_range_m': utility_range,
         'budget_timesteps': budget_timesteps,
         'budget_m': budget_m,
+        'breakdown_enabled': bool(metrics.get('breakdown_enabled', False)),
+        'breakdown_agent_count': int(metrics.get('breakdown_agent_count', 0)),
+        'breakdown_random_seed': int(metrics.get('breakdown_random_seed', 0)),
+        'broken_agent_ids': json.dumps(metrics.get('broken_agent_ids', []), sort_keys=True),
+        'breakdown_scheduled_steps': json.dumps(metrics.get('breakdown_scheduled_steps', {}), sort_keys=True),
+        'breakdown_triggered_steps': json.dumps(metrics.get('breakdown_triggered_steps', {}), sort_keys=True),
+        'num_broken_agents_final': int(metrics.get('num_broken_agents_final', 0)),
     }
 
     rows_written = 0
@@ -361,9 +397,9 @@ def run_test():
     meta_agents = [Runner.remote(i) for i in range(NUM_META_AGENT)]
     weights = global_network.state_dict()
 
-    all_fov = [120, 150]
-    all_n_agent = [10]
-    all_sensor_range = [10, 15]
+    all_fov = [120]
+    all_n_agent = [4]
+    all_sensor_range = [10]
     all_utility_range = [range_val * 0.9 for range_val in all_sensor_range]
     all_budget_timesteps = TEST_BUDGET_TIMESTEPS_LIST
 

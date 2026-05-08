@@ -1,8 +1,9 @@
 import matplotlib.pyplot as plt
-from matplotlib.patches import Wedge, FancyArrowPatch
+from matplotlib.patches import Wedge, FancyArrowPatch, Rectangle
 from skimage.draw import polygon as sk_polygon
 from skimage.morphology import label
 from collections import deque
+import gc
 import time
 
 from utils.env import Env
@@ -81,6 +82,17 @@ class TestWorker:
         self.initial_budgets = np.full(self.n_agents, budget_meters, dtype=float)
         self.remaining_budgets = self.initial_budgets.copy()
         self.returning_agents = np.zeros(self.n_agents, dtype=bool)
+        self.broken_agents = np.zeros(self.n_agents, dtype=bool)
+        self.breakdown_enabled = bool(globals().get('TEST_BREAKDOWN_STUDY_ENABLED', False))
+        self.breakdown_agent_count = min(
+            max(int(globals().get('TEST_BREAKDOWN_AGENT_COUNT', 0)), 0),
+            self.n_agents,
+        )
+        self.breakdown_random_seed = int(globals().get('TEST_BREAKDOWN_RANDOM_SEED', 0))
+        self.breakdown_episode_seed = self.breakdown_random_seed + int(self.global_step)
+        self.breakdown_scheduled_steps = {}
+        self.breakdown_triggered_steps = {}
+        self._schedule_breakdowns()
         self.merged_objective_completed = False
         self.merged_completion_travel_dist = None
         self.merged_total_utility = np.nan
@@ -92,6 +104,108 @@ class TestWorker:
         if self.save_image:
             for i in range(self.n_agents):
                 self.individual_maps[i] = self.env.get_agent_map_info(i).map.copy()
+
+    def _schedule_breakdowns(self):
+        if not self.breakdown_enabled or self.breakdown_agent_count == 0:
+            return
+
+        min_step = int(globals().get('TEST_BREAKDOWN_MIN_STEP', 0))
+        max_step = int(globals().get('TEST_BREAKDOWN_MAX_STEP', MAX_EPISODE_STEP))
+        min_step = max(min_step, 0)
+        max_step = max(max_step, min_step)
+
+        rng = np.random.default_rng(self.breakdown_episode_seed)
+        agent_ids = np.sort(rng.choice(self.n_agents, size=self.breakdown_agent_count, replace=False))
+        breakdown_steps = rng.integers(min_step, max_step + 1, size=self.breakdown_agent_count)
+        self.breakdown_scheduled_steps = {
+            int(agent_id): int(step)
+            for agent_id, step in zip(agent_ids, breakdown_steps)
+        }
+
+    def _active_agent_ids_for_merged_map(self):
+        return [agent_id for agent_id in range(self.n_agents) if not self.broken_agents[agent_id]]
+
+    def _refresh_merged_belief_excluding_broken(self):
+        active_agent_ids = self._active_agent_ids_for_merged_map()
+        merged_belief = np.ones(self.env.ground_truth_size) * UNKNOWN
+        if len(active_agent_ids) > 0:
+            occupied_mask = np.zeros(self.env.ground_truth_size, dtype=bool)
+            free_mask = np.zeros(self.env.ground_truth_size, dtype=bool)
+            for agent_id in active_agent_ids:
+                belief = self.env.agent_beliefs[agent_id]
+                occupied_mask |= belief == OCCUPIED
+                free_mask |= belief == FREE
+            merged_belief[free_mask] = FREE
+            merged_belief[occupied_mask] = OCCUPIED
+
+        self.env.robot_belief = merged_belief
+        self.env.belief_info.update_map_info(
+            self.env.robot_belief,
+            self.env.belief_origin_x,
+            self.env.belief_origin_y,
+        )
+        self.env.evaluate_exploration_rate()
+
+    def _trigger_scheduled_breakdowns(self, decision_step):
+        triggered_agent_ids = []
+        if not self.breakdown_enabled:
+            return triggered_agent_ids
+
+        for agent_id, scheduled_step in self.breakdown_scheduled_steps.items():
+            if self.broken_agents[agent_id] or scheduled_step != decision_step:
+                continue
+            self.broken_agents[agent_id] = True
+            self.returning_agents[agent_id] = False
+            self.breakdown_triggered_steps[int(agent_id)] = int(decision_step)
+            triggered_agent_ids.append(int(agent_id))
+
+        if triggered_agent_ids:
+            self._refresh_merged_belief_excluding_broken()
+
+        return triggered_agent_ids
+
+    def _plot_current_breakdown_status_frame(self, decision_step):
+        if not self.save_image:
+            return
+        robot_locations = [
+            get_cell_position_from_coords(robot.location, self.env.belief_info)
+            for robot in self.robot_list
+        ]
+        robot_headings = [robot.heading for robot in self.robot_list]
+        self.plot_local_env_sim(f'{decision_step}_breakdown', robot_locations, robot_headings)
+
+    def _refresh_merged_belief_after_updates(self):
+        if self.breakdown_enabled and np.any(self.broken_agents):
+            self._refresh_merged_belief_excluding_broken()
+        else:
+            self.env.refresh_merged_belief()
+
+    def _non_broken_agents_all_returning(self):
+        non_broken_agents = ~self.broken_agents
+        return bool(np.any(non_broken_agents) and np.all(self.returning_agents[non_broken_agents]))
+
+    def _all_agents_broken(self):
+        return bool(np.all(self.broken_agents))
+
+    def _non_broken_agents_at_base(self):
+        return all(
+            np.allclose(robot.location, self.base_locations[robot.id])
+            for robot in self.robot_list
+            if not self.broken_agents[robot.id]
+        )
+
+    def _plot_breakdown_label(self, location):
+        plt.text(
+            location[0] + 4,
+            location[1] - 4,
+            'broken',
+            color='white',
+            fontsize=8,
+            fontweight='bold',
+            bbox=dict(facecolor='black', edgecolor='red', boxstyle='round,pad=0.2', alpha=0.85),
+            zorder=20,
+            clip_on=False,
+        )
 
     def _update_merged_graph(self):
         # Test-time evaluation keeps merged map visualization from env beliefs only.
@@ -294,6 +408,9 @@ class TestWorker:
 
         for i in range(max_decision_steps):
             step_start_time = time.time()
+            triggered_agent_ids = self._trigger_scheduled_breakdowns(i)
+            if triggered_agent_ids:
+                self._plot_current_breakdown_status_frame(i)
             selected_locations = [robot.location.copy() for robot in self.robot_list]
             dist_list = [0.0 for _ in range(self.n_agents)]
             next_heading_index_list = [self._get_heading_index_towards(robot, robot.location) for robot in self.robot_list]
@@ -301,6 +418,8 @@ class TestWorker:
             active_explorer_ids = []
 
             for robot in self.robot_list:
+                if self.broken_agents[robot.id]:
+                    continue
                 self._set_agent_budget_context(robot)
                 robot_at_base = np.allclose(robot.location, self.base_locations[robot.id])
                 distance_to_base = robot.get_distance_to_base()
@@ -359,9 +478,11 @@ class TestWorker:
             if mission_failure:
                 break
 
-            if len(active_explorer_ids) == 0 and np.all(self.returning_agents):
-                if not SIMULATE_RETURN_TO_BASE or self._all_agents_at_base():
+            if len(active_explorer_ids) == 0 and self._non_broken_agents_all_returning():
+                if not SIMULATE_RETURN_TO_BASE or self._non_broken_agents_at_base():
                     break
+            if len(active_explorer_ids) == 0 and self._all_agents_broken():
+                break
 
             candidate_explorer_ids = active_explorer_ids
             active_explorer_ids = []
@@ -383,9 +504,11 @@ class TestWorker:
             if mission_failure:
                 break
 
-            if len(active_explorer_ids) == 0 and np.all(self.returning_agents):
-                if not SIMULATE_RETURN_TO_BASE or self._all_agents_at_base():
+            if len(active_explorer_ids) == 0 and self._non_broken_agents_all_returning():
+                if not SIMULATE_RETURN_TO_BASE or self._non_broken_agents_at_base():
                     break
+            if len(active_explorer_ids) == 0 and self._all_agents_broken():
+                break
 
             selected_locations = np.asarray(selected_locations).reshape(-1, 2)
             arriving_sequence = np.argsort(np.asarray(dist_list))
@@ -434,14 +557,23 @@ class TestWorker:
             active_explorer_ids = still_active_explorer_ids
             selected_locations = np.asarray(selected_locations_list).reshape(-1, 2)
 
-            if len(active_explorer_ids) == 0 and np.all(self.returning_agents):
-                if not SIMULATE_RETURN_TO_BASE or self._all_agents_at_base():
+            if len(active_explorer_ids) == 0 and self._non_broken_agents_all_returning():
+                if not SIMULATE_RETURN_TO_BASE or self._non_broken_agents_at_base():
                     break
+            if len(active_explorer_ids) == 0 and self._all_agents_broken():
+                break
 
             robot_locations_sim = []
             robot_headings_sim = []
             all_robots_heading_list = []
             for robot, next_location, next_heading_index in zip(self.robot_list, selected_locations, next_heading_index_list):
+                if self.broken_agents[robot.id]:
+                    robot_cell = get_cell_position_from_coords(robot.location, self.env.belief_info)
+                    robot_locations_sim.append(np.tile(robot_cell, (self.sim_steps, 1)))
+                    robot_headings_sim.append([robot.heading for _ in range(self.sim_steps)])
+                    all_robots_heading_list.append(robot.heading)
+                    continue
+
                 robot_current_cell = get_cell_position_from_coords(robot.location, self.env.belief_info)
                 robot_cell = get_cell_position_from_coords(next_location, self.env.belief_info)
 
@@ -463,17 +595,18 @@ class TestWorker:
                 robot_location_sim_step = []
                 robot_heading_sim_step = []
                 for q in range(self.n_agents):
-                    self.env.update_robot_belief(
-                        q,
-                        robot_locations_sim[q][l],
-                        robot_headings_sim[q][l],
-                        refresh_merged=False,
-                    )
-                    if self.save_image:
+                    if not self.broken_agents[q]:
+                        self.env.update_robot_belief(
+                            q,
+                            robot_locations_sim[q][l],
+                            robot_headings_sim[q][l],
+                            refresh_merged=False,
+                        )
+                    if self.save_image and not self.broken_agents[q]:
                         self.individual_maps[q] = self.env.get_agent_map_info(q).map.copy()
                     robot_location_sim_step.append(robot_locations_sim[q][l])
                     robot_heading_sim_step.append(robot_headings_sim[q][l])
-                self.env.refresh_merged_belief()
+                self._refresh_merged_belief_after_updates()
 
                 if self.save_image:
                     num_frame = i * self.sim_steps + l
@@ -483,6 +616,8 @@ class TestWorker:
 
             previous_locations = [robot.location.copy() for robot in self.robot_list]
             for robot, next_location in zip(self.robot_list, selected_locations):
+                if self.broken_agents[robot.id]:
+                    continue
                 self.env.final_sim_step(next_location, robot.id)
                 traveled_distance = float(np.linalg.norm(previous_locations[robot.id] - next_location))
                 if traveled_distance > 0.0:
@@ -490,8 +625,12 @@ class TestWorker:
                 self._append_trajectory_step(robot, next_location)
 
             for robot in self.robot_list:
+                if self.broken_agents[robot.id]:
+                    continue
                 robot.update_graph(self.env.get_agent_map_info(robot.id), self.env.robot_locations[robot.id].copy())
             for robot in self.robot_list:
+                if self.broken_agents[robot.id]:
+                    continue
                 robot.mark_nodes_visited_by_others(self.env.robot_locations, self.trajectory_buffer)
                 robot.update_planning_state()
                 self._set_agent_budget_context(robot)
@@ -536,9 +675,11 @@ class TestWorker:
 
             if mission_failure:
                 break
-            if np.all(self.returning_agents):
-                if not SIMULATE_RETURN_TO_BASE or self._all_agents_at_base():
+            if self._non_broken_agents_all_returning():
+                if not SIMULATE_RETURN_TO_BASE or self._non_broken_agents_at_base():
                     break
+            if self._all_agents_broken():
+                break
 
         # Save metrics
         final_travel_dist = self._get_max_travel_dist()
@@ -575,6 +716,21 @@ class TestWorker:
         self.perf_metrics['remaining_budget_min_history'] = remaining_budget_min_history
         self.perf_metrics['remaining_budget_max_history'] = remaining_budget_max_history
         self.perf_metrics['overlap_ratio_history'] = overlap_ratio_history
+        self.perf_metrics['breakdown_enabled'] = bool(self.breakdown_enabled)
+        self.perf_metrics['breakdown_agent_count'] = int(self.breakdown_agent_count)
+        self.perf_metrics['breakdown_random_seed'] = int(self.breakdown_random_seed)
+        self.perf_metrics['broken_agent_ids'] = [
+            int(agent_id) for agent_id in np.where(self.broken_agents)[0]
+        ]
+        self.perf_metrics['breakdown_scheduled_steps'] = {
+            int(agent_id): int(step)
+            for agent_id, step in self.breakdown_scheduled_steps.items()
+        }
+        self.perf_metrics['breakdown_triggered_steps'] = {
+            int(agent_id): int(step)
+            for agent_id, step in self.breakdown_triggered_steps.items()
+        }
+        self.perf_metrics['num_broken_agents_final'] = int(np.count_nonzero(self.broken_agents))
     
         # Save episode video.
         if self.save_image:
@@ -814,250 +970,260 @@ class TestWorker:
         #     plt.savefig(gifs_path + f'/individual_views_{self.global_step}_{step}.png', dpi=150, bbox_inches='tight')
         plt.close()
 
+    def _draw_training_style_robot_overlay(self, ax, location, heading, color, sensing_range, draw_fov=True, linewidth=1.2):
+        location = np.asarray(location)
+        ax.plot(location[0], location[1], marker='o', color=color, markersize=4.5, zorder=6)
+        dx, dy = self.heading_to_vector(heading, length=sensing_range)
+        arrow = FancyArrowPatch(
+            (location[0], location[1]),
+            (location[0] + dx / 1.25, location[1] + dy / 1.25),
+            mutation_scale=10,
+            linewidth=linewidth,
+            color=color,
+            arrowstyle='-|>',
+            zorder=7,
+        )
+        ax.add_artist(arrow)
+        if draw_fov:
+            cone = Wedge(
+                center=(location[0], location[1]),
+                r=sensing_range,
+                theta1=heading - self.fov / 2,
+                theta2=heading + self.fov / 2,
+                color=color,
+                alpha=0.22,
+                zorder=5,
+            )
+            ax.add_artist(cone)
+
+    @staticmethod
+    def _get_test_node_plot_data(node_manager):
+        node_coords = []
+        node_utility = []
+        for node in node_manager.nodes_dict.__iter__():
+            node_coords.append(node.data.coords)
+            node_utility.append(node.data.utility)
+        if not node_coords:
+            return None, None
+        return np.asarray(node_coords).reshape(-1, 2), np.asarray(node_utility)
+
+    def _draw_frontiers(self, ax, map_info, size=2):
+        frontiers = get_frontier_in_map(map_info)
+        if len(frontiers) == 0:
+            return
+        frontier_cells = get_cell_position_from_coords(np.array(list(frontiers)), map_info)
+        if len(frontiers) == 1:
+            frontier_cells = frontier_cells.reshape(1, 2)
+        ax.scatter(frontier_cells[:, 0], frontier_cells[:, 1], s=size, c='r', zorder=4)
+
+    def _draw_test_nodes(self, ax, node_coords, node_utility, map_info, color):
+        if node_coords is None or len(node_coords) == 0:
+            return
+        nodes = get_cell_position_from_coords(node_coords, map_info)
+        if nodes.ndim == 1:
+            nodes = nodes.reshape(1, 2)
+        ax.scatter(nodes[:, 0], nodes[:, 1], c=color, s=8, zorder=3, alpha=0.65)
+        utility_mask = node_utility > 0
+        if np.any(utility_mask):
+            ax.scatter(nodes[utility_mask, 0], nodes[utility_mask, 1], c='orange', s=20, zorder=4, alpha=0.8)
+
     def plot_local_env_sim(self, step, robot_locations, robot_headings):
         plt.switch_backend('agg')
 
-        # Layout: Top row - merged map + FOV view, Bottom row - each agent's individual map
-        n_cols = max(2, self.n_agents)
-        fig = plt.figure(figsize=(3 * n_cols, 9))
-
-        color_list = ['r', 'b', 'g', 'y', 'c', 'm']
-        color_name = ['Red', 'Blue', 'Green', 'Yellow', 'Cyan', 'Magenta']
+        n_cols = max(4, self.n_agents)
+        fig = plt.figure(figsize=(15, 7.5), constrained_layout=True)
+        gs = fig.add_gridspec(2, n_cols, height_ratios=[1.0, 1.05])
+        color_list = ['tab:red', 'tab:blue', 'tab:green', 'goldenrod', 'tab:purple', 'tab:brown']
+        color_name = ['Red', 'Blue', 'Green', 'Yellow', 'Purple', 'Brown']
         sensing_range = self.sensor_range / CELL_SIZE
+        plot_robot_locations = np.asarray(robot_locations)
+        total_free = np.sum(self.env.ground_truth == FREE)
+        agent_map_infos = [self.env.get_agent_map_info(robot.id) for robot in self.robot_list]
+        agent_node_data = [
+            self._get_test_node_plot_data(robot.node_manager)
+            for robot in self.robot_list
+        ]
 
-        # Detect robots in FOV for each robot
-        fov_detections = {}
-        for robot in self.robot_list:
-            fov_detections[robot.id] = self.get_detected_robots_in_fov(robot, robot_locations, robot_headings)
+        merged_ax = fig.add_subplot(gs[0, 0])
+        merged_ax.imshow(self.env.robot_belief, cmap='gray', interpolation='nearest', vmin=OCCUPIED, vmax=FREE)
+        merged_ax.axis('off')
+        merged_ax.set_title('Merged Team Belief', fontsize=10, fontweight='bold')
+        xlim = merged_ax.get_xlim()
+        ylim = merged_ax.get_ylim()
+        merged_ax.set_xlim(xlim[0], xlim[1])
+        merged_ax.set_ylim(ylim[0], ylim[1])
+        self._draw_frontiers(merged_ax, self.env.belief_info, size=2)
 
-        # Top row - Panel 1: Global merged belief map
-        plt.subplot(3, n_cols, 1)
-        plt.imshow(self.env.robot_belief, cmap='gray')
-        plt.axis('off')
-        xlim = plt.gca().get_xlim()
-        ylim = plt.gca().get_ylim()
-        plt.xlim(xlim[0], xlim[1])
-        plt.ylim(ylim[0], ylim[1])
-        plt.title('Merged Map (Ground Truth)', fontsize=10, fontweight='bold')
+        for robot, location, heading in zip(self.robot_list, plot_robot_locations, robot_headings):
+            c = color_list[robot.id % len(color_list)]
+            self._draw_training_style_robot_overlay(merged_ax, location, heading, c, sensing_range)
+            if self.broken_agents[robot.id]:
+                self._plot_breakdown_label(location)
 
-        # Draw trajectories and arrows on merged map
-        for i, (robot, location, heading) in enumerate(zip(self.robot_list, robot_locations, robot_headings)):
-            plot_id = robot.id % len(color_list)
-            c = color_list[plot_id]
+        fov_ax = fig.add_subplot(gs[0, 1])
+        fov_ax.imshow(self.env.robot_belief, cmap='gray', interpolation='nearest', vmin=OCCUPIED, vmax=FREE)
+        fov_ax.axis('off')
+        fov_ax.set_xlim(xlim[0], xlim[1])
+        fov_ax.set_ylim(ylim[0], ylim[1])
+        fov_ax.set_title('Team Motion + FoV', fontsize=10, fontweight='bold')
+        self._draw_frontiers(fov_ax, self.env.belief_info, size=2)
+
+        for robot, location, heading in zip(self.robot_list, plot_robot_locations, robot_headings):
+            c = color_list[robot.id % len(color_list)]
             robot_location = get_coords_from_cell_position(location, self.env.belief_info)
             trajectory_x = robot.trajectory_x.copy()
             trajectory_y = robot.trajectory_y.copy()
             trajectory_x.append(robot_location[0])
             trajectory_y.append(robot_location[1])
-            plt.plot((np.array(trajectory_x) - robot.map_info.map_origin_x) / robot.cell_size,
-                     (np.array(trajectory_y) - robot.map_info.map_origin_y) / robot.cell_size, c,
-                     linewidth=1.5, alpha=0.7, zorder=1)
+            fov_ax.plot(
+                (np.array(trajectory_x) - self.env.belief_info.map_origin_x) / CELL_SIZE,
+                (np.array(trajectory_y) - self.env.belief_info.map_origin_y) / CELL_SIZE,
+                c,
+                linewidth=1.2,
+                zorder=1,
+            )
+            self._draw_training_style_robot_overlay(fov_ax, location, heading, c, sensing_range)
+            if self.broken_agents[robot.id]:
+                self._plot_breakdown_label(location)
 
-            dx, dy = self.heading_to_vector(heading, length=sensing_range)
-            arrow = FancyArrowPatch((location[0], location[1]), (location[0] + dx/1.25, location[1] + dy/1.25),
-                                    mutation_scale=10, color=c, arrowstyle='-|>')
-            plt.gca().add_artist(arrow)
+        gt_ax = fig.add_subplot(gs[0, 2])
+        gt_ax.imshow(self.env.ground_truth, cmap='gray', interpolation='nearest', vmin=OCCUPIED, vmax=FREE)
+        gt_ax.set_xlim(xlim[0], xlim[1])
+        gt_ax.set_ylim(ylim[0], ylim[1])
+        gt_ax.axis('off')
+        gt_ax.set_title('Ground Truth', fontsize=10, fontweight='bold')
+        for robot, location, heading in zip(self.robot_list, plot_robot_locations, robot_headings):
+            c = color_list[robot.id % len(color_list)]
+            self._draw_training_style_robot_overlay(gt_ax, location, heading, c, sensing_range)
+            if self.broken_agents[robot.id]:
+                self._plot_breakdown_label(location)
 
-        global_frontiers = get_frontier_in_map(self.env.belief_info)
-        if len(global_frontiers) != 0:
-            frontiers_cell = get_cell_position_from_coords(np.array(list(global_frontiers)), self.env.belief_info)
-            if len(global_frontiers) == 1:
-                frontiers_cell = frontiers_cell.reshape(1,2)
-            plt.scatter(frontiers_cell[:, 0], frontiers_cell[:, 1], s=1, c='r')
+        summary_ax = fig.add_subplot(gs[0, 3])
+        summary_ax.axis('off')
+        summary_ax.set_xlim(0, 1)
+        summary_ax.set_ylim(0, 1)
+        summary_ax.add_patch(Rectangle((0.01, 0.01), 0.98, 0.98, facecolor='#f7f5ef', edgecolor='#c8c2b5', linewidth=1.4))
+        summary_ax.text(0.08, 0.96, 'Legend & Stats', fontsize=11.5, fontweight='bold', color='#2b2b2b', va='top')
 
-        # Top row - Panel 2: FOV & Detections view
-        plt.subplot(3, n_cols, 2)
-        plt.imshow(self.env.robot_belief, cmap='gray')
-        plt.axis('off')
-        plt.xlim(xlim[0], xlim[1])
-        plt.ylim(ylim[0], ylim[1])
-        plt.title('FOV & Detections', fontsize=10, fontweight='bold')
+        legend_rows = [
+            [('Occupied', '#101010'), ('Unknown', '#7f7f7f')],
+            [('Free', '#f5f5f5'), ('Utility Node', 'orange')],
+            [('Frontier', 'red'), ('Broken', 'black')],
+        ]
+        for row_y, row_items in zip([0.84, 0.77, 0.70], legend_rows):
+            for col_x, item in zip([0.08, 0.53], row_items):
+                label, facecolor = item
+                summary_ax.add_patch(Rectangle((col_x, row_y - 0.020), 0.055, 0.034, facecolor=facecolor, edgecolor='#333333', linewidth=0.8))
+                summary_ax.text(col_x + 0.09, row_y - 0.003, label, fontsize=9.0, fontweight='bold', color='#2b2b2b', va='center')
 
-        for i, (robot, location, heading) in enumerate(zip(self.robot_list, robot_locations, robot_headings)):
-            plot_id = robot.id % len(color_list)
-            c = color_list[plot_id]
-            dx, dy = self.heading_to_vector(heading, length=sensing_range)
-            arrow = FancyArrowPatch((location[0], location[1]), (location[0] + dx/1.25, location[1] + dy/1.25),
-                                    mutation_scale=10, color=c, arrowstyle='-|>')
-            plt.gca().add_artist(arrow)
-            cone = Wedge(center=(location[0], location[1]), r=self.sensor_range / CELL_SIZE,
-                        theta1=(heading-self.fov/2), theta2=(heading+self.fov/2), color=c, alpha=0.3, zorder=10)
-            plt.gca().add_artist(cone)
+        agent_explored_rates = self._get_agent_explored_rates()
+        avg_agent_explored_rate = float(np.mean(agent_explored_rates))
+        active_agent_ids = self._active_agent_ids_for_merged_map()
+        broken_ids = [int(agent_id) for agent_id in np.where(self.broken_agents)[0]]
 
-        # Draw detection connections
-        for detector_id, detected_list in fov_detections.items():
-            for detected_id in detected_list:
-                detector_loc = robot_locations[detector_id]
-                detected_loc = robot_locations[detected_id]
-                plt.plot([detector_loc[0], detected_loc[0]], [detector_loc[1], detected_loc[1]],
-                         'w--', linewidth=1.5, alpha=0.6, zorder=11)
+        summary_ax.plot([0.08, 0.92], [0.61, 0.61], color='#d8d2c7', linewidth=1.0)
+        summary_ax.text(0.08, 0.58, 'Episode', fontsize=10, fontweight='bold', color='#2b2b2b', va='top')
+        rows = [
+            ('Merged explored', f'{self.env.explored_rate:.1%}'),
+            ('Avg agent explored', f'{avg_agent_explored_rate:.1%}'),
+            ('Max travel dist', f'{max([robot.travel_dist for robot in self.robot_list]):.1f}'),
+            ('Merged uses agents', ','.join(map(str, active_agent_ids)) if active_agent_ids else 'none'),
+            ('Broken agents', ','.join(map(str, broken_ids)) if broken_ids else 'none'),
+        ]
+        row_y = 0.50
+        for label_text, value_text in rows:
+            summary_ax.text(0.08, row_y, label_text, fontsize=8.7, fontweight='bold', color='#4a4a4a', va='center')
+            summary_ax.text(0.86, row_y, value_text, fontsize=8.9, fontweight='bold', color='#2b2b2b', va='center', ha='right')
+            row_y -= 0.07
 
-        if len(global_frontiers) != 0:
-            plt.scatter(frontiers_cell[:, 0], frontiers_cell[:, 1], s=3, c='r')
+        summary_ax.plot([0.08, 0.92], [0.14, 0.14], color='#d8d2c7', linewidth=1.0)
+        summary_ax.text(0.08, 0.10, 'Breakdown map removal', fontsize=8.8, fontweight='bold', color='#2b2b2b', va='center')
+        removal_text = 'merged map excludes broken beliefs' if broken_ids else 'no broken agents yet'
+        summary_ax.text(0.92, 0.04, removal_text, fontsize=8.0, fontweight='bold', color='#2b2b2b', va='center', ha='right')
 
-        # Middle row: Each agent's INDIVIDUAL partially observed map (full view)
-        for robot in self.robot_list:
-            plt.subplot(3, n_cols, n_cols + robot.id + 1)
-            plot_id = robot.id % len(color_list)
-            c = color_list[plot_id]
+        for robot, agent_explored_rate, agent_map_info, plot_node_data in zip(
+            self.robot_list,
+            agent_explored_rates,
+            agent_map_infos,
+            agent_node_data,
+        ):
+            agent_ax = fig.add_subplot(gs[1, robot.id])
+            color_idx = robot.id % len(color_list)
+            c = color_list[color_idx]
+            agent_map = agent_map_info.map
+            agent_ax.imshow(agent_map, cmap='gray', interpolation='nearest', vmin=OCCUPIED, vmax=FREE)
+            agent_ax.axis('off')
+            agent_ax.set_xlim(xlim[0], xlim[1])
+            agent_ax.set_ylim(ylim[0], ylim[1])
 
-            # Get this agent's individual observation map (NOT the merged map)
-            agent_map = self.individual_maps[robot.id].copy()
-
-            plt.imshow(agent_map, cmap='gray')
-            plt.axis('off')
-
-            # Draw this agent's trajectory
-            robot_location = get_coords_from_cell_position(robot_locations[robot.id], self.env.belief_info)
+            robot_location = get_coords_from_cell_position(plot_robot_locations[robot.id], self.env.belief_info)
             trajectory_x = robot.trajectory_x.copy()
             trajectory_y = robot.trajectory_y.copy()
             trajectory_x.append(robot_location[0])
             trajectory_y.append(robot_location[1])
-            plt.plot((np.array(trajectory_x) - self.env.belief_info.map_origin_x) / CELL_SIZE,
-                     (np.array(trajectory_y) - self.env.belief_info.map_origin_y) / CELL_SIZE, c,
-                     linewidth=2, alpha=0.9, zorder=2)
+            agent_ax.plot(
+                (np.array(trajectory_x) - self.env.belief_info.map_origin_x) / CELL_SIZE,
+                (np.array(trajectory_y) - self.env.belief_info.map_origin_y) / CELL_SIZE,
+                c,
+                linewidth=1.5,
+                alpha=0.9,
+                zorder=2,
+            )
 
-            # Draw current position and heading
-            location = robot_locations[robot.id]
+            plot_node_coords, plot_node_utility = plot_node_data
+            self._draw_test_nodes(agent_ax, plot_node_coords, plot_node_utility, agent_map_info, c)
+            self._draw_frontiers(agent_ax, agent_map_info, size=2)
+
+            location = plot_robot_locations[robot.id]
             heading = robot_headings[robot.id]
-            dx, dy = self.heading_to_vector(heading, length=sensing_range)
-            arrow = FancyArrowPatch((location[0], location[1]), (location[0] + dx/1.25, location[1] + dy/1.25),
-                                    mutation_scale=10, color=c, arrowstyle='-|>', linewidth=2)
-            plt.gca().add_artist(arrow)
+            self._draw_training_style_robot_overlay(agent_ax, location, heading, c, sensing_range)
+            if self.broken_agents[robot.id]:
+                self._plot_breakdown_label(location)
 
-            # Draw FOV cone
-            cone = Wedge(center=(location[0], location[1]), r=self.sensor_range / CELL_SIZE,
-                        theta1=(heading - self.fov/2), theta2=(heading + self.fov/2),
-                        color=c, alpha=0.3, zorder=10)
-            plt.gca().add_artist(cone)
-
-            # Draw frontiers from this agent's individual map
-            agent_map_info = MapInfo(agent_map, self.env.belief_info.map_origin_x,
-                                     self.env.belief_info.map_origin_y, CELL_SIZE)
-            agent_frontiers_set = get_frontier_in_map(agent_map_info)
-            if len(agent_frontiers_set) > 0:
-                agent_frontiers = get_cell_position_from_coords(
-                    np.array(list(agent_frontiers_set)), agent_map_info)
-                if len(agent_frontiers_set) == 1:
-                    agent_frontiers = agent_frontiers.reshape(1, 2)
-                plt.scatter(agent_frontiers[:, 0], agent_frontiers[:, 1], s=3, c='r', zorder=8)
-
-            # Calculate explored percentage for this agent
-            total_free = np.sum(self.env.ground_truth == FREE)
-            agent_explored = np.sum(agent_map == FREE)
-            agent_explored_rate = agent_explored / total_free if total_free > 0 else 0
-
-            plt.title(f'{color_name[plot_id]} Agent Map\nExplored: {agent_explored_rate:.1%}',
-                     fontsize=9, fontweight='bold', color=c)
-
-        # Bottom row: Individual agent local views (zoomed)
-        local_map_size = int(UPDATING_MAP_SIZE / CELL_SIZE)
-
-        for robot in self.robot_list:
-            plt.subplot(3, n_cols, 2 * n_cols + robot.id + 1)
-            plot_id = robot.id % len(color_list)
-            c = color_list[plot_id]
-
-            # Use agent's individual observation map for local view
-            agent_map = self.individual_maps[robot.id]
-            center_cell = robot_locations[robot.id]
-            half_size = local_map_size // 2
-
-            row_start = max(0, int(center_cell[1] - half_size))
-            row_end = min(agent_map.shape[0], int(center_cell[1] + half_size))
-            col_start = max(0, int(center_cell[0] - half_size))
-            col_end = min(agent_map.shape[1], int(center_cell[0] + half_size))
-
-            local_map = agent_map[row_start:row_end, col_start:col_end]
-            plt.imshow(local_map, cmap='gray')
-            plt.axis('off')
-
-            # Calculate robot position in local map coordinates
-            robot_local_x = center_cell[0] - col_start
-            robot_local_y = center_cell[1] - row_start
-
-            # Draw robot position and heading
-            dx, dy = self.heading_to_vector(robot_headings[robot.id], length=sensing_range)
-            arrow = FancyArrowPatch(
-                (robot_local_x, robot_local_y),
-                (robot_local_x + dx/1.25, robot_local_y + dy/1.25),
-                mutation_scale=10, color=c, arrowstyle='-|>', linewidth=2
+            num_nodes = 0 if plot_node_coords is None else len(plot_node_coords)
+            title_suffix = '  BROKEN' if self.broken_agents[robot.id] else ''
+            agent_ax.set_title(
+                f'{color_name[color_idx]} Belief{title_suffix}\nExplored: {agent_explored_rate:.1%}  Nodes: {num_nodes}',
+                fontsize=9,
+                fontweight='bold',
+                color=c,
             )
-            plt.gca().add_artist(arrow)
 
-            # Draw FOV cone
-            cone = Wedge(
-                center=(robot_local_x, robot_local_y),
-                r=self.sensor_range / CELL_SIZE,
-                theta1=(robot_headings[robot.id] - self.fov/2),
-                theta2=(robot_headings[robot.id] + self.fov/2),
-                color=c, alpha=0.3, zorder=10
+            initial_budget = max(float(self.initial_budgets[robot.id]), 1.0)
+            remaining = float(max(self.remaining_budgets[robot.id], 0.0))
+            fraction_remaining = remaining / initial_budget
+            bar_color = '#2ecc71' if fraction_remaining > 0.5 else '#f39c12' if fraction_remaining > 0.25 else '#e74c3c'
+            agent_ax.add_patch(Rectangle((0.0, 0.955), 1.0, 0.04, transform=agent_ax.transAxes, color='#d0d0d0', clip_on=True, zorder=15))
+            agent_ax.add_patch(Rectangle((0.0, 0.955), fraction_remaining, 0.04, transform=agent_ax.transAxes, color=bar_color, clip_on=True, zorder=16))
+            mode_text = ' | broken' if self.broken_agents[robot.id] else ' | return' if self.returning_agents[robot.id] else ''
+            agent_ax.text(
+                0.5,
+                0.975,
+                f'{remaining:.1f}/{initial_budget:.1f} m{mode_text}',
+                transform=agent_ax.transAxes,
+                fontsize=6.5,
+                ha='center',
+                va='center',
+                fontweight='bold',
+                color='#1a1a1a',
+                clip_on=True,
+                zorder=17,
             )
-            plt.gca().add_artist(cone)
 
-            # Draw other robots if they are in this local view
-            for other_robot in self.robot_list:
-                if other_robot.id == robot.id:
-                    continue
+        for empty_col in range(self.n_agents, n_cols):
+            empty_ax = fig.add_subplot(gs[1, empty_col])
+            empty_ax.axis('off')
 
-                other_location = robot_locations[other_robot.id]
-                other_local_x = other_location[0] - col_start
-                other_local_y = other_location[1] - row_start
-
-                if 0 <= other_local_x < local_map.shape[1] and 0 <= other_local_y < local_map.shape[0]:
-                    other_plot_id = other_robot.id % len(color_list)
-                    other_c = color_list[other_plot_id]
-                    is_detected = other_robot.id in fov_detections.get(robot.id, [])
-
-                    if is_detected:
-                        plt.plot(other_local_x, other_local_y, 'o', color=other_c, markersize=10,
-                                markeredgewidth=3, markeredgecolor='yellow', zorder=15)
-                        plt.plot([robot_local_x, other_local_x], [robot_local_y, other_local_y],
-                                'y--', linewidth=2, alpha=0.8, zorder=12)
-                    else:
-                        plt.plot(other_local_x, other_local_y, 'o', color=other_c, markersize=6, alpha=0.5, zorder=5)
-
-            # Draw local frontiers from agent's individual map
-            agent_map_info = MapInfo(agent_map, self.env.belief_info.map_origin_x,
-                                     self.env.belief_info.map_origin_y, CELL_SIZE)
-            agent_frontiers_set = get_frontier_in_map(agent_map_info)
-            if len(agent_frontiers_set) > 0:
-                local_frontiers = []
-                for frontier_coords in agent_frontiers_set:
-                    frontier_cell = get_cell_position_from_coords(np.array(frontier_coords), agent_map_info)
-                    frontier_local_x = frontier_cell[0] - col_start
-                    frontier_local_y = frontier_cell[1] - row_start
-                    if 0 <= frontier_local_x < local_map.shape[1] and 0 <= frontier_local_y < local_map.shape[0]:
-                        local_frontiers.append([frontier_local_x, frontier_local_y])
-
-                if local_frontiers:
-                    local_frontiers = np.array(local_frontiers)
-                    plt.scatter(local_frontiers[:, 0], local_frontiers[:, 1], s=2, c='r', zorder=8)
-
-            detected_names = [color_name[did % len(color_list)] for did in fov_detections.get(robot.id, [])]
-            detected_text = f"Sees: {', '.join(detected_names)}" if detected_names else "No detections"
-            plt.title(f'{color_name[plot_id]} Local View\n{detected_text}', fontsize=9, fontweight='bold', color=c)
-
-        # Build detection summary
-        detection_summary = []
-        for robot_id, detected_list in fov_detections.items():
-            if len(detected_list) > 0:
-                detected_colors = [color_name[did % len(color_list)] for did in detected_list]
-                detection_summary.append(f"{color_name[robot_id % len(color_list)]}: {', '.join(detected_colors)}")
-
-        detection_text = ' | '.join(detection_summary) if detection_summary else 'No detections'
-
-        robot_headings_text = [f"{color_name[robot.id % len(color_list)]}: {robot.heading:.0f}°" for robot in self.robot_list]
-        plt.suptitle('Explored: {:.4g}  Distance: {:.4g}\nHeadings: {}\nFOV Detections: {}'.format(
-            self.env.explored_rate,
-            max([robot.travel_dist for robot in self.robot_list]),
-            ', '.join(robot_headings_text),
-            detection_text
-        ), fontweight='bold', fontsize=10, y=0.99)
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
-        plt.savefig('{}/{}_{}_{}_{}_{}_samples.png'.format(gifs_path, self.global_step, step, self.n_agents, self.fov, self.sensor_range), dpi=150)
-        plt.close()
+        robot_headings_str = [f"{color_name[robot.id % len(color_name)]} {robot.heading:.0f} deg" for robot in self.robot_list]
+        fig.suptitle(
+            'Experiment ID: {}\nRobot headings: {}'.format(LOAD_FOLDER_NAME, ', '.join(robot_headings_str)),
+            fontweight='bold',
+            fontsize=11,
+        )
         frame = '{}/{}_{}_{}_{}_{}_samples.png'.format(gifs_path, self.global_step, step, self.n_agents, self.fov, self.sensor_range)
+        plt.savefig(frame, dpi=150, bbox_inches='tight', pad_inches=0.05)
+        plt.close(fig)
+        gc.collect()
         self.env.frame_files.append(frame)
 
     def correct_heading(self, heading):
